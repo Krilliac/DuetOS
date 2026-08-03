@@ -432,7 +432,7 @@ void CmdAffinity(u32 argc, char** argv)
         ConsoleWrite("  CPUS ONLINE: 0..");
         WriteU64Dec(duetos::arch::SmpCpusOnline() - 1);
         ConsoleWriteln("");
-        ConsoleWriteln("  NOTE: routing HINT for the task's next wake, not a hard pin");
+        ConsoleWriteln("  NOTE: hard CPU pin; enforced on wake, steal, balance, and dispatch");
         return;
     }
     u64 tid = 0;
@@ -467,7 +467,7 @@ void CmdAffinity(u32 argc, char** argv)
     }
     ConsoleWrite("AFFINITY: TID ");
     WriteU64Dec(tid);
-    ConsoleWrite(" NEXT WAKE HINTED TO CPU ");
+    ConsoleWrite(" HARD-PINNED TO CPU ");
     WriteU64Dec(cpu);
     ConsoleWriteln("");
 }

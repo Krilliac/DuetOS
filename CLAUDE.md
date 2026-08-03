@@ -104,10 +104,15 @@ tools/parallel/release.sh <sub>                   # Push your session branch whe
 tools/parallel/release.sh <sub> --merge           # ...and merge to main (explicit opt-in)
 ```
 
-`claim.sh` rebases on `origin/main`, warns on already-claimed files, and keeps
-you on your `claude/*` session branch. `release.sh` pushes with
-`--force-with-lease`; `--merge` is the explicit opt-in DuetOS requires before
-touching `main` (CI must be green first). Do not hand-edit `PARALLEL_WORK.md`.
+The helpers serialize coordinator mutations with a Git-common-directory lock
+and fail closed on malformed entries, overlapping scopes, remote divergence,
+commit failure, or push failure. They never auto-rebase a dirty integration
+tree and never force-push: each mutation is a signed coordinator-only commit,
+published with a normal push, then verified against the exact remote head.
+`--merge` additionally requires a completely clean worktree plus current,
+fast-forward-only `main`; the flag is the explicit opt-in DuetOS requires
+before touching `main` (CI must be green first). Do not hand-edit
+`PARALLEL_WORK.md`.
 
 ## Anti-Bloat Guidelines
 
@@ -166,7 +171,7 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 This tree is **aspirational** — the directories will appear as the work does. Do not create a directory until the first file legitimately belongs in it.
 
 ```
-boot/                     — UEFI loader (x86_64), legacy BIOS stub (later), boot protocol
+boot/                     — supported GRUB/Multiboot2 release path + experimental direct UEFI loader
 kernel/
   acpi/                   — ACPI tables (RSDP, MADT, FADT) + AML parser
   apps/                   — In-kernel native apps (calculator, clock, gfxdemo, …)
@@ -238,7 +243,13 @@ wiki/                     — Canonical documentation home (subsystem pages, spe
 
 ### Boot path (x86_64)
 
-UEFI firmware → `boot/uefi/BOOTX64.EFI` (PE32+) → loads kernel as ELF with a thin stub → kernel entry in long mode → per-CPU bringup → init process.
+Supported release path: BIOS or UEFI firmware → hybrid ISO → GRUB → Multiboot2 handoff → kernel entry → per-CPU bringup → init process.
+
+`boot/uefi/BOOTX64.EFI` is an **experimental** direct loader, not the supported
+or production boot path. It currently proves the PE32+ toolchain and validates
+the kernel ELF header, then halts. Do not advertise it as complete until it
+loads ELF segments, calls `ExitBootServices`, supplies a versioned `BootInfo`,
+hands off to the kernel, and passes required CI.
 
 ### Kernel execution order at boot
 
@@ -289,7 +300,9 @@ will parse it as C++ and mangle it. Assembly stays hand-formatted.
 
 ## Git Sync Workflow
 
-Run this before every session start and before every commit/push. The default upstream branch is `main`.
+Use this for a manual implementation integration from a clean worktree. The
+parallel coordinator helpers follow their stricter current-session-branch
+ancestry contract above; do not wrap them in an automatic rebase.
 
 ```bash
 git fetch origin main

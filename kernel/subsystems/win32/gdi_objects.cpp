@@ -207,21 +207,45 @@ GdiFont* GdiLookupFont(u64 h)
     return &g_fonts[idx];
 }
 
-WindowDcState* GdiWindowDcState(u32 window_handle)
+WindowDcState* GdiWindowDcState(u32 public_hwnd)
 {
-    if (window_handle >= kMaxWindowDcSlots)
+    using namespace duetos::drivers::video;
+    static_assert(kMaxWindowDcSlots == kMaxWindows);
+
+    if (public_hwnd == 0 || (public_hwnd & ~kWindowHandleAllowedMask) != 0)
         return nullptr;
-    window_handle = util::MaskedIndex32(window_handle, kMaxWindowDcSlots);
-    WindowDcState* s = &g_win_dcs[window_handle];
-    if (!s->init)
+    const u32 biased_slot = public_hwnd & kWindowHandleSlotMask;
+    const u32 generation = (public_hwnd >> kWindowHandleGenerationShift) & kWindowHandleGenerationMask;
+    if (biased_slot == 0 || biased_slot > kMaxWindowDcSlots || generation == 0)
+        return nullptr;
+
+    // This side table is not an alternate resolver. Validate the exact live
+    // generation and its process owner before exposing mutable DC state; a
+    // stale or foreign HWND must not pre-seed the slot a future owner will use.
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+        return nullptr;
+    CompositorLock();
+    const u32 resolved = HwndToCompositorHandleForCaller(public_hwnd, proc->pid);
+    CompositorUnlock();
+    if (resolved == kWindowInvalid || resolved + 1u != biased_slot)
+        return nullptr;
+
+    u32 slot = biased_slot - 1u;
+    slot = util::MaskedIndex32(slot, kMaxWindowDcSlots);
+    WindowDcState* s = &g_win_dcs[slot];
+    if (!s->init || s->hwnd_identity != public_hwnd)
     {
+        *s = {};
         s->init = true;
+        s->hwnd_identity = public_hwnd;
         s->text_color_set = false;
         s->text_color = 0x00000000;
         s->bk_color = 0x00FFFFFF;
         s->bk_mode = kBkModeOpaque;
         s->selected_pen = 0;
         s->selected_brush = 0;
+        s->selected_font = 0;
         s->cur_x = 0;
         s->cur_y = 0;
     }

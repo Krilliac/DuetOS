@@ -35,7 +35,7 @@ i64 DoExitGroup(u64 status)
     SerialWriteHex(status);
     SerialWrite("\n");
     // Stash the exit code on the Process so the eventual
-    // ProcessRelease teardown can pass it to a waiting parent.
+    // last-task runtime teardown can pass it to a waiting parent.
     // Linux encodes the 8-bit status in bits 8..15 of wstatus when
     // WIFEXITED is true; we keep the raw status here and let
     // wait4 do the encoding.
@@ -45,15 +45,13 @@ i64 DoExitGroup(u64 status)
         p->linux_was_signaled = false;
         p->linux_exit_signal = 0;
     }
-    // Wake every pidfd poller before SchedExit transitions us
-    // into TaskState::Dead. The waiter's predicate
-    // (LinuxFdEpollReady on a state-12 fd) will see
-    // SchedIsPidZombie === true on this exact wakeup, so the
-    // first scheduled poll completes with EPOLLIN instead of
-    // sleeping again.
+    // Prompt pidfd pollers before publishing the deferred exit request. The
+    // reaper issues the authoritative second wake after publishing Exited, so
+    // an SMP poller that rechecks early cannot remain asleep.
     LinuxPidfdExitWake();
-    sched::SchedExit();
-    // sched::SchedExit is [[noreturn]]; this line is unreachable.
+    sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit, static_cast<u32>(status & 0xFF));
+    // Return through the Linux dispatcher so handler-local and dispatcher
+    // guards unwind before the outer cancellation boundary terminates us.
     return 0;
 }
 
@@ -98,32 +96,28 @@ i64 DoSchedYield()
     return 0;
 }
 
-// Linux: tgkill(tgid, tid, sig). Used by musl's abort() to send
-// SIGABRT to itself. v0 has no signal delivery — if the target
-// is self, just exit with an abort-ish status; any other tid
-// returns -ESRCH.
 // Linux: tgkill(tgid, tid, sig). v0 collapses to the per-process
 // signal-delivery model — tid identifies the task whose owning
-// Process is the delivery target. tgid is accepted but only
-// validated at the per-task lookup; mismatches surface as -ESRCH.
+// Process is the delivery target. The retained TID lookup and TGID
+// validation prevent a task lookup/reap race and reject a thread-group
+// mismatch with -ESRCH.
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 {
     KLOG_INFO_2V("linux/proc", "DoTgkill", "tid", tid, "sig", sig);
-    core::Process* target = sched::SchedFindProcessByTidRetained(tid);
-    if (target == nullptr || target->pid != tgid)
+    core::ScopedProcessRef target(sched::SchedFindProcessByTidRetained(tid));
+    if (!target || target->pid != tgid)
     {
-        core::ProcessRelease(target);
         KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (tid not found)", tid);
         return kESRCH;
     }
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    if (!target_runtime)
+        return kESRCH;
     if (sig == 0)
-    {
-        core::ProcessRelease(target);
         return 0;
-    }
-    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
-    core::ProcessRelease(target);
-    return rc;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
+    return LinuxSignalDeliver(target.Get(), static_cast<u32>(sig));
 }
 
 // Linux: kill(pid, sig). pid > 0 → deliver to the matching process.
@@ -141,9 +135,13 @@ i64 DoKill(u64 pid, u64 sig)
             return 0;
         return sched::SchedProcessExists(static_cast<u64>(spid)) ? 0 : kESRCH;
     }
+    core::ScopedProcessRef retained_target;
     core::Process* target = nullptr;
     if (spid > 0)
-        target = sched::SchedFindProcessByPidRetained(static_cast<u64>(spid));
+    {
+        retained_target.Reset(sched::SchedFindProcessByPidRetained(static_cast<u64>(spid)));
+        target = retained_target.Get();
+    }
     else if (spid == 0)
         target = core::CurrentProcess();
     else
@@ -156,10 +154,12 @@ i64 DoKill(u64 pid, u64 sig)
         KLOG_WARN_V("linux/proc", "DoKill: ESRCH (target not found)", pid);
         return kESRCH;
     }
-    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
-    if (spid > 0)
-        core::ProcessRelease(target);
-    return rc;
+    core::ScopedProcessRuntimeAccess target_runtime(target);
+    if (!target_runtime)
+        return kESRCH;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
+    return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 
 // Linux: getppid / getpgid / getsid / setpgid. v0 has a flat
@@ -244,13 +244,22 @@ i64 DoSetsid()
 // documented sub-GAP.
 // =============================================================
 
-// tkill(tid, sig) — single-thread variant of tgkill. Modern
-// Linux kernels treat it as tgkill(getpid(), tid, sig). Our
-// DoTgkill ignores tgid for the purpose of tid -> Process::pid
-// lookup, so passing 0 is harmless.
+// tkill(tid, sig) — legacy per-TID delivery without tgkill's caller-supplied
+// thread-group check. Keep its retained lookup and runtime admission explicit:
+// forwarding a synthetic tgid=0 would reject every ordinary process.
 i64 DoTkill(u64 tid, u64 sig)
 {
-    return DoTgkill(0, tid, sig);
+    core::ScopedProcessRef target(sched::SchedFindProcessByTidRetained(tid));
+    if (!target)
+        return kESRCH;
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    if (!target_runtime)
+        return kESRCH;
+    if (sig == 0)
+        return 0;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
+    return LinuxSignalDeliver(target.Get(), static_cast<u32>(sig));
 }
 
 // rt_tgsigqueueinfo(tgid, tid, sig, info) — tgkill that also
@@ -263,12 +272,12 @@ i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info)
 }
 
 // rt_sigqueueinfo(tgid, sig, info) — process-wide sibling of
-// rt_tgsigqueueinfo. v0 treats tid==tgid since the process
-// model is single-threaded.
+// rt_tgsigqueueinfo. A Process PID is not a scheduler Task TID, so
+// route through the retained PID lookup in kill rather than tgkill.
 i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info)
 {
     (void)user_info;
-    return DoTgkill(tgid, tgid, sig);
+    return DoKill(tgid, sig);
 }
 
 // sched_setattr / sched_getattr — extended scheduler policy

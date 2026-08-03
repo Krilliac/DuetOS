@@ -34,19 +34,14 @@ constexpr u64 kWaitObject0 = 0;
 constexpr u64 kWaitTimeout = 0x102;
 constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
 
-// Map a Win32 event handle to a kobj_handles slot id, or
-// `ipc::kHandleInvalid` if the value is out of range. The
-// translation is a flat subtraction of the per-type base so a
-// PE that DuplicateHandle'd from another DuetOS process sees the
-// same opaque value.
+// Validate and decode the generation-preserving Win32 type tag.
+// The internal token still carries both slot and generation.
 ipc::Handle Win32HandleToIpc(u64 handle)
 {
-    if (handle < core::Process::kWin32EventBase ||
-        handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
-    {
-        return ipc::kHandleInvalid;
-    }
-    return static_cast<ipc::Handle>(handle - core::Process::kWin32EventBase);
+    ipc::Handle decoded = ipc::kHandleInvalid;
+    return ipc::HandleDecodeTagged(handle, static_cast<u32>(core::Process::kWin32EventBase), &decoded)
+               ? decoded
+               : ipc::kHandleInvalid;
 }
 } // namespace
 
@@ -74,7 +69,8 @@ void DoEventCreate(arch::TrapFrame* frame)
     }
     ipc::KEvent* e = create_r.value();
 
-    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &e->base);
+    const u64 rights = ipc::HandleRightsForProcess(ipc::KObjectType::Event, core::ProcessCapsSnapshot(proc));
+    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &e->base, rights);
     if (!insert_r.has_value())
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "create: kobj_handles full in pid", proc->pid);
@@ -84,7 +80,13 @@ void DoEventCreate(arch::TrapFrame* frame)
         return;
     }
     const ipc::Handle ipc_h = insert_r.value();
-    const u64 handle = core::Process::kWin32EventBase + ipc_h;
+    u64 handle = 0;
+    if (!ipc::HandleEncodeTagged(ipc_h, static_cast<u32>(core::Process::kWin32EventBase), &handle))
+    {
+        (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
     KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/event", "NtCreateEvent OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_EVENT_CREATE), frame->rip);
     frame->rax = handle;
@@ -109,14 +111,8 @@ void DoEventSet(arch::TrapFrame* frame)
         return;
     }
     // Per-handle rights gate — SetEvent is signalling.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtSetEvent: handle lacks Signal right; handle",
-                     handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event, ipc::kHandleRightSignal);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtSetEvent: bad/closed event handle; handle",
@@ -149,14 +145,8 @@ void DoEventReset(arch::TrapFrame* frame)
     }
     // Per-handle rights gate — ResetEvent is signalling (mutates
     // observable event state).
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: handle lacks Signal right; handle",
-                     handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event, ipc::kHandleRightSignal);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: bad/closed event handle; handle",
@@ -191,14 +181,8 @@ void DoEventWait(arch::TrapFrame* frame)
         return;
     }
     // Per-handle rights gate — WaitForSingleObject is waiting.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
-                     "NtWaitForSingleObject(event): handle lacks Wait right; handle", handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event, ipc::kHandleRightWait);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
@@ -209,17 +193,36 @@ void DoEventWait(arch::TrapFrame* frame)
     auto* e = reinterpret_cast<ipc::KEvent*>(obj);
 
     const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+    ipc::KEventWaitResult wait_result;
     if (timeout_ms == kInfiniteMs)
     {
-        ipc::KEventWait(e);
-        ipc::KObjectRelease(obj);
-        frame->rax = kWaitObject0;
-        return;
+        wait_result = ipc::KEventWait(e);
     }
-    const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
-    const bool got = ipc::KEventWaitTimed(e, ticks);
+    else
+    {
+        const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+        wait_result = ipc::KEventWaitTimed(e, ticks);
+    }
     ipc::KObjectRelease(obj);
-    frame->rax = got ? kWaitObject0 : kWaitTimeout;
+    if (wait_result == ipc::KEventWaitResult::Signaled)
+    {
+        frame->rax = kWaitObject0;
+    }
+    else if (wait_result == ipc::KEventWaitResult::TimedOut)
+    {
+        frame->rax = kWaitTimeout;
+    }
+    else if (wait_result == ipc::KEventWaitResult::Cancelled)
+    {
+        // Cancelled returns only so this handler can drop its lookup
+        // reference. The outer dispatcher cancellation boundary exits the
+        // task before ring 3 can observe this internal unwind sentinel.
+        frame->rax = static_cast<u64>(-1);
+    }
+    else
+    {
+        frame->rax = static_cast<u64>(-1);
+    }
 }
 
 } // namespace duetos::subsystems::win32

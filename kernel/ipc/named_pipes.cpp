@@ -4,10 +4,10 @@
  * See named_pipes.h for the API contract + lifetime model.
  *
  * The registry maps name → pool_idx; the pipe pool owns the data
- * ring + the read/write refcounts. The registry is the only thing
- * that knows whether a client has connected yet, which the server-
- * close path needs in order to release the unused opposite-end
- * reservation cleanly.
+ * ring + the read/write refcounts. PipeAlloc's opposite-end reference is
+ * owned by the registry until exact server close. Every client takes a fresh
+ * reference of its own, so registry teardown releases its reference whether
+ * or not a client connected.
  */
 
 #include "ipc/named_pipes.h"
@@ -28,7 +28,6 @@ struct NamedPipeEntry
 {
     bool in_use;
     bool server_is_writer; // true = PIPE_ACCESS_OUTBOUND, false = PIPE_ACCESS_INBOUND
-    bool client_connected; // false until NamedPipeConnectClient succeeds
     char name[kNamedPipeMaxNameLen];
     u32 pool_idx;
     // Bumped on every claim of this slot. The only identity the
@@ -78,7 +77,9 @@ i32 FindFreeSlot()
 {
     for (u32 i = 0; i < kNamedPipeSlots; ++i)
     {
-        if (!g_table[i].in_use)
+        // Generation zero is invalid and wrap is never permitted: once a slot
+        // has issued UINT32_MAX it retires instead of replaying an old token.
+        if (!g_table[i].in_use && g_table[i].generation != ~0U)
             return static_cast<i32>(i);
     }
     return -1;
@@ -122,12 +123,10 @@ i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_write
     NamedPipeEntry& e = g_table[slot];
     e.in_use = true;
     e.server_is_writer = server_is_writer;
-    e.client_connected = false;
     e.pool_idx = pool_idx;
-    // Bump before publishing so every registration this slot has
-    // ever held owns a distinct generation. Wrapping needs 2^32
-    // claims of ONE slot AND a surviving copy of the pair from
-    // exactly 2^32 registrations ago.
+    // Bump before publishing so every registration this slot has ever held
+    // owns a distinct non-zero generation. FindFreeSlot permanently retires a
+    // saturated row; ABA identity is never allowed to wrap.
     e.generation += 1;
     StoreName(e, name);
     *out_generation = e.generation;
@@ -148,28 +147,22 @@ bool NamedPipeConnectClient(const char* name, u32* out_pool_idx, bool* out_serve
         return false;
     }
     NamedPipeEntry& e = g_table[slot];
-    *out_pool_idx = e.pool_idx;
-    *out_server_is_writer = e.server_is_writer;
-    e.client_connected = true;
-    ::duetos::sync::SpinLockRelease(g_table_lock, flags);
-    return true;
-}
-
-bool NamedPipeUnconnectClient(const char* name)
-{
-    if (name == nullptr || name[0] == '\0')
-        return false;
-
-    auto flags = ::duetos::sync::SpinLockAcquire(g_table_lock);
-    const i32 slot = FindByName(name);
-    if (slot < 0)
+    const u32 pool_idx = e.pool_idx;
+    const bool server_is_writer = e.server_is_writer;
+    // Exact server close must remove this same entry under g_table_lock before
+    // releasing the registry-owned opposite end. Take the client's distinct
+    // retain before exposing the pool index, closing the lookup -> close ->
+    // pool-recycle race without transferring registry ownership.
+    const bool client_is_writer = !server_is_writer;
+    const bool retained = client_is_writer ? ::duetos::subsystems::linux::internal::PipeRetainWrite(pool_idx)
+                                           : ::duetos::subsystems::linux::internal::PipeRetainRead(pool_idx);
+    if (retained)
     {
-        ::duetos::sync::SpinLockRelease(g_table_lock, flags);
-        return false;
+        *out_pool_idx = pool_idx;
+        *out_server_is_writer = server_is_writer;
     }
-    g_table[slot].client_connected = false;
     ::duetos::sync::SpinLockRelease(g_table_lock, flags);
-    return true;
+    return retained;
 }
 
 void NamedPipeOnServerClose(i32 slot, u32 generation)
@@ -198,27 +191,21 @@ void NamedPipeOnServerClose(i32 slot, u32 generation)
         return;
     }
     const u32 pool_idx = e.pool_idx;
-    const bool needs_orphan_release = !e.client_connected;
     const bool server_is_writer = e.server_is_writer;
     // Clear under the lock so a concurrent client lookup misses.
     e.in_use = false;
-    e.client_connected = false;
     e.pool_idx = 0;
     e.name[0] = '\0';
     ::duetos::sync::SpinLockRelease(g_table_lock, flags);
 
-    // Outside the lock: drop the orphaned opposite-end reservation
-    // if no client ever connected. Without this, the pipe pool slot
-    // stays pinned at refs=(0,1) (or (1,0)) and the 4 KiB buffer
-    // leaks. With a connected client, that side now holds its own
-    // ref via the client's Win32FileHandle — leave it alone.
-    if (needs_orphan_release)
-    {
-        if (server_is_writer)
-            ::duetos::subsystems::linux::internal::PipeReleaseRead(pool_idx);
-        else
-            ::duetos::subsystems::linux::internal::PipeReleaseWrite(pool_idx);
-    }
+    // Outside the lock: always release the registry-owned opposite-end
+    // reference seeded by PipeAlloc. A connected client owns a distinct fresh
+    // retain; treating that retain as if it replaced the registry reference
+    // leaves refs=(0,1)/(1,0) after the client closes and leaks the pool slot.
+    if (server_is_writer)
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(pool_idx);
+    else
+        ::duetos::subsystems::linux::internal::PipeReleaseWrite(pool_idx);
 }
 
 namespace
@@ -256,8 +243,8 @@ bool NamedPipeAbaReplayCheck()
         return false;
     }
     // Tear C down completely so its slot goes back on the free list.
-    NamedPipeOnServerClose(slot_c, gen_c);
     ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_c));
+    NamedPipeOnServerClose(slot_c, gen_c);
 
     const i32 pool_d = ::duetos::subsystems::linux::internal::PipeAlloc();
     if (pool_d < 0)
@@ -274,27 +261,36 @@ bool NamedPipeAbaReplayCheck()
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL register D\n");
         return false;
     }
-    if (slot_d == slot_c && gen_d == gen_c)
-        ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL generation not bumped on slot reuse\n");
+    if (slot_d != slot_c)
+        ::duetos::core::Panic("ipc/named-pipes", "ABA fixture did not recycle the expected registry slot");
+    if (gen_d == gen_c)
+        ::duetos::core::Panic("ipc/named-pipes", "registry generation did not advance on slot reuse");
 
     // Replay C's close. D must survive it untouched.
     NamedPipeOnServerClose(slot_c, gen_c);
     u32 aba_pool = u32(-1);
     bool aba_writer = true;
-    if (!NamedPipeConnectClient("selftest-pipe-d", &aba_pool, &aba_writer) || aba_pool != static_cast<u32>(pool_d))
-        ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL stale close unregistered a live entry\n");
+    const bool aba_connected = NamedPipeConnectClient("selftest-pipe-d", &aba_pool, &aba_writer);
+    if (!aba_connected || aba_pool != static_cast<u32>(pool_d))
+        ::duetos::core::Panic("ipc/named-pipes", "stale close unregistered a recycled live entry");
     // D's ring is empty and its write end is still reserved, so a read
     // would block — PipeReadReady only turns true once every writer is
     // gone. A wrongly-fired orphan release would have dropped exactly
     // that reservation.
     if (::duetos::subsystems::linux::internal::PipeReadReady(static_cast<u32>(pool_d)))
-        ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL stale close dropped the reservation ref\n");
+        ::duetos::core::Panic("ipc/named-pipes", "stale close dropped a recycled reservation reference");
 
-    // Undo the probe's client_connected flip so D's real close still
-    // performs its orphan release, then drain the server end.
-    NamedPipeUnconnectClient("selftest-pipe-d");
-    NamedPipeOnServerClose(slot_d, gen_d);
+    // Drain the server end, registry reservation, and the probe's atomically
+    // retained client end in real close order.
     ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_d));
+    NamedPipeOnServerClose(slot_d, gen_d);
+    if (aba_connected)
+    {
+        if (!aba_writer)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(aba_pool);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(aba_pool);
+    }
     return true;
 }
 
@@ -322,30 +318,48 @@ void NamedPipeSelfTest()
     }
 
     // 3. Second register under the same name must fail (duplicate
-    //    detection — Windows ERROR_PIPE_BUSY shape).
+    //    detection — Windows ERROR_PIPE_BUSY shape). Give the probe its own
+    //    reference set so a rejection regression cannot corrupt pool_a.
+    const i32 pool_dup = ::duetos::subsystems::linux::internal::PipeAlloc();
+    if (pool_dup < 0)
+    {
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_a));
+        NamedPipeOnServerClose(slot_a, gen_a);
+        ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL PipeAlloc duplicate probe\n");
+        return;
+    }
     u32 gen_dup = 0;
     const i32 slot_dup =
-        NamedPipeRegisterServer("selftest-pipe-a", static_cast<u32>(pool_a), /*writer=*/false, &gen_dup);
+        NamedPipeRegisterServer("selftest-pipe-a", static_cast<u32>(pool_dup), /*writer=*/false, &gen_dup);
     if (slot_dup >= 0)
     {
-        ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL duplicate-name accepted\n");
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_dup));
         NamedPipeOnServerClose(slot_dup, gen_dup);
+        ::duetos::core::Panic("ipc/named-pipes", "duplicate named-pipe registration was accepted");
     }
+    ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_dup));
+    ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_dup));
 
-    // 4. ConnectClient lookup succeeds, returns the correct pool
-    //    index, and flips the client_connected flag.
+    // 4. ConnectClient lookup succeeds, returns the correct pool index, and
+    //    atomically retains the client end before exposing the pool identity.
     u32 looked_up_pool = u32(-1);
     bool looked_up_writer = true;
     if (!NamedPipeConnectClient("selftest-pipe-a", &looked_up_pool, &looked_up_writer))
     {
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL connect lookup\n");
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_a));
         NamedPipeOnServerClose(slot_a, gen_a);
         return;
     }
     if (looked_up_pool != static_cast<u32>(pool_a) || looked_up_writer != false)
     {
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL connect returned wrong values\n");
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_a));
         NamedPipeOnServerClose(slot_a, gen_a);
+        if (!looked_up_writer)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(looked_up_pool);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(looked_up_pool);
         return;
     }
 
@@ -355,20 +369,21 @@ void NamedPipeSelfTest()
     if (NamedPipeConnectClient("selftest-pipe-nonexistent", &dummy_pool, &dummy_writer))
     {
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL miss returned hit\n");
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_a));
         NamedPipeOnServerClose(slot_a, gen_a);
+        ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_a));
+        if (!dummy_writer)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(dummy_pool);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(dummy_pool);
         return;
     }
 
-    // 6. After a client has connected, server-close must NOT do the
-    //    orphan release. Drive that side manually so the pool slot
-    //    drains. Client end here = write end (server_is_writer=false).
-    NamedPipeOnServerClose(slot_a, gen_a);
-    // Server end (read side) was held by the pool's initial ref;
-    // server-close didn't release it because there's no Win32 handle
-    // in the self-test path. Release it now to free the pool slot.
+    // 6. Model actual close order: the server handle drops its read ref, the
+    //    registry drops its always-owned initial write ref, then the atomic
+    //    connect retain is dropped. The pool must become reusable.
     ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_a));
-    // Client end (write side) still pinned by the initial PipeAlloc
-    // ref; drop it.
+    NamedPipeOnServerClose(slot_a, gen_a);
     ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_a));
 
     // 7. Orphan-release path: register a fresh entry, never connect,
@@ -379,6 +394,12 @@ void NamedPipeSelfTest()
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL PipeAlloc B\n");
         return;
     }
+    if (pool_b != pool_a)
+    {
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_b));
+        ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_b));
+        ::duetos::core::Panic("ipc/named-pipes", "connected close did not free pipe-pool slot");
+    }
     u32 gen_b = 0;
     const i32 slot_b = NamedPipeRegisterServer("selftest-pipe-b", static_cast<u32>(pool_b), /*writer=*/false, &gen_b);
     if (slot_b < 0)
@@ -388,18 +409,17 @@ void NamedPipeSelfTest()
         ::duetos::arch::SerialWrite("[selftest:named-pipe] FAIL register B\n");
         return;
     }
-    // Orphan close: this should release the write_ref (opposite end
-    // for INBOUND/server_is_writer=false). After it returns, only
-    // the read_ref remains, which we drop manually to flush.
-    NamedPipeOnServerClose(slot_b, gen_b);
+    // Orphan close follows the same ownership rule: server read first, then
+    // the registry-owned initial write reference.
     ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_b));
+    NamedPipeOnServerClose(slot_b, gen_b);
 
     // 8. ABA identity — stale (slot, generation) replay must be inert.
     if (!NamedPipeAbaReplayCheck())
         return;
 
     ::duetos::arch::SerialWrite(
-        "[named-pipe-selftest] PASS (register + dup-reject + connect + miss + orphan cleanup + aba-replay)\n");
+        "[named-pipe-selftest] PASS (register + connected-ref balance + slot reuse + orphan cleanup + aba-replay)\n");
 }
 
 } // namespace duetos::ipc

@@ -47,7 +47,7 @@ constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
 
 // Resolve a Linux RLIMIT_* into the (cur, max) pair this kernel
 // honours. The numbers reflect actual capacities where we have one
-// (linux_fds[16] → NOFILE 16, MAX_SCHED_TASKS → NPROC 64), and
+// (linux_fds[16] → NOFILE 16, durable child relations → NPROC 64), and
 // "no policy in v0" otherwise (RLIM_INFINITY). Matches the shape
 // glibc / musl / libcap probe at startup so static-musl programs
 // aren't surprised by a mismatched limit.
@@ -60,8 +60,8 @@ void RlimitDefaultsFor(u64 resource, u64& cur, u64& max)
         max = 16;
         return;
     case kRlimitNproc:
-        cur = 64;
-        max = 64;
+        cur = core::Process::kLinuxChildRelationCap;
+        max = core::Process::kLinuxChildRelationCap;
         return;
     case kRlimitStack:
         // 64 KiB matches the ring-3 stack the loader maps per task;
@@ -130,8 +130,12 @@ i64 DoGetrlimit(u64 resource, u64 user_old)
     {
         if (resource == kRlimitNofile && p->linux_rlimit_nofile_cur != kRlimInfinity)
             old.cur = p->linux_rlimit_nofile_cur;
-        else if (resource == kRlimitNproc && p->linux_rlimit_nproc_cur != kRlimInfinity)
-            old.cur = p->linux_rlimit_nproc_cur;
+        else if (resource == kRlimitNproc)
+        {
+            const u64 current = __atomic_load_n(&p->linux_rlimit_nproc_cur, __ATOMIC_ACQUIRE);
+            if (current != kRlimInfinity)
+                old.cur = current;
+        }
     }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
         return kEFAULT;
@@ -150,6 +154,7 @@ i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old)
     (void)pid;
     if (resource >= kRlimitNlimits)
         return kEINVAL;
+    core::Process* p = core::CurrentProcess();
     if (user_old != 0)
     {
         struct
@@ -158,6 +163,17 @@ i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old)
             u64 max;
         } old{};
         RlimitDefaultsFor(resource, old.cur, old.max);
+        if (p != nullptr)
+        {
+            if (resource == kRlimitNofile && p->linux_rlimit_nofile_cur != kRlimInfinity)
+                old.cur = p->linux_rlimit_nofile_cur;
+            else if (resource == kRlimitNproc)
+            {
+                const u64 current = __atomic_load_n(&p->linux_rlimit_nproc_cur, __ATOMIC_ACQUIRE);
+                if (current != kRlimInfinity)
+                    old.cur = current;
+            }
+        }
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
             return kEFAULT;
     }
@@ -183,13 +199,13 @@ i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old)
         // sentinel "no cap below ceiling" so DoGetrlimit reports
         // the default. Other resources are accepted-but-not-stored
         // (no policy in v0).
-        core::Process* p = core::CurrentProcess();
         if (p != nullptr)
         {
             if (resource == kRlimitNofile)
                 p->linux_rlimit_nofile_cur = (new_lim.cur >= def_max) ? kRlimInfinity : new_lim.cur;
             else if (resource == kRlimitNproc)
-                p->linux_rlimit_nproc_cur = (new_lim.cur >= def_max) ? kRlimInfinity : new_lim.cur;
+                __atomic_store_n(&p->linux_rlimit_nproc_cur, (new_lim.cur >= def_max) ? kRlimInfinity : new_lim.cur,
+                                 __ATOMIC_RELEASE);
         }
     }
     return 0;

@@ -17,6 +17,7 @@
 #include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/serial.h"
+#include "ipc/kfile.h"
 #include "mm/paging.h"
 #include "net/socket.h"
 #include "net/stack.h"
@@ -39,8 +40,8 @@ constexpr i64 kENetDown = -100;
 
 // Strip Linux SOCK_NONBLOCK / SOCK_CLOEXEC from the type so we can
 // match against the bare SOCK_DGRAM / SOCK_STREAM. Both flags are
-// ignored in v0 (sub-GAP — non-blocking I/O is part of the epoll
-// slice, CLOEXEC is part of fd-inheritance).
+// stored transactionally in the descriptor/OFD. MSG_DONTWAIT is honored by
+// recv paths; fully non-blocking stream I/O remains a bounded v0 gap.
 constexpr u64 kSockNonBlock = 0x800;
 constexpr u64 kSockCloExec = 0x80000;
 constexpr u64 kSockTypeMask = 0xFFFFFFFFu & ~(kSockNonBlock | kSockCloExec);
@@ -94,56 +95,52 @@ bool WriteSockaddrIn(u64 user_addr, u64 user_addrlen_ptr, ::duetos::net::Ipv4Add
     return true;
 }
 
-i32 AllocFd(::duetos::core::Process* p)
+i64 BindSocket(::duetos::core::Process* p, u32 sock_idx, u64 socket_flags,
+               ::duetos::core::LinuxFdAcquired* acquired_out = nullptr)
 {
-    return ::duetos::core::LinuxFdAllocLowest(p, 3);
-}
-
-// Stamp the slot + attach a KFile sidecar carrying
-// `&SocketFdRelease`. Returns false on KFile / handle-table
-// exhaustion — caller is then on the hook for SocketFdRelease
-// (the slot is left at state=0 so a subsequent allocator can
-// reuse it). The legacy direct-mutation path is preserved as a
-// fallback (no KFile means DoClose's dual-track falls through to
-// the explicit `SocketFdRelease` arm).
-bool FdAssignSocket(::duetos::core::Process* p, u32 fd, u32 sock_idx)
-{
-    // Defensive null + bounds check. Every current caller validates
-    // both before getting here (LinuxFdAllocLowest can only return a
-    // valid fd in [3, 16) or -1), but the cost of being wrong is an
-    // OOB write into the Process struct, so re-check at the boundary.
-    if (p == nullptr || fd >= 16)
-        return false;
-    p->linux_fds[fd].state = 6;
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = sock_idx;
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    bool pool_released = false;
-    if (!::duetos::core::LinuxFdAttachKFile(p, fd, /*kind=*/6, sock_idx, &SocketFdRelease, &pool_released))
+    if (p == nullptr)
+        return kEPERM;
+    auto kfile_result =
+        ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::Socket, sock_idx, &SocketFdRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        // KFileCreate failure has not fired the pool callback; a failed
-        // HandleTableInsert has already fired it. Clear the descriptor in
-        // both cases so callers never return a half-attached socket fd.
-        if (!pool_released)
-            SocketFdRelease(sock_idx);
-        ::duetos::core::LinuxFdClose(p, fd);
-        return false;
+        SocketFdRelease(sock_idx);
+        return kENOMEM;
     }
-    return true;
+
+    ::duetos::core::Process::LinuxFd payload{};
+    payload.state = 6;
+    payload.first_cluster = sock_idx;
+    ::duetos::core::LinuxFdPrepared prepared{};
+    constexpr u32 kOReadWrite = 2;
+    const u32 status_flags = kOReadWrite | static_cast<u32>(socket_flags & kSockNonBlock);
+    if (!::duetos::core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, status_flags))
+    {
+        ::duetos::ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = ::duetos::core::LinuxFdBindLowest(p, 3, &prepared, (socket_flags & kSockCloExec) != 0, acquired_out);
+    if (fd < 0)
+    {
+        ::duetos::core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
+    return fd;
 }
 
-bool FdIsSocket(::duetos::core::Process* p, u64 fd, u32& out_idx)
+bool FdAcquireSocket(::duetos::core::Process* p, u64 fd, ::duetos::core::LinuxFdAcquired* acquired, u32& out_idx)
 {
-    if (fd >= 16)
+    if (p == nullptr || acquired == nullptr || fd >= 16)
         return false;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = ::duetos::util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 6)
+    if (!::duetos::core::LinuxFdAcquire(p, static_cast<u32>(fd), 6, acquired))
         return false;
-    out_idx = p->linux_fds[fd].first_cluster;
-    return ::duetos::net::SocketAlive(out_idx);
+    out_idx = acquired->snapshot.first_cluster;
+    if (::duetos::net::SocketAlive(out_idx))
+        return true;
+    ::duetos::core::LinuxFdAcquiredRelease(acquired);
+    return false;
 }
 
 } // namespace
@@ -159,16 +156,12 @@ i64 DoSocket(u64 domain, u64 type, u64 protocol)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = AllocFd(p);
-    if (fd < 0)
-        return kEMFILE;
     const i32 sock = ::duetos::net::SocketAlloc(static_cast<u16>(domain), static_cast<u16>(base_type));
     if (sock < 0)
         return kENFILE;
-    if (!FdAssignSocket(p, static_cast<u32>(fd), static_cast<u32>(sock)))
-        return kENFILE;
-    if ((type & kSockCloExec) != 0)
-        ::duetos::core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+    const i64 fd = BindSocket(p, static_cast<u32>(sock), type);
+    if (fd < 0)
+        return fd;
     arch::SerialWrite("[linux/socket] fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" pool=");
@@ -184,16 +177,20 @@ i64 DoBind(u64 fd, u64 user_addr, u64 addrlen)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     ::duetos::net::Ipv4Address ip;
     u16 port;
     if (!ReadSockaddrIn(user_addr, addrlen, ip, port))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
-    if (!::duetos::net::SocketBind(idx, ip, port))
-        return kEAddrInUse;
-    return 0;
+    }
+    const i64 result = ::duetos::net::SocketBind(idx, ip, port) ? 0 : kEAddrInUse;
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
 }
 
 i64 DoListen(u64 fd, u64 backlog)
@@ -201,12 +198,13 @@ i64 DoListen(u64 fd, u64 backlog)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
-    if (!::duetos::net::SocketListen(idx, static_cast<u32>(backlog)))
-        return kEINVAL;
-    return 0;
+    const i64 result = ::duetos::net::SocketListen(idx, static_cast<u32>(backlog)) ? 0 : kEINVAL;
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
 }
 
 i64 DoAccept(u64 fd, u64 user_addr, u64 user_addrlen)
@@ -216,33 +214,39 @@ i64 DoAccept(u64 fd, u64 user_addr, u64 user_addrlen)
 
 i64 DoAccept4(u64 fd, u64 user_addr, u64 user_addrlen, u64 flags)
 {
-    (void)flags;
+    if ((flags & ~(kSockNonBlock | kSockCloExec)) != 0)
+        return kEINVAL;
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired listener{};
     u32 listen_idx;
-    if (!FdIsSocket(p, fd, listen_idx))
+    if (!FdAcquireSocket(p, fd, &listener, listen_idx))
         return kEBADF;
     if (!::duetos::net::SocketIsListening(listen_idx))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&listener);
         return kEINVAL;
+    }
     ::duetos::net::Ipv4Address peer_ip = {};
     u16 peer_port = 0;
     const i32 new_sock = ::duetos::net::SocketAccept(listen_idx, &peer_ip, &peer_port);
+    ::duetos::core::LinuxFdAcquiredRelease(&listener);
     if (new_sock < 0)
         return kEINVAL;
-    const i32 new_fd = AllocFd(p);
+    ::duetos::core::LinuxFdAcquired accepted{};
+    const i64 new_fd = BindSocket(p, static_cast<u32>(new_sock), flags, &accepted);
     if (new_fd < 0)
-    {
-        ::duetos::net::SocketRelease(static_cast<u32>(new_sock));
-        return kEMFILE;
-    }
-    if (!FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock)))
-        return kENFILE;
+        return new_fd;
     if (user_addr != 0 && user_addrlen != 0 && !WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port))
     {
-        ::duetos::core::LinuxFdClose(p, static_cast<u32>(new_fd));
+        ::duetos::core::LinuxFdDetached detached{};
+        if (::duetos::core::LinuxFdUnbindAcquired(p, static_cast<u32>(new_fd), &accepted, &detached))
+            ::duetos::core::LinuxFdDetachedRelease(&detached);
+        ::duetos::core::LinuxFdAcquiredRelease(&accepted);
         return kEFAULT;
     }
+    ::duetos::core::LinuxFdAcquiredRelease(&accepted);
     return new_fd;
 }
 
@@ -251,27 +255,25 @@ i64 DoConnect(u64 fd, u64 user_addr, u64 addrlen)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     ::duetos::net::Ipv4Address ip;
     u16 port;
     if (!ReadSockaddrIn(user_addr, addrlen, ip, port))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
-    if (!::duetos::net::SocketConnect(idx, ip, port))
-        return kENetDown;
-    return 0;
+    }
+    const i64 result = ::duetos::net::SocketConnect(idx, ip, port) ? 0 : kENetDown;
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
 }
 
-i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 addrlen)
+static i64 SendToSocket(u32 idx, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 addrlen)
 {
     (void)flags;
-    auto* p = ::duetos::core::CurrentProcess();
-    if (p == nullptr)
-        return kEPERM;
-    u32 idx;
-    if (!FdIsSocket(p, fd, idx))
-        return kEBADF;
     const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
     if (socket_type == 0)
         return kEBADF;
@@ -295,19 +297,27 @@ i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 a
     return ::duetos::net::SocketSendStream(idx, stage, static_cast<u32>(len));
 }
 
-i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 user_addrlen)
+i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 addrlen)
+{
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
+    u32 idx;
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
+        return kEBADF;
+    const i64 result = SendToSocket(idx, user_buf, len, flags, user_dest_addr, addrlen);
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
+}
+
+static i64 RecvFromSocket(u32 idx, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 user_addrlen)
 {
     // Linux MSG_DONTWAIT bit. The underlying SocketRecvDgram /
     // SocketRecvStream both block on an empty queue; without
     // honoring MSG_DONTWAIT here, a real Linux ELF that asks for
     // a non-blocking read hangs forever (synet caught this).
     constexpr u64 kMsgDontwait = 0x40;
-    auto* p = ::duetos::core::CurrentProcess();
-    if (p == nullptr)
-        return kEPERM;
-    u32 idx;
-    if (!FdIsSocket(p, fd, idx))
-        return kEBADF;
     const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
     if (socket_type == 0)
         return kEBADF;
@@ -353,7 +363,21 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
     return got;
 }
 
-i64 DoSendmsg(u64 fd, u64 user_msg, u64 flags)
+i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 user_addrlen)
+{
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
+    u32 idx;
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
+        return kEBADF;
+    const i64 result = RecvFromSocket(idx, user_buf, len, flags, user_src_addr, user_addrlen);
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
+}
+
+static i64 SendMsgSocket(u32 idx, u64 user_msg, u64 flags)
 {
     // struct msghdr { void* msg_name; socklen_t msg_namelen; struct iovec*
     //                  msg_iov; size_t msg_iovlen; ... }
@@ -383,10 +407,10 @@ i64 DoSendmsg(u64 fd, u64 user_msg, u64 flags)
     LinuxIovec iov;
     if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(mh.msg_iov), sizeof(iov)))
         return kEFAULT;
-    return DoSendto(fd, iov.base, iov.len, flags, mh.msg_name, mh.msg_namelen);
+    return SendToSocket(idx, iov.base, iov.len, flags, mh.msg_name, mh.msg_namelen);
 }
 
-i64 DoRecvmsg(u64 fd, u64 user_msg, u64 flags)
+static i64 RecvMsgSocket(u32 idx, u64 user_msg, u64 flags)
 {
     struct LinuxIovec
     {
@@ -424,7 +448,35 @@ i64 DoRecvmsg(u64 fd, u64 user_msg, u64 flags)
             return kEFAULT;
         addrlen_user = user_msg + 8;
     }
-    return DoRecvfrom(fd, iov.base, iov.len, flags, mh.msg_name, addrlen_user);
+    return RecvFromSocket(idx, iov.base, iov.len, flags, mh.msg_name, addrlen_user);
+}
+
+i64 DoSendmsg(u64 fd, u64 user_msg, u64 flags)
+{
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
+    u32 idx;
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
+        return kEBADF;
+    const i64 result = SendMsgSocket(idx, user_msg, flags);
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
+}
+
+i64 DoRecvmsg(u64 fd, u64 user_msg, u64 flags)
+{
+    auto* p = ::duetos::core::CurrentProcess();
+    if (p == nullptr)
+        return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
+    u32 idx;
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
+        return kEBADF;
+    const i64 result = RecvMsgSocket(idx, user_msg, flags);
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    return result;
 }
 
 i64 DoShutdown(u64 fd, u64 how)
@@ -432,12 +484,18 @@ i64 DoShutdown(u64 fd, u64 how)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     if (how > 2)
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
-    if (!::duetos::net::SocketShutdown(idx, static_cast<u32>(how)))
+    }
+    const bool shut_down = ::duetos::net::SocketShutdown(idx, static_cast<u32>(how));
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+    if (!shut_down)
         return kEINVAL;
     // SocketShutdown handles the FIN — no extra TCP-close call needed.
     return 0;
@@ -448,14 +506,19 @@ i64 DoGetsockname(u64 fd, u64 user_addr, u64 user_addrlen)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     ::duetos::net::Ipv4Address ip;
     u16 port;
     ::duetos::net::SocketGetLocal(idx, &ip, &port);
     if (!WriteSockaddrIn(user_addr, user_addrlen, ip, port))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -464,18 +527,29 @@ i64 DoGetpeername(u64 fd, u64 user_addr, u64 user_addrlen)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     if (::duetos::net::SocketTypeOf(idx) == 0)
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     if (!::duetos::net::SocketIsConnected(idx))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kENotConn;
+    }
     ::duetos::net::Ipv4Address ip;
     u16 port;
     ::duetos::net::SocketGetPeer(idx, &ip, &port);
     if (!WriteSockaddrIn(user_addr, user_addrlen, ip, port))
+    {
+        ::duetos::core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -488,13 +562,15 @@ i64 DoSetsockopt(u64 fd, u64 level, u64 optname, u64 user_optval, u64 optlen)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     // v0: every setsockopt accepted as a success no-op. SO_REUSEADDR /
     // SO_BROADCAST / SO_RCVTIMEO etc. all map to "success, ignored" —
     // the v0 stack has no timer / no reuse / no broadcast policy
     // beyond "always allow". Sub-GAP: real options aren't honoured.
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -507,16 +583,22 @@ i64 DoGetsockopt(u64 fd, u64 level, u64 optname, u64 user_optval, u64 user_optle
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
     // v0: report optlen=0 (caller's buffer untouched). Sub-GAP same
     // as setsockopt — option set isn't tracked.
     if (user_optlen != 0)
     {
         u32 zero = 0;
-        mm::CopyToUser(reinterpret_cast<void*>(user_optlen), &zero, sizeof(zero));
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_optlen), &zero, sizeof(zero)))
+        {
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
+            return kEFAULT;
+        }
     }
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -634,8 +716,9 @@ i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
 
     // First iteration uses caller's flags as-is; subsequent
@@ -649,18 +732,26 @@ i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout)
         const u64 hdr_addr = mmsg_addr;      // msghdr embedded at offset 0
         const u64 len_addr = mmsg_addr + 56; // msg_len at offset 56
         const u64 call_flags = (i == 0) ? flags : (flags | kMsgDontwait);
-        const i64 rc = DoRecvmsg(fd, hdr_addr, call_flags);
+        const i64 rc = RecvMsgSocket(idx, hdr_addr, call_flags);
         if (rc < 0)
         {
             if (received > 0)
+            {
+                ::duetos::core::LinuxFdAcquiredRelease(&acquired);
                 return static_cast<i64>(received);
+            }
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
             return rc;
         }
         const u32 msg_len = static_cast<u32>(rc);
         if (!mm::CopyToUser(reinterpret_cast<void*>(len_addr), &msg_len, sizeof(msg_len)))
+        {
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
             return received > 0 ? static_cast<i64>(received) : kEFAULT;
+        }
         ++received;
     }
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return static_cast<i64>(received);
 }
 
@@ -675,8 +766,9 @@ i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
+    ::duetos::core::LinuxFdAcquired acquired{};
     u32 idx;
-    if (!FdIsSocket(p, fd, idx))
+    if (!FdAcquireSocket(p, fd, &acquired, idx))
         return kEBADF;
 
     u32 sent = 0;
@@ -685,18 +777,26 @@ i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags)
         const u64 mmsg_addr = user_mmsgvec + i * kMmsghdrSize;
         const u64 hdr_addr = mmsg_addr;
         const u64 len_addr = mmsg_addr + 56;
-        const i64 rc = DoSendmsg(fd, hdr_addr, flags);
+        const i64 rc = SendMsgSocket(idx, hdr_addr, flags);
         if (rc < 0)
         {
             if (sent > 0)
+            {
+                ::duetos::core::LinuxFdAcquiredRelease(&acquired);
                 return static_cast<i64>(sent);
+            }
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
             return rc;
         }
         const u32 msg_len = static_cast<u32>(rc);
         if (!mm::CopyToUser(reinterpret_cast<void*>(len_addr), &msg_len, sizeof(msg_len)))
+        {
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
             return sent > 0 ? static_cast<i64>(sent) : kEFAULT;
+        }
         ++sent;
     }
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return static_cast<i64>(sent);
 }
 

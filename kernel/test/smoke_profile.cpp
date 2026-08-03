@@ -4,12 +4,14 @@
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "core/init.h"
+#include "core/panic.h"
 #include "diag/boot_observe.h"
 #include "diag/fix_journal.h"
 #include "diag/kpath.h"
 #include "diag/kpath_persist.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
+#include "test/cancellation_smp_oracle.h"
 
 namespace duetos::test
 {
@@ -130,6 +132,8 @@ u64 ProfileSleepTicks(SmokeProfile profile)
         return kTicksPerSecond * 5; // single Linux ABI smoke
     case SmokeProfile::Browser:
         return kTicksPerSecond * 25; // 2 browser PEs: DNS + TCP + HTTP x4
+    case SmokeProfile::CancellationSmp:
+        return kTicksPerSecond * 1; // synchronous bounded oracle already completed
     default:
         return kTicksPerSecond * 5;
     }
@@ -259,6 +263,10 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     {
         g_profile = SmokeProfile::Browser;
     }
+    else if (TokenMatches(value, end, "cancellation-smp"))
+    {
+        g_profile = SmokeProfile::CancellationSmp;
+    }
     // Unknown values fall through to None — full boot. Logged below.
 
     {
@@ -301,6 +309,8 @@ const char* SmokeProfileName(SmokeProfile profile)
         return "linux";
     case SmokeProfile::Browser:
         return "browser";
+    case SmokeProfile::CancellationSmp:
+        return "cancellation-smp";
     default:
         return "unknown";
     }
@@ -438,6 +448,13 @@ void SmokeProfileSleepAndExit()
         arch::SerialWriteHex(stats.tasks_reaped);
         arch::SerialWrite("\n");
     }
+
+    // Unlike PE profiles, this scenario starts only after SMP, Userland, and
+    // background-service bring-up are complete. It runs synchronously so the
+    // profile sentinel cannot authorize QEMU exit before every raced waiter
+    // has unwound its retained references and its Process has been reaped.
+    if (g_profile == SmokeProfile::CancellationSmp && !RunCancellationSmpOracle())
+        core::Panic("test/cancel-smp", "runtime cancellation oracle failed");
 
     const u64 ticks = ProfileSleepTicks(g_profile);
     arch::SerialWrite("[smoke] sleeping ticks=");

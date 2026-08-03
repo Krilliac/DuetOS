@@ -4,25 +4,27 @@
  * Protocol-neutral process Job service.
  *
  * The core owns the bounded pool, opaque non-wrapping generation keys,
- * handle-reference count, member Process references, accounting snapshots,
- * termination operation pins, and owner-exit drain.  ABI adapters own public
- * handle encoding, status values, user-buffer layouts, capability policy, and
- * the actual process-kill request.
+ * handle-reference count, exact ProcessKey membership records, accounting
+ * snapshots, publication/termination operation pins, and owner-exit drain. ABI adapters
+ * own public handle encoding, status values, user-buffer layouts, capability
+ * policy, and the actual process-kill request.
  *
- * Locking contract: no Process retain/release, scheduler operation, allocator,
+ * A Job never retains or borrows a Process pointer. Membership is a small
+ * record keyed by the immutable ProcessKey. The scheduler is the outer
+ * lifetime boundary for publication, explicit assignment, and termination;
+ * Job operations only mutate the pointer-free record beneath that lock. This deliberately breaks the
+ * Job -> Process -> handle -> Job lifetime cycle.
+ *
+ * Locking contract: no Process operation, scheduler operation, allocator,
  * logger, or other external subsystem call runs while the Job pool lock is
- * held.  Assignment transfers a reference acquired by the caller.  A
- * JobTerminationIntent borrows member pointers while an internal operation pin
- * prevents close/drain or process-exit notification from detaching their
- * owning references.
+ * held.
  */
 
+#include "proc/process.h"
 #include "util/types.h"
 
 namespace duetos::core
 {
-
-struct Process;
 
 constexpr u32 kJobPoolCapacity = 8;
 constexpr u32 kJobMemberCapacity = 32;
@@ -48,7 +50,11 @@ enum class JobState : u8
 
 struct JobSnapshot
 {
+    // Current externally visible membership. `process_id_count` is kept
+    // separate so a future bounded/partial PID-list query cannot confuse the
+    // number assigned with the number that fit in the caller's buffer.
     u32 member_count;
+    u32 process_id_count;
     u32 total_processes;
     u32 total_terminated_processes;
     u64 member_pids[kJobMemberCapacity];
@@ -58,10 +64,11 @@ struct JobLifecycleSnapshot
 {
     JobState state;
     u64 generation;
-    u64 owner_pid;
+    ProcessKey owner;
     u32 references;
     u32 operation_pins;
     u32 member_count;
+    u32 pending_member_count;
     bool retire_pending;
 };
 
@@ -73,6 +80,7 @@ enum class JobAssignResult : u8
     InvalidJob,
     Terminated,
     Capacity,
+    NotLive,
 };
 
 enum class JobTerminateResult : u8
@@ -82,59 +90,105 @@ enum class JobTerminateResult : u8
     InvalidJob,
 };
 
-// Member pointers are borrowed, not newly retained.  They remain live until
-// JobFinishTermination consumes this intent.  Do not copy or reuse an intent.
+// Exact member incarnations copied from completion records.  No Process
+// lifetime is carried by this object.  Do not copy or reuse an active intent.
 struct JobTerminationIntent
 {
-    JobKey key;
-    u32 member_count;
-    bool active;
-    Process* members[kJobMemberCapacity];
+    JobTerminationIntent() = default;
+    JobTerminationIntent(const JobTerminationIntent&) = delete;
+    JobTerminationIntent& operator=(const JobTerminationIntent&) = delete;
+
+    JobKey key{};
+    u64 ticket = 0;
+    u32 member_count = 0;
+    u32 exit_code = 0;
+    bool active = false;
+    ProcessKey members[kJobMemberCapacity]{};
+};
+
+enum class JobPublishPrepareResult : u8
+{
+    NoParentJob = 0,
+    Prepared,
+    MembershipConflict,
+    Terminated,
+    Capacity,
+    Invalid,
+};
+
+// One hidden child-membership reservation. The nonce is minted under the Job
+// lock and bound to the exact row generation, member slot, and ProcessKey.
+// Tickets are synchronous scheduler-publication capabilities: they cannot be
+// copied, and commit/abort consumes the matching nonce exactly once.
+struct JobPublicationTicket
+{
+    JobPublicationTicket() = default;
+    JobPublicationTicket(const JobPublicationTicket&) = delete;
+    JobPublicationTicket& operator=(const JobPublicationTicket&) = delete;
+
+    JobKey key{};
+    ProcessKey process{};
+    u64 ticket = 0;
+    u32 member_slot = 0;
+    bool active = false;
 };
 
 /// Reserve, initialize, and publish one Job with one open reference.
-bool JobCreate(u64 owner_pid, JobKey* out_key);
+bool JobCreate(ProcessKey owner, JobKey* out_key);
 
-/// Attempt to add `member`, for which the caller already owns one Process
-/// reference.  Assigned transfers that reference to the Job.  Every other
-/// result leaves the reference with the caller.  The caller must arrange a
-/// JobOnProcessExit notification after the last live task.  If assignment can
-/// race that boundary, keep a separate reference through a post-publication
-/// liveness check and replay JobOnProcessExit when the member already exited.
-JobAssignResult JobAssignRetained(JobKey key, u64 owner_pid, Process* member);
+/// Publish an exact Process incarnation as an active Job member. The Job never
+/// retains ProcessCore. The scheduler wrapper must hold its lifetime lock,
+/// prove the Process is Published/Open with a non-Dead Task, and keep that lock
+/// through this mutation; the same transaction owns JobOnProcessExit at the
+/// exact last-Task unlink.
+JobAssignResult JobAssign(JobKey key, ProcessKey owner, ProcessKey member);
+
+/// Reserve default child membership while the scheduler holds its lifetime
+/// lock. Pending membership is invisible to queries/accounting but pins the
+/// Job row against close/owner-drain reuse. A parent in a terminating Job
+/// rejects publication rather than allowing the child to escape.
+JobPublishPrepareResult JobPrepareInheritedMember(ProcessKey parent, ProcessKey child,
+                                                  JobPublicationTicket* out_ticket);
+
+/// Publish or discard one exact pending child membership. The scheduler keeps
+/// its lifetime lock across prepare, the external Process publication gate,
+/// and this terminal operation; no Job lock is held while that gate runs.
+bool JobCommitInheritedMember(JobPublicationTicket* ticket);
+bool JobAbortInheritedMember(JobPublicationTicket* ticket);
 
 /// Test membership in one owner-authorized Job.
-bool JobContainsOwned(JobKey key, u64 owner_pid, const Process* member, bool* out_contains);
+bool JobContainsOwned(JobKey key, ProcessKey owner, ProcessKey member, bool* out_contains);
 
 /// Test membership in any externally visible Job.
-bool JobContainsAny(const Process* member);
+bool JobContainsAny(ProcessKey member);
 
 /// Snapshot one owner-authorized Job into a protocol-neutral structure.
-bool JobSnapshotOwned(JobKey key, u64 owner_pid, JobSnapshot* out_snapshot);
+bool JobSnapshotOwned(JobKey key, ProcessKey owner, JobSnapshot* out_snapshot);
 
 /// Snapshot the first externally visible Job containing `member`.
-bool JobSnapshotContaining(const Process* member, JobSnapshot* out_snapshot);
+bool JobSnapshotContaining(ProcessKey member, JobSnapshot* out_snapshot);
 
-/// Transition Live -> Terminating and pin all borrowed member pointers.
-JobTerminateResult JobBeginTermination(JobKey key, u64 owner_pid, JobTerminationIntent* out_intent);
+/// Transition Live -> Terminating and copy every active exact member key into
+/// a one-shot intent while pinning the Job row against generation reuse.
+JobTerminateResult JobBeginTermination(JobKey key, ProcessKey owner, u32 exit_code, JobTerminationIntent* out_intent);
 
-/// Consume an active intent, transition Terminating -> Tombstone, and retire
-/// after the last reference when appropriate.  Member releases occur only
-/// after the pool lock is dropped.
+/// Consume the authentic dispatch ticket and drop its operation pin. The Job
+/// remains Terminating while any member is active; the last exact Process-exit
+/// notification owns the Terminating -> Tombstone transition.
 bool JobFinishTermination(JobTerminationIntent* intent);
 
-/// Notify the service that `process` has no live tasks.  Logical membership is
-/// removed exactly once; a concurrent termination intent may defer the owning
-/// reference release until JobFinishTermination consumes its operation pin.
-/// The caller must keep `process` alive through this call.  Thread-safe and
-/// callable from any CPU; does not invoke the scheduler.
-void JobOnProcessExit(Process* process);
+/// Notify the service that an exact Process incarnation has no live tasks.
+/// Logical active membership is removed exactly once and the slot becomes
+/// reusable. Explicit assignment is scheduler-linearized with live Process
+/// state, so a stale retained Process header cannot republish the dead key.
+/// Thread-safe and callable from any CPU; does not invoke the scheduler.
+void JobOnProcessExit(ProcessKey process);
 
 /// Drop one open reference.  Returns false for stale, foreign, or double close.
-bool JobClose(JobKey key, u64 owner_pid);
+bool JobClose(JobKey key, ProcessKey owner);
 
-/// Tombstone and retire every Job created by owner_pid.  Idempotent.
-void JobDrainOwned(u64 owner_pid);
+/// Tombstone and retire every Job created by the exact owner.  Idempotent.
+void JobDrainOwned(ProcessKey owner);
 
 /// Kernel diagnostic/self-test view.  Unlike public operations, this can
 /// inspect an exact retired generation until that row is reused.

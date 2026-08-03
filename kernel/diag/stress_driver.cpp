@@ -258,8 +258,8 @@ void StressDriverArm(const char* cmdline)
         arch::SerialWrite("\n");
     }
 
-    auto* t = sched::SchedCreate(&StressDriverEntry, nullptr, "stress-driver");
-    if (t == nullptr)
+    const sched::TaskCreateResult result = sched::SchedCreate(&StressDriverEntry, nullptr, "stress-driver");
+    if (!result.created)
     {
         // Scheduler refused to create the driver thread —
         // typically means the task table is full or KMalloc OOM.

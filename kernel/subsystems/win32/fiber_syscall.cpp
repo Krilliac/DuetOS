@@ -172,7 +172,9 @@ void DoFiberDelete(arch::TrapFrame* frame)
     if (sched::CurrentTaskFiberIsActive(target_slot))
     {
         KLOG_DEBUG("win32/fiber", "DoFiberDelete: deleting current fiber -> exit");
-        sched::SchedExit(); // noreturn
+        sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit);
+        frame->rax = 0;
+        return;
     }
 
     u64 stack_base = 0;

@@ -457,8 +457,12 @@ void BrokerSelfTest()
     // consuming the boot stack.
     static Process synth{};
     synth.pid = 0x4E1E4A7E;
-    synth.cap_ceiling = duetos::core::CapSetTrusted();
-    synth.caps = duetos::core::CapSetEmpty();
+    if (duetos::core::AuthorizationContextKeyIsValid(synth.authorization) &&
+        !duetos::core::AuthorizationRelease(&synth.authorization))
+        Panic("broker", "self-test: synthetic authorization reset failed");
+    if (!duetos::core::AuthorizationCreateTrusted(duetos::core::CapSetEmpty(), duetos::core::CapSetTrusted(),
+                                                  duetos::core::kTickBudgetTrusted, &synth.authorization))
+        Panic("broker", "self-test: synthetic authorization create failed");
 
     // Self-test relies on the seeded admin account (auth.cpp init).
     // The broker is called BEFORE LoginStart in the boot order, so
@@ -534,6 +538,9 @@ void BrokerSelfTest()
 
     if (!had_session)
         duetos::core::AuthLogout();
+
+    if (!duetos::core::AuthorizationRelease(&synth.authorization))
+        Panic("broker", "self-test: synthetic authorization release failed");
 
     arch::SerialWrite("[broker] self-test: PASS\n");
 }

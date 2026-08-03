@@ -762,12 +762,9 @@ BpError BpRemove(BreakpointId id, u64 requester_pid)
 // ------------------ Phase 3: resume + step + inspect --------
 
 // Forward decls — definitions lower in the file, after the public
-// API. FindById and ResolveStoppedUserByte are namespace-scope
-// helpers (not anon) because they get called from BpReadRegs /
-// BpResume / BpStep / BpReadMem which also live at namespace
-// scope. MaybeSuspend ditto.
+// API. FindById and MaybeSuspend are namespace-scope helpers (not
+// anon) because the public API and trap handlers both use them.
 BpEntry* FindById(u32 id);
-const u8* ResolveStoppedUserByte(BpEntry* e, u64 user_va);
 void MaybeSuspend(u32 bp_id, arch::TrapFrame* frame);
 
 bool BpReadRegs(BreakpointId id, arch::TrapFrame* out)
@@ -841,46 +838,47 @@ BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in)
     return BpError::None;
 }
 
-// Walk the stopped task's captured AddressSpace to find the
-// physical frame backing a given user VA, returning a kernel
-// direct-map pointer into that frame. Returns nullptr if the
-// page isn't mapped or no AS was captured (kernel-only BPs).
-const u8* ResolveStoppedUserByte(BpEntry* e, u64 user_va) /* MUST hold g_lock */
-{
-    if (e == nullptr || e->stopped_as == nullptr)
-        return nullptr;
-    const u64 page_va = user_va & ~0xFFFULL;
-    mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(e->stopped_as, page_va);
-    if (frame == mm::kNullFrame)
-        return nullptr;
-    const u8* page = static_cast<const u8*>(mm::PhysToVirt(frame));
-    return page + (user_va & 0xFFF);
-}
-
 u64 BpReadMem(BreakpointId id, u64 user_va, u8* out, u64 len)
 {
     if (id.value == 0 || out == nullptr || len == 0)
         return 0;
-    sync::SpinLockGuard g(g_lock);
-    BpEntry* e = FindById(id.value);
-    if (e == nullptr || e->stopped_task_id == 0)
-        return 0;
+
+    // stopped_as is owned transitively by the parked Task's Process. Pin it
+    // while the entry is stable under g_lock, then drop the IRQ-safe debugger
+    // lock before entering the scheduler-backed VM mutation transaction.
+    // A concurrent resume may clear the entry after this snapshot, but it
+    // cannot destroy the retained AddressSpace or recycle a frame while an
+    // AddressSpaceReadUserMemory transaction is copying from it.
+    mm::AddressSpace* stopped_as = nullptr;
+    {
+        sync::SpinLockGuard g(g_lock);
+        BpEntry* e = FindById(id.value);
+        if (e == nullptr || e->stopped_task_id == 0 || e->stopped_as == nullptr)
+            return 0;
+        stopped_as = e->stopped_as;
+        mm::AddressSpaceRetain(stopped_as);
+    }
+
     u64 copied = 0;
     while (copied < len)
     {
-        const u8* src = ResolveStoppedUserByte(e, user_va + copied);
-        if (src == nullptr)
+        if (user_va > ~u64{0} - copied)
             break;
-        // Copy up to the end of the current 4 KiB page in one chunk.
-        const u64 page_off = (user_va + copied) & 0xFFFULL;
+        const u64 current_va = user_va + copied;
+        // Copy up to the end of the current 4 KiB page in one mutation
+        // transaction. A peer may change a later page between iterations;
+        // that is reported as the existing partial-read contract rather than
+        // exposing an unpinned direct-map pointer.
+        const u64 page_off = current_va & 0xFFFULL;
         const u64 page_room = 0x1000 - page_off;
         u64 chunk = len - copied;
         if (chunk > page_room)
             chunk = page_room;
-        for (u64 i = 0; i < chunk; ++i)
-            out[copied + i] = src[i];
+        if (!mm::AddressSpaceReadUserMemory(stopped_as, current_va, out + copied, chunk))
+            break;
         copied += chunk;
     }
+    mm::AddressSpaceRelease(stopped_as);
     return copied;
 }
 

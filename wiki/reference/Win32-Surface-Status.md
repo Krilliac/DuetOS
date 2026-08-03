@@ -516,8 +516,19 @@ syscall routing shows up immediately.
   is a synchronous no-op that succeeds (no overlapped wait —
   sub-GAP). `PIPE_TYPE_MESSAGE` accepted but reads behave as
   `PIPE_TYPE_BYTE` (no message framing — sub-GAP).
-- Job objects (`CreateJobObjectW`, `SetInformationJobObject`,
-  `AssignProcessToJobObject`) — STUB
+- Job objects are a bounded v0 implementation. Unnamed
+  `CreateJobObjectW`, `AssignProcessToJobObject`, `IsProcessInJob`,
+  `TerminateJobObject`, `QueryInformationJobObject`, and Job
+  `CloseHandle` route through `ntdll` to the native Job syscalls.
+  Queries implement basic accounting (class 1), the process-ID list
+  (class 3, including header-only/partial buffers), and basic plus I/O
+  accounting (class 8; I/O fields are currently zero). Handles carry a
+  generation, and closing the last user handle does not sever live
+  membership. Named Jobs, security attributes, `OpenJobObject`,
+  `SetInformationJobObject`, limits/kill-on-close, and nested Jobs remain
+  GAP. Child termination, 33-cycle member-slot reuse, and inherited
+  child/grandchild membership still require the dedicated QEMU runtime
+  profile in `userland/apps/jobobj_smoke/JOB_RUNTIME_QEMU_TODO.md`.
 - Fiber API (`CreateFiber`, `SwitchToFiber`, `DeleteFiber`)
   is GAP: switches but no per-fiber FLS
 - Profiling (`QueryProcessCycleTime`, etc.) — STUB
@@ -672,7 +683,7 @@ syscall routing shows up immediately.
 | `GetEnvironmentVariableA` | REAL | `kOffPinReturn0` |
 | `GetEnvironmentVariableW` | REAL | `kOffPinReturn0` |
 | `GetErrorMode` | REAL | `kOffPinReturn0` |
-| `GetExitCodeProcess` | REAL | `kOffGetExitCodeThread` |
+| `GetExitCodeProcess` | REAL | `kernel32_sync.c` -> `NtQueryInformationProcess(0)` |
 | `GetFileAttributesA` | REAL | `kOffReturnMinus1` |
 | `GetFileAttributesExA` | REAL | `kOffPinReturn0` |
 | `GetFileAttributesExW` | REAL | `kOffPinReturn0` |
@@ -2984,7 +2995,10 @@ above and are deliberately absent from this list.
 
 ### Process / threading
 
-- **Job objects** — STUB.
+- **Job objects** — PARTIAL. The unnamed v0 create/assign/query/
+  membership/terminate/close path is real; named/opened Jobs, security,
+  configured limits, kill-on-close, nesting, and a verdict-bearing
+  multi-process QEMU profile are still GAP.
 - **Token impersonation / RestrictedSids** — STUB.
 - **DACL / SACL enforcement** — `AccessCheck` always returns
   ALLOWED; the kCap* kernel gate is the real ACL.
@@ -3202,7 +3216,8 @@ implementations:
   `SetFilePointer` (23), `GetFileSize`/`GetFileSizeEx` (24) and
   `GetFileAttributesA`/`W` (SYS_FILE_QUERY_ATTRIBUTES 151) onto the
   same cap-gated syscalls the 64-bit `kernel32_io.c` uses;
-  `WriteFile` routes kernel file handles (0x100..0x10F) to
+  `WriteFile` routes opaque kernel file handles (low tag 0x100..0x10F,
+  generation bits 12..30) to
   SYS_FILE_WRITE (43) and `GetFileType` reports FILE_TYPE_DISK for
   them. `CreateFile*` honours `dwCreationDisposition` against the
   two primitives the kernel provides, which is more than the 64-bit

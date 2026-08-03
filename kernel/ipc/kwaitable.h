@@ -63,6 +63,20 @@ namespace duetos::ipc
 /// MAXIMUM_WAIT_OBJECTS == 64 — the "any" path doesn't justify
 /// more than that without paging the predicate table.
 inline constexpr u32 kWaitableMaxPredicates = 64;
+inline constexpr u32 kWaitableInvalidIndex = ~u32{0};
+
+enum class KWaitableWaitStatus : u8
+{
+    Ready,
+    Cancelled,
+    Failed,
+};
+
+struct KWaitableWaitResult
+{
+    KWaitableWaitStatus status;
+    u32 index;
+};
 
 /// Predicate function. Returns true iff the underlying condition
 /// is ready. Called under the waitable's inner mutex; must NOT
@@ -100,10 +114,12 @@ struct KWaitable
 /// workload demands it.
 ::duetos::core::Result<u32> KWaitableAddPredicate(KWaitable* w, KWaitablePredicate fn, void* arg);
 
-/// Block until any registered predicate returns true. Returns the
-/// index of the first predicate observed true. If multiple are
-/// ready simultaneously, returns the lowest-indexed one.
-u32 KWaitableWaitForAny(KWaitable* w);
+/// Block until any registered predicate returns true. A `Ready`
+/// result carries the first predicate observed true; if multiple are
+/// ready simultaneously, the lowest index wins. `Cancelled` and
+/// `Failed` carry `kWaitableInvalidIndex`, so neither can be mistaken
+/// for predicate zero. The object pin is dropped on every return.
+KWaitableWaitResult KWaitableWaitForAny(KWaitable* w);
 
 /// Wake every waiter so they re-poll. Caller invokes this AFTER
 /// changing any state a registered predicate might check.

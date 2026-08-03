@@ -14,11 +14,10 @@
  *     loop exits cleanly.
  *   - PeekMessage is non-blocking.
  *   - DefWindowProcA/W returns 0 (caller accepts).
- *   - PostQuitMessage posts WM_QUIT (0x0012) to every window owned by
- *     the calling process so an event pump blocked on GetMessage
- *     unblocks and sees WM_QUIT next.
- *   - CreateWindowExA/W returns a real compositor-backed HWND. HWND
- *     is a biased compositor index (+1) so 0 still means failure.
+ *   - PostQuitMessage posts HWND-less WM_QUIT (0x0012) to the exact
+ *     calling task queue.
+ *   - CreateWindowExA/W returns a PE32-safe slot+generation HWND; a
+ *     destroyed generation never resolves after its slot is reused.
  */
 
 typedef int BOOL;
@@ -34,6 +33,7 @@ typedef void* HANDLE;
  * the two in sync is a manual discipline shared with every other
  * DLL here. Compile-time drift is caught by the stubs' runtime
  * behaviour diverging from spec. */
+#define SYS_GETPID 1 /* Duet task id / Win32 thread id */
 #define SYS_WIN_CREATE 58
 #define SYS_WIN_DESTROY 59
 #define SYS_WIN_SHOW 60
@@ -41,6 +41,8 @@ typedef void* HANDLE;
 #define SYS_WIN_PEEK_MSG 62
 #define SYS_WIN_GET_MSG 63
 #define SYS_WIN_POST_MSG 64
+#define DUETOS_THREAD_MESSAGE_TAG 0x80000000u
+#define DUETOS_THREAD_MESSAGE_TID_MASK 0x7FFFFFFFu
 #define SYS_WIN_MOVE 69
 #define SYS_WIN_GET_RECT 70
 #define SYS_WIN_SET_TEXT 71
@@ -199,10 +201,6 @@ static void user32_zero_msg_tail(void* msg)
     }
 }
 
-/* Forward decl — defined further down once the per-process
- * thread-message queue is in scope. */
-static int user32_thread_msg_pop(struct user32_msg_wire* out, int remove);
-
 __declspec(dllexport) BOOL GetMessageA(void* msg, HANDLE h, UINT min, UINT max)
 {
     (void)min;
@@ -218,18 +216,10 @@ __declspec(dllexport) BOOL GetMessageA(void* msg, HANDLE h, UINT min, UINT max)
     /* rv = 1 for a normal message, 0 for WM_QUIT, -1 on bad args.
      * Win32 GetMessage returns -1 on outright failure which
      * callers usually treat as "break the loop", same as 0. */
-    if (rv > 0)
+    if (rv >= 0)
     {
         user32_zero_msg_tail(msg);
         return (BOOL)rv;
-    }
-    /* Drain a thread-posted message if the kernel queue was empty
-     * — matches the PeekMessage fallback so PostThreadMessage +
-     * GetMessage round-trips work without any window registration. */
-    if (rv == 0 && user32_thread_msg_pop((struct user32_msg_wire*)msg, 1))
-    {
-        user32_zero_msg_tail(msg);
-        return 1;
     }
     return (BOOL)rv;
 }
@@ -246,17 +236,7 @@ __declspec(dllexport) BOOL PeekMessageA(void* msg, HANDLE h, UINT min, UINT max,
     (void)max;
     if (!msg)
         return 0;
-    /* Two-tier queue check:
-     *  1. Kernel-side window-message queue (SYS_WIN_PEEK_MSG) — the
-     *     normal source for HWND-targeted messages from the WM
-     *     and the input-event dispatch path.
-     *  2. User-side thread-message queue — populated by
-     *     PostThreadMessage / PostQuitMessage. Drained when (1)
-     *     reports nothing.
-     * The order matches Win32: GetMessage / PeekMessage prioritises
-     * the WM-posted queue over thread messages so input-driven
-     * apps stay responsive even when a posted thread message
-     * accumulates. */
+    /* HWND and thread messages share the kernel's exact task-owned queue. */
     long long rv;
     const long long remove = (flags & PM_REMOVE) ? 1 : 0;
     __asm__ volatile("int $0x80"
@@ -265,12 +245,6 @@ __declspec(dllexport) BOOL PeekMessageA(void* msg, HANDLE h, UINT min, UINT max,
                        "S"((long long)(unsigned long long)h), "d"(remove)
                      : "memory");
     if (rv == 1)
-    {
-        user32_zero_msg_tail(msg);
-        return 1;
-    }
-    /* Fallback to user-side queue when the kernel reports empty. */
-    if (user32_thread_msg_pop((struct user32_msg_wire*)msg, (int)remove))
     {
         user32_zero_msg_tail(msg);
         return 1;
@@ -518,103 +492,33 @@ __declspec(dllexport) BOOL PostMessageW(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
     return user32_post_msg_core(h, msg, w, l);
 }
-/* PostQuitMessage in real Win32 posts a thread-scoped WM_QUIT.
- * Our v0 queues are per-window, so we fan the WM_QUIT out to
- * every window owned by this process. GetMessage returning
- * FALSE on WM_QUIT guarantees the caller's pump exits after
- * processing one more message. HWND-filter `NULL` from the
- * kernel's perspective == "the caller's pid's windows" — we
- * emit the post using HWND 1 as a heuristic since user32's
- * POST_MSG syscall requires a concrete HWND; if 1 isn't owned
- * by us (rare for a graphical app that created at least one
- * window), the post is a documented no-op and the caller's
- * loop eventually breaks on natural exit. */
+static DWORD user32_current_tid(void)
+{
+    long long tid;
+    __asm__ volatile("int $0x80" : "=a"(tid) : "a"((long long)SYS_GETPID) : "memory");
+    if (tid <= 0 || (unsigned long long)tid > DUETOS_THREAD_MESSAGE_TID_MASK)
+        return 0;
+    return (DWORD)tid;
+}
+
+static HANDLE user32_thread_target(DWORD tid)
+{
+    if (tid == 0 || (tid & DUETOS_THREAD_MESSAGE_TAG) != 0)
+        return (HANDLE)0;
+    return (HANDLE)(unsigned long long)(DUETOS_THREAD_MESSAGE_TAG | tid);
+}
+
 __declspec(dllexport) void PostQuitMessage(int code)
 {
-    /* HWND 1 is the first compositor slot. Attempt-post to
-     * slots 1..16 and stop on the first success — cross-pid
-     * posts are already rejected by the kernel. */
-    for (unsigned i = 1; i <= 16; ++i)
-    {
-        if (user32_post_msg_core((HANDLE)(unsigned long long)i, WM_QUIT, (WPARAM)(unsigned)code, 0))
-        {
-            /* One successful post wakes the pump. Keep going so
-             * every window owned by this pid sees WM_QUIT — the
-             * next GetMessage on any of them picks it up. */
-        }
-    }
-}
-/* Per-process thread-message queue.
- *
- * Real Win32 keeps one queue per UI thread; PostThreadMessage
- * pushes onto the target thread's queue, and that thread's
- * GetMessage / PeekMessage returns from it (msg.hwnd = NULL).
- *
- * v0 collapses this to a single per-process queue because there's
- * effectively one ring-3 thread per process today (SYS_THREAD_CREATE
- * is wired but smoke tests don't spawn). 8 slots is plenty for
- * the test workload — typical PostQuitMessage / WM_USER round-trips
- * push at most 1–2 messages before draining.
- *
- * Capture-on-Post / drain-on-Peek with a single producer/consumer
- * keeps the queue lock-free; the only consumer is the same task
- * that produced. */
-struct user32_thread_msg
-{
-    UINT message;
-    WPARAM wparam;
-    LPARAM lparam;
-    DWORD time;
-};
-#define USER32_THREAD_MSG_CAP 8
-static struct user32_thread_msg s_thread_msgs[USER32_THREAD_MSG_CAP];
-static unsigned s_thread_msg_head = 0; /* push cursor */
-static unsigned s_thread_msg_tail = 0; /* pop cursor  */
-
-static int user32_thread_msg_empty(void)
-{
-    return s_thread_msg_head == s_thread_msg_tail;
-}
-
-static void user32_thread_msg_push(UINT msg, WPARAM w, LPARAM l)
-{
-    /* Drop oldest on overflow — keeps the producer non-blocking
-     * even when the consumer is wedged. */
-    if (s_thread_msg_head - s_thread_msg_tail >= USER32_THREAD_MSG_CAP)
-        ++s_thread_msg_tail;
-    unsigned slot = s_thread_msg_head & (USER32_THREAD_MSG_CAP - 1);
-    s_thread_msgs[slot].message = msg;
-    s_thread_msgs[slot].wparam = w;
-    s_thread_msgs[slot].lparam = l;
-    s_thread_msgs[slot].time = 0;
-    ++s_thread_msg_head;
-}
-
-static int user32_thread_msg_pop(struct user32_msg_wire* out, int remove)
-{
-    if (user32_thread_msg_empty())
-        return 0;
-    unsigned slot = s_thread_msg_tail & (USER32_THREAD_MSG_CAP - 1);
-    out->hwnd = (HANDLE)0; /* thread message — no hwnd */
-    out->message = s_thread_msgs[slot].message;
-    out->wParam = s_thread_msgs[slot].wparam;
-    out->lParam = s_thread_msgs[slot].lparam;
-    if (remove)
-        ++s_thread_msg_tail;
-    return 1;
+    HANDLE target = user32_thread_target(user32_current_tid());
+    if (target)
+        (void)user32_post_msg_core(target, WM_QUIT, (WPARAM)(unsigned)code, 0);
 }
 
 __declspec(dllexport) BOOL PostThreadMessageA(DWORD tid, UINT msg, WPARAM w, LPARAM l)
 {
-    /* The tid argument names the target thread. v0 only has one
-     * UI thread per process, so any tid that could plausibly be
-     * a thread of this process (matches GetCurrentThreadId) lands
-     * in our shared queue; cross-thread / cross-process posts are
-     * silently dropped — the kernel-side dispatch hop they need
-     * isn't wired yet. */
-    (void)tid;
-    user32_thread_msg_push(msg, w, l);
-    return 1;
+    HANDLE target = user32_thread_target(tid);
+    return target ? user32_post_msg_core(target, msg, w, l) : 0;
 }
 
 __declspec(dllexport) BOOL PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPARAM l)
@@ -623,9 +527,8 @@ __declspec(dllexport) BOOL PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPA
 }
 /* SendMessage is synchronous — it must return the WndProc's
  * result. v1 implements this by pulling the target's WNDPROC
- * out of GWLP_WNDPROC and calling it directly. Cross-process
- * SendMessage returns 0 because SYS_WIN_GET_LONG refuses the
- * read when the HWND is owned by a different pid. */
+ * out of GWLP_WNDPROC and calling it directly. Cross-process and
+ * cross-thread SendMessage return 0 until a kernel broker exists. */
 static LRESULT user32_send_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
     long long rv;
@@ -665,7 +568,7 @@ __declspec(dllexport) BOOL SendNotifyMessageW(HANDLE h, UINT msg, WPARAM w, LPAR
 
 /* Shared core for A and W variants. `title` is an ASCII pointer
  * (caller-owned, NUL-terminated); width/height are clamped by
- * the kernel. Returns a biased compositor handle (or 0). */
+ * the kernel. Returns a generation-tagged compositor handle (or 0). */
 static HANDLE win32_create_window_core(int x, int y, int w, int h, const char* title)
 {
     /* Coerce signed Win32 ints (possibly CW_USEDEFAULT = (int)0x80000000)
@@ -907,9 +810,8 @@ static BOOL user32_getrect_core(HANDLE h, unsigned selector, void* r);
 
 __declspec(dllexport) BOOL IsWindow(HANDLE h)
 {
-    /* A biased compositor index whose owner matches the caller's
-     * pid is a valid window; SYS_WIN_GET_RECT succeeds iff both
-     * of those hold, which is exactly the Win32 IsWindow contract. */
+    /* A live generation-tagged HWND whose owner matches the caller's pid is a
+     * valid window; SYS_WIN_GET_RECT succeeds iff both hold. */
     int local_rect[4];
     return user32_getrect_core(h, 0, local_rect);
 }
@@ -938,9 +840,8 @@ __declspec(dllexport) BOOL SetForegroundWindow(HANDLE h)
 }
 __declspec(dllexport) HANDLE GetDesktopWindow(void)
 {
-    /* v1: no true desktop HWND — return biased handle 0 (== 1
-     * in HWND space) as a sentinel the caller can pass into
-     * GetClientRect to fetch the screen dimensions. */
+    /* v1: no true desktop HWND. NULL remains the sentinel callers can pass
+     * into GetClientRect to fetch the screen dimensions. */
     return (HANDLE)0;
 }
 static BOOL user32_getrect_core(HANDLE h, unsigned selector, void* r)
@@ -1686,7 +1587,7 @@ static void dlg_ensure_ctrl_classes(void)
 
 /* --- Dialog child tracking ---
  * We need GetDlgItem to find a child by control ID. The kernel's
- * GW_CHILD walk returns biased HWNDs but has no concept of
+ * GW_CHILD walk returns opaque generation-tagged HWNDs but has no concept of
  * ctrl_id. We keep a small per-process side table mapping
  * (dialog_hwnd, ctrl_id) -> child_hwnd. */
 struct dlg_child_entry

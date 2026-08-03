@@ -35,9 +35,9 @@ void WifiInit() {}
 
 namespace duetos::sched
 {
-Task* SchedCreate(TaskEntry, void*, const char*, TaskPriority)
+TaskCreateResult SchedCreate(TaskEntry, void*, const char*, TaskPriority)
 {
-    return nullptr;
+    return TaskCreateResult{false, 0};
 }
 void SchedSleepTicks(u64) {}
 void WaitQueueBlock(WaitQueue*) {}

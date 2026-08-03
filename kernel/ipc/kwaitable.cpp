@@ -68,13 +68,16 @@ void KWaitableDestroy(KObject* obj)
     return idx;
 }
 
-u32 KWaitableWaitForAny(KWaitable* w)
+KWaitableWaitResult KWaitableWaitForAny(KWaitable* w)
 {
     // Pin during the blocking wait so closing every handle while a
     // waiter is parked on the condvar cannot run KWaitableDestroy
-    // and free w out from under us. Same pattern as
-    // KEventWait/KMailboxReceive.
-    KObjectAcquire(&w->base);
+    // and free w out from under us. The caller supplies a live
+    // reference at entry; this pin extends it across blocking.
+    if (w == nullptr || !KObjectAcquire(&w->base))
+    {
+        return {KWaitableWaitStatus::Failed, kWaitableInvalidIndex};
+    }
     sched::MutexLock(&w->inner);
     while (true)
     {
@@ -97,10 +100,15 @@ u32 KWaitableWaitForAny(KWaitable* w)
             {
                 sched::MutexUnlock(&w->inner);
                 KObjectRelease(&w->base);
-                return i;
+                return {KWaitableWaitStatus::Ready, i};
             }
         }
-        sched::CondvarWait(&w->cv, &w->inner);
+        if (sched::CondvarWaitCancellable(&w->cv, &w->inner) == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&w->inner);
+            KObjectRelease(&w->base);
+            return {KWaitableWaitStatus::Cancelled, kWaitableInvalidIndex};
+        }
     }
 }
 
@@ -188,8 +196,8 @@ void KWaitableSelfTest()
     // Set flag B only — wait should return 1 immediately (no
     // condvar wait needed, predicate is already true).
     g_test_flag_b = 1;
-    const u32 got1 = KWaitableWaitForAny(w);
-    if (got1 != 1)
+    const KWaitableWaitResult got1 = KWaitableWaitForAny(w);
+    if (got1.status != KWaitableWaitStatus::Ready || got1.index != 1)
     {
         core::Panic("ipc/kwaitable", "self-test: wait did not return predicate-B index");
     }
@@ -197,8 +205,8 @@ void KWaitableSelfTest()
     // Set both flags — wait returns lowest index (0 for A).
     g_test_flag_a = 1;
     g_test_flag_b = 1;
-    const u32 got2 = KWaitableWaitForAny(w);
-    if (got2 != 0)
+    const KWaitableWaitResult got2 = KWaitableWaitForAny(w);
+    if (got2.status != KWaitableWaitStatus::Ready || got2.index != 0)
     {
         core::Panic("ipc/kwaitable", "self-test: wait did not pick lowest-index when both ready");
     }
@@ -206,8 +214,8 @@ void KWaitableSelfTest()
     // Reset and re-check predicate B alone.
     g_test_flag_a = 0;
     g_test_flag_b = 1;
-    const u32 got3 = KWaitableWaitForAny(w);
-    if (got3 != 1)
+    const KWaitableWaitResult got3 = KWaitableWaitForAny(w);
+    if (got3.status != KWaitableWaitStatus::Ready || got3.index != 1)
     {
         core::Panic("ipc/kwaitable", "self-test: wait did not re-pick B after A cleared");
     }
@@ -241,17 +249,19 @@ void KWaitableSelfTest()
 
     // HandleTable round-trip on the original waitable.
     static HandleTable table{};
-    auto insert_r = HandleTableInsert(table, &w->base);
+    auto insert_r = HandleTableInsert(table, &w->base, TypeAllowedRights(KObjectType::Waitable));
     if (!insert_r.has_value())
     {
         core::Panic("ipc/kwaitable", "self-test: HandleTableInsert failed");
     }
     const Handle h = insert_r.value();
-    if (HandleTableLookup(table, h, KObjectType::Waitable) != &w->base)
+    KObject* looked_up = HandleTableLookupRef(table, h, KObjectType::Waitable);
+    if (looked_up != &w->base)
     {
         core::Panic("ipc/kwaitable", "self-test: lookup did not return waitable");
     }
-    if (HandleTableLookup(table, h, KObjectType::Mutex) != nullptr)
+    KObjectRelease(looked_up);
+    if (HandleTableLookupRef(table, h, KObjectType::Mutex) != nullptr)
     {
         core::Panic("ipc/kwaitable", "self-test: lookup with wrong type-tag returned non-null");
     }

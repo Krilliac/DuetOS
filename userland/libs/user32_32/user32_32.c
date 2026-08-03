@@ -98,10 +98,10 @@ unsigned user32_set_long(HWND hwnd, int slot, unsigned value)
 }
 
 /* The kernel writes 64-bit hwnd / wParam / lParam. Every one of them
- * is truncated to the i386 width here: HWNDs are small biased
- * indices, and wParam/lParam only ever carry values a 32-bit guest
- * put there in the first place, so the high halves are discarded
- * rather than reported. */
+ * is truncated to the i386 width here: HWNDs are PE32-safe public
+ * slot+generation identities, and wParam/lParam only ever carry values a
+ * 32-bit guest put there in the first place, so the high halves are
+ * discarded rather than reported. */
 void user32_msg_unpack(const struct user32_msg_wire* wire, struct user32_msg32* out)
 {
     out->hwnd = (HWND)(unsigned long)wire->hwnd_lo;
@@ -428,14 +428,7 @@ __declspec(dllexport) BOOL __stdcall UpdateWindow(HWND h)
  * Message pump
  * ------------------------------------------------------------------ */
 
-/* PostQuitMessage in real Win32 posts a thread-scoped WM_QUIT that
- * GetMessage yields only once the window queues are drained. Our
- * queues are per-window, so the quit is recorded here and the pump
- * synthesises WM_QUIT after the kernel reports nothing pending. The
- * kernel-side fan-out below is still needed to WAKE a pump already
- * blocked inside SYS_WIN_GET_MSG. */
-static int s_quit_posted = 0;
-static unsigned s_quit_code = 0;
+#define DUETOS_THREAD_MESSAGE_TAG 0x80000000u
 
 static BOOL user32_post_core(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
@@ -454,16 +447,10 @@ __declspec(dllexport) BOOL __stdcall PostMessageW(HWND h, UINT msg, WPARAM w, LP
 
 __declspec(dllexport) void __stdcall PostQuitMessage(int code)
 {
-    s_quit_posted = 1;
-    s_quit_code = (unsigned)code;
-    /* Wake a pump already blocked in the kernel. SYS_WIN_POST_MSG
-     * rejects HWNDs this process does not own, so probing the low
-     * compositor slots is safe; a process that owns no window at all
-     * relies purely on the flag above. */
-    for (unsigned i = 1; i <= 16; ++i)
-    {
-        (void)user32_post_core((HWND)(unsigned long)i, WM_QUIT, (WPARAM)s_quit_code, 0);
-    }
+    const unsigned tid = (unsigned)duet_syscall0(SYS_GETPID);
+    if (tid != 0 && (tid & DUETOS_THREAD_MESSAGE_TAG) == 0)
+        (void)user32_post_core((HWND)(unsigned long)(DUETOS_THREAD_MESSAGE_TAG | tid), WM_QUIT, (WPARAM)(unsigned)code,
+                               0);
 }
 
 /* Non-blocking kernel dequeue into the caller's 28-byte MSG. */
@@ -475,22 +462,7 @@ static BOOL user32_peek_core(struct user32_msg32* msg, HWND filter, int remove)
     if (rv != 1)
         return 0;
     user32_msg_unpack(&wire, msg);
-    if (msg->message == WM_QUIT)
-        s_quit_posted = 0;
     return 1;
-}
-
-/* Fill the caller's MSG with the pending WM_QUIT and consume it. */
-static void user32_synth_quit(struct user32_msg32* msg)
-{
-    msg->hwnd = (HWND)0;
-    msg->message = WM_QUIT;
-    msg->wParam = (WPARAM)s_quit_code;
-    msg->lParam = 0;
-    msg->time = 0;
-    msg->pt_x = 0;
-    msg->pt_y = 0;
-    s_quit_posted = 0;
 }
 
 __declspec(dllexport) BOOL __stdcall GetMessageA(void* lpMsg, HWND hWnd, UINT min, UINT max)
@@ -501,19 +473,6 @@ __declspec(dllexport) BOOL __stdcall GetMessageA(void* lpMsg, HWND hWnd, UINT mi
         return 0;
     struct user32_msg32* msg = (struct user32_msg32*)lpMsg;
 
-    /* A recorded quit must not be allowed to reach the blocking
-     * syscall: a process whose windows are already gone (or which
-     * never created one) would block in the kernel forever. Drain
-     * anything genuinely pending first — Win32 orders WM_QUIT last
-     * — then synthesise. */
-    if (s_quit_posted)
-    {
-        if (user32_peek_core(msg, hWnd, 1))
-            return 1;
-        user32_synth_quit(msg);
-        return 0;
-    }
-
     struct user32_msg_wire wire = {0, 0, 0, 0, 0, 0, 0, 0};
     const int rv = duet_syscall2(SYS_WIN_GET_MSG, (unsigned)(unsigned long)&wire, (unsigned)(unsigned long)hWnd);
     /* rv = 1 for a normal message, 0 when the dequeued message was
@@ -522,8 +481,6 @@ __declspec(dllexport) BOOL __stdcall GetMessageA(void* lpMsg, HWND hWnd, UINT mi
     if (rv < 0)
         return (BOOL)rv;
     user32_msg_unpack(&wire, msg);
-    if (msg->message == WM_QUIT)
-        s_quit_posted = 0;
     return (BOOL)rv;
 }
 
@@ -540,21 +497,7 @@ __declspec(dllexport) BOOL __stdcall PeekMessageA(void* lpMsg, HWND hWnd, UINT m
         return 0;
     struct user32_msg32* msg = (struct user32_msg32*)lpMsg;
     const int remove = (flags & PM_REMOVE) ? 1 : 0;
-    if (user32_peek_core(msg, hWnd, remove))
-        return 1;
-    if (s_quit_posted)
-    {
-        const unsigned code = s_quit_code;
-        user32_synth_quit(msg);
-        if (!remove)
-        {
-            /* A peek without PM_REMOVE must leave the quit pending. */
-            s_quit_posted = 1;
-            s_quit_code = code;
-        }
-        return 1;
-    }
-    return 0;
+    return user32_peek_core(msg, hWnd, remove);
 }
 
 __declspec(dllexport) BOOL __stdcall PeekMessageW(void* lpMsg, HWND hWnd, UINT min, UINT max, UINT flags)
@@ -599,8 +542,8 @@ __declspec(dllexport) LRESULT __stdcall DispatchMessageW(const void* lpMsg)
 
 /* SendMessage is synchronous: it must return the WNDPROC's result,
  * so it resolves the proc and calls it directly rather than queueing.
- * A cross-process target yields 0 because SYS_WIN_GET_LONG refuses
- * the read when the HWND belongs to another pid. */
+ * A cross-process or cross-thread target yields 0 because the kernel
+ * refuses the WNDPROC read until a synchronous broker exists. */
 static LRESULT user32_send_core(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
     if (!h)

@@ -12,9 +12,10 @@ use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::crc_table::CrcTable;
 use crate::format::{
-    Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA, JOURNAL_BLOCKS, JOURNAL_LBA,
-    MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODES_PER_BLOCK, NODE_COUNT, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS,
-    NODE_TABLE_LBA, ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, VERSION,
+    Extent, Node, Superblock, BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_BLOCKS, CRC_TABLE_LBA, DATA_LBA, DIR_MAX_CHILDREN,
+    INVALID_NODE_ID, JOURNAL_BLOCKS, JOURNAL_LBA, MAGIC, MAX_INLINE_EXTENTS, NAME_MAX, NODES_PER_BLOCK, NODE_COUNT,
+    NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_KIND_UNUSED, NODE_SIZE, NODE_TABLE_BLOCKS, NODE_TABLE_LBA,
+    ROOT_NODE_ID, SNAPSHOT_BLOCKS, SNAPSHOT_LBA, SUPERBLOCK_LBA, SYMLINK_TARGET_MAX, VERSION,
 };
 use crate::journal;
 
@@ -57,6 +58,91 @@ pub struct Fs<'d, D: BlockDevice + ?Sized + 'd> {
     /// machine runs off the descriptor's `state` field), so a
     /// saturating increment is fine.
     pub(crate) next_txn_id: u32,
+}
+
+fn extent_is_valid(extent: Extent, data_lba: u32, total_blocks: u32) -> bool {
+    extent.blocks != 0
+        && extent.block >= data_lba
+        && extent
+            .block
+            .checked_add(extent.blocks)
+            .is_some_and(|end| end <= total_blocks)
+}
+
+fn node_semantics_are_valid(
+    id: u32,
+    node: &Node,
+    root_node: u32,
+    node_count: u32,
+    data_lba: u32,
+    total_blocks: u32,
+) -> bool {
+    if node.extent_count as usize > MAX_INLINE_EXTENTS
+        || node.child_count > DIR_MAX_CHILDREN
+        || node.name_len as usize > NAME_MAX
+    {
+        return false;
+    }
+
+    if node.kind == NODE_KIND_UNUSED {
+        return id != root_node
+            && node.size_bytes == 0
+            && node.extent_count == 0
+            && node.child_count == 0
+            && node.name_len == 0
+            && node.link_count == 0
+            && (node.parent_id == 0 || node.parent_id == INVALID_NODE_ID)
+            && node
+                .extents
+                .iter()
+                .all(|extent| extent.block == 0 && extent.blocks == 0)
+            && node.xattr_extent.block == 0
+            && node.xattr_extent.blocks == 0;
+    }
+
+    if !matches!(node.kind, NODE_KIND_FILE | NODE_KIND_DIR | NODE_KIND_SYMLINK)
+        || node.parent_id >= node_count
+        || node.link_count == 0
+        || (id == root_node && node.kind != NODE_KIND_DIR)
+        || (id != root_node && node.name_len == 0)
+        || (node.kind != NODE_KIND_DIR && node.child_count != 0)
+    {
+        return false;
+    }
+
+    let name = &node.name[..node.name_len as usize];
+    if name.iter().any(|byte| *byte == 0 || *byte == b'/' || *byte == b':') {
+        return false;
+    }
+
+    let mut capacity_bytes = 0u64;
+    for extent in &node.extents[..node.extent_count as usize] {
+        if !extent_is_valid(*extent, data_lba, total_blocks) {
+            return false;
+        }
+        capacity_bytes = match capacity_bytes.checked_add((extent.blocks as u64) * (BLOCK_SIZE as u64)) {
+            Some(capacity) => capacity,
+            None => return false,
+        };
+    }
+    if node.size_bytes as u64 > capacity_bytes {
+        return false;
+    }
+
+    if node.kind == NODE_KIND_DIR
+        && (node.extent_count == 0 || node.size_bytes != node.child_count * core::mem::size_of::<u32>() as u32)
+    {
+        return false;
+    }
+    if node.kind == NODE_KIND_SYMLINK && node.size_bytes > SYMLINK_TARGET_MAX {
+        return false;
+    }
+
+    if node.xattr_extent.blocks == 0 {
+        node.xattr_extent.block == 0
+    } else {
+        node.xattr_extent.blocks == 1 && extent_is_valid(node.xattr_extent, data_lba, total_blocks)
+    }
 }
 
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
@@ -128,7 +214,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
 
     // -------- Node table I/O --------
 
-    pub(crate) fn read_node(&self, id: u32) -> FsResult<Node> {
+    pub(crate) fn read_node_raw(&self, id: u32) -> FsResult<Node> {
         if id >= self.sb.node_count {
             return Err(FsError::NotFound);
         }
@@ -142,8 +228,33 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
         Ok(node)
     }
 
+    pub(crate) fn read_node(&self, id: u32) -> FsResult<Node> {
+        let node = self.read_node_raw(id)?;
+        if !node_semantics_are_valid(
+            id,
+            &node,
+            self.sb.root_node,
+            self.sb.node_count,
+            self.sb.data_lba,
+            self.sb.total_blocks,
+        ) {
+            return Err(FsError::Corrupt);
+        }
+        Ok(node)
+    }
+
     pub(crate) fn write_node(&mut self, id: u32, node: &Node) -> FsResult<()> {
         if id >= self.sb.node_count {
+            return Err(FsError::Invalid);
+        }
+        if !node_semantics_are_valid(
+            id,
+            node,
+            self.sb.root_node,
+            self.sb.node_count,
+            self.sb.data_lba,
+            self.sb.total_blocks,
+        ) {
             return Err(FsError::Invalid);
         }
         let lba = self.sb.node_table_lba + id / (NODES_PER_BLOCK as u32);
@@ -335,4 +446,38 @@ pub(crate) fn compute_sb_crc(sb: &Superblock) -> u32 {
         )
     };
     crc32(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crafted_directory_child_count_is_rejected_before_indexing() {
+        let mut node = Node::unused();
+        node.kind = NODE_KIND_DIR;
+        node.parent_id = ROOT_NODE_ID;
+        node.link_count = 1;
+        assert!(node.set_name(b"dir"));
+        node.extents[0] = Extent {
+            block: DATA_LBA,
+            blocks: 1,
+        };
+        node.extent_count = 1;
+
+        let mut encoded = [0u8; NODE_SIZE];
+        encoded.copy_from_slice(unsafe { core::slice::from_raw_parts((&node as *const Node).cast::<u8>(), NODE_SIZE) });
+        let child_count_offset = 3 * core::mem::size_of::<u32>();
+        encoded[child_count_offset..child_count_offset + 4].copy_from_slice(&(DIR_MAX_CHILDREN + 1).to_le_bytes());
+        let crafted = unsafe { core::ptr::read_unaligned(encoded.as_ptr().cast::<Node>()) };
+
+        assert!(!node_semantics_are_valid(
+            1,
+            &crafted,
+            ROOT_NODE_ID,
+            NODE_COUNT,
+            DATA_LBA,
+            DATA_LBA + 8,
+        ));
+    }
 }

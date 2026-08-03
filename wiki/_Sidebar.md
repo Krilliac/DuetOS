@@ -21,6 +21,7 @@
 - [Syscalls](kernel/Syscalls.md)
 - [IPC](kernel/IPC.md)
 - [Process Model](kernel/Process-Model.md)
+- [Service Bootstrap](kernel/Service-Bootstrap.md)
 - [Image Loaders](kernel/Loader.md)
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
 - [Privileged-Origin Mode](kernel/Privileged-Origin.md)

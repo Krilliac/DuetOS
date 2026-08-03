@@ -15,29 +15,28 @@ struct AddressSpace;
 /*
  * SMP AP bring-up.
  *
- * Current scope (as of decision log #023):
+ * Current scope:
  *   - MADT LAPIC enumeration identifies BSP + AP candidates
  *     (`acpi::Lapic(i)`).
  *   - `SmpSendIpi` wraps the LAPIC ICR dance; usable by any future
  *     caller (AP wake-up, TLB shootdown, resched-IPI).
  *   - `SmpStartAps` copies the trampoline image to physical 0x8000,
  *     allocates each AP's stack + `PerCpu`, and drives the full
- *     INIT-SIPI-SIPI sequence. Each AP writes `online_flag` from
- *     `ApEntryFromTrampoline` after installing GSBASE + enabling
- *     its LAPIC; BSP polls with a bounded timeout before moving on.
- *   - AP-side C++ entry halts with interrupts masked — the AP's
- *     LAPIC is live, but the scheduler is not SMP-safe across
- *     context-switch yet (the lock-passing half of the SMP
- *     bring-up plan, Commit D, is still pending — see
- *     `wiki/advanced/SMP-AP-Bringup-Scope.md`).
- *
- * Deferred (see `wiki/advanced/SMP-AP-Bringup-Scope.md`):
- *   - Lock-passing across `ContextSwitch` so a peer CPU can safely
- *     wake tasks that this CPU is about to switch away from.
- *   - `SchedEnterOnAp` — each AP calls `SchedStartIdle("idle-apN")`,
- *     arms its LAPIC timer, and enters the scheduler loop.
- *   - Per-AP TSS + IST (needed alongside ring 3).
- *   - Broadcast-NMI panic halt for Class-A recovery on SMP.
+ *     INIT-SIPI-SIPI sequence with an exact generation + CPU-slot token.
+ *     The trampoline captures all mutable parameters into registers and
+ *     echoes that token before entering C++; the BSP retries SIPI only
+ *     while the exact capture acknowledgement is absent.
+ *   - AP-side C++ waits for a persistent, slot-specific Initialize gate,
+ *     runs the CPUHP chain (GDT/GS/IDT/CR4/syscall MSRs/LAPIC/topology),
+ *     publishes the exact ready token, then waits for a Run gate. The BSP
+ *     publishes the CPU count, slot limit, and `PerCpu::online` before Run,
+ *     so scheduler admission cannot precede routing visibility.
+ *   - A failed or timed-out AP is rejected and parks with interrupts
+ *     masked. If an AP never acknowledges parameter capture, the BSP stops
+ *     launching later APs rather than overwrite the shared trampoline block
+ *     that a late AP could still consume.
+ *   - An admitted AP calls `SchedEnterOnAp`, installs its idle task and
+ *     LAPIC timer, joins TLB shootdown, and enters the scheduler loop.
  *
  * Context: kernel. Run once after SchedInit + IoApicInit +
  * PerCpuInitBsp (BSP's `PerCpu` must be live before APs allocate
@@ -49,9 +48,11 @@ namespace duetos::arch
 
 /// Copy the trampoline to physical 0x8000, allocate each AP's stack
 /// + per-CPU struct, and drive INIT-SIPI-SIPI for every enabled
-/// LAPIC in the MADT other than the BSP's. Returns the number of
-/// APs that reached `ApEntryFromTrampoline` and flipped their
-/// `online_flag` within the bounded polling window.
+/// LAPIC in the MADT other than the BSP's. Returns the number of APs
+/// that completed CPUHP initialization, acknowledged the exact attempt
+/// token, and were admitted to the scheduler. A capture failure aborts
+/// later attempts so the shared trampoline parameters are never reused
+/// while an unacknowledged AP may still consume them.
 u64 SmpStartAps();
 
 /// Register the AP bring-up sequence as states in the cpu::Cpuhp
@@ -63,9 +64,8 @@ u64 SmpStartAps();
 /// the chain is ready to execute. Idempotent.
 void SmpCpuhpRegister();
 
-/// Number of online CPUs (BSP + any APs that successfully entered
-/// `ApEntryFromTrampoline`). BSP is always counted; each AP
-/// increments this on bring-up.
+/// Number of online CPUs (BSP + APs admitted after exact-token CPUHP
+/// readiness). BSP is always counted; rejected or parked APs are not.
 u64 SmpCpusOnline();
 
 /// Send an arbitrary IPI via the LAPIC Interrupt Command Register.
@@ -158,37 +158,50 @@ u32 PanicWaitPeersHalt(u64 spin_budget);
 /// buffer; safe at any context (pure pointer-table read).
 cpu::PerCpu* SmpGetPercpu(u32 cpu_id);
 
-/// Highest cpu_id ever allocated + 1 (i.e. the upper bound of a
-/// `for (id = 0; id < SmpCpuIdLimit(); ++id)` loop). 1 if only the
-/// BSP has come up.
+/// Highest admitted cpu_id + 1 (i.e. the upper bound of a
+/// `for (id = 0; id < SmpCpuIdLimit(); ++id)` loop). Failed attempts
+/// burn their private slots, so callers must tolerate holes and check
+/// `PerCpu::online`. Returns 1 if only the BSP has come up.
 u32 SmpCpuIdLimit();
 
-/// GDB stop-rendezvous broadcast. Sets the global stop-active flag,
-/// then NMI-broadcasts to all CPUs except the caller. Each peer's
-/// vector-2 handler observes the flag and enters a release-spin
-/// (capturing rip/rsp into its PerCpu's `gdb_snapshot_*` fields)
-/// instead of taking the panic-halt path. The calling CPU returns
-/// once the IPI has been delivered; the peers stay frozen until
-/// SmpStopReleaseNmi clears the flag.
+/// Result of one generation-specific GDB stop rendezvous. CPU ids map
+/// directly to bits in each mask (the current architectural cap is 32).
+/// `expected_mask` is snapshotted from online peers before the NMI;
+/// `acknowledged_mask` contains only peers that release-published this
+/// exact generation; `missing_mask` is their difference.
+struct GdbStopRendezvous
+{
+    u64 generation;
+    u64 expected_mask;
+    u64 acknowledged_mask;
+    u64 missing_mask;
+    bool complete;
+};
+
+/// GDB stop-rendezvous broadcast and bounded collective wait. Publishes a
+/// fresh nonzero generation, NMI-broadcasts to all CPUs except the caller,
+/// then samples every expected peer at most `spin_budget + 1` times. Peers
+/// publish their live trap frame and register snapshot before acknowledging
+/// the generation. The returned generation remains active until the matching
+/// SmpStopReleaseNmi call.
 ///
 /// Distinct from PanicBroadcastNmi — that one halts peers forever
 /// because the calling CPU is committed to going down. This one
 /// freezes peers temporarily on a release flag so the calling CPU
 /// can safely run the GDB stop loop without peers stomping on
 /// shared state, then resume them on debugger continue.
-void SmpStopBroadcastNmi();
+GdbStopRendezvous SmpStopBroadcastNmiAndWait(u64 spin_budget);
 
-/// Pair of SmpStopBroadcastNmi: clear the stop-active flag. Each
-/// peer is spinning on it and exits its NMI handler the moment
-/// it observes the clear, returning to the code it was running
-/// when the NMI fired.
-void SmpStopReleaseNmi();
+/// Release only the matching stop generation. A stale caller cannot clear a
+/// newer rendezvous. Returns false if `generation` was zero or no longer owns
+/// the active stop.
+bool SmpStopReleaseNmi(u64 generation);
 
-/// Read of the stop-active flag for the vector-2 NMI handler. Set
-/// by SmpStopBroadcastNmi, cleared by SmpStopReleaseNmi. Plain
-/// load — the broadcast/release pair issues memory barriers around
-/// the flip, so an NMI that arrives between the LAPIC ICR write
-/// and this read sees a consistent value.
+/// Acquire-load the active GDB stop generation. Zero means no stop; a peer NMI
+/// captures the nonzero value once and acknowledges that exact generation.
+u64 SmpGdbStopGeneration();
+
+/// Compatibility predicate for callers that only need active/inactive state.
 bool SmpGdbStopActive();
 
 // ---------------------------------------------------------------------------

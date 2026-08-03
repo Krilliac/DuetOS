@@ -5,16 +5,23 @@
 > **Execution context:** Pre-kernel — runs in UEFI firmware, x86_64
 > long mode, Microsoft x64 ABI, identity-mapped, Boot Services live.
 >
-> **Maturity:** Phase A (toolchain proof) shipped. Phase B (real
-> kernel handoff) pending.
+> **Maturity:** Experimental. Phase A and ELF-header probe B.1 shipped;
+> segment loading and the real kernel handoff are pending.
 
 ## Status
 
 The UEFI loader lives in `boot/uefi/` and produces `BOOTX64.EFI`,
 the PE32+ image a UEFI firmware loads from `EFI/BOOT/BOOTX64.EFI`
-on a FAT32 ESP. It is **not yet** the canonical boot path —
-today the kernel still boots via GRUB + Multiboot2 — but it is a
-real binary that the firmware accepts and runs.
+on a FAT32 ESP. It is **not a supported release boot path**: today the
+kernel boots through GRUB + Multiboot2 on either BIOS or UEFI firmware.
+The direct loader is a real binary that firmware accepts and runs, but it
+halts after validating the kernel ELF header.
+
+Promotion out of experimental status requires all of the following in one
+versioned contract: load the ELF `PT_LOAD` segments, call
+`ExitBootServices`, build a versioned `BootInfo`, hand control to the kernel,
+and gate that complete path in required CI. Until then, a passing direct-UEFI
+smoke proves only the bounded loader phase named by the test.
 
 The loader has two phases (Phase B is itself sliced):
 
@@ -22,8 +29,8 @@ The loader has two phases (Phase B is itself sliced):
 | ----- | ----- | ------ |
 | **A**     | Toolchain + ABI proof. `efi_main` prints a banner via `ConOut->OutputString` + COM1, calls `BootServices->Stall`, halts. No kernel handoff. | ✅ Shipped |
 | **B.1**   | File-system probe + ELF header validation. Walks `image_handle → LoadedImage → DeviceHandle → SimpleFileSystem → root → \duetos-kernel.elf`, reads the 64-byte `Elf64_Ehdr`, validates magic / class / endianness / `EM_X86_64` / `e_phnum`, logs `e_entry`. Halts. No segment load yet. | ✅ Shipped |
-| **B.2**   | Allocate pages, load each `PT_LOAD` segment, set up the kernel page tables (or hand the kernel its own setup), build a DuetOS-shaped boot info struct (memory map + framebuffer + cmdline). | ⏳ Pending |
-| **B.3**   | `ExitBootServices`, jump to a new `entry_uefi` symbol in `boot.S` that takes the boot info struct in 64-bit long mode. | ⏳ Pending |
+| **B.2**   | Allocate pages, load each `PT_LOAD` segment, set up the kernel page tables (or hand the kernel its own setup), and build a versioned DuetOS `BootInfo` (memory map + framebuffer + cmdline). | ⏳ Pending |
+| **B.3**   | Call `ExitBootServices`, jump to a new `entry_uefi` symbol in `boot.S` with the versioned `BootInfo`, and pass the complete path in required CI. | ⏳ Pending |
 
 ## Why two phases
 
@@ -61,7 +68,7 @@ The flags reflect the loader's freestanding stance — see
 `boot/uefi/CMakeLists.txt` for the full list with per-flag
 rationale comments.
 
-## Smoke-testing in QEMU + OVMF
+## Experimental smoke-testing in QEMU + OVMF
 
 ```
 # One-time install (from CLAUDE.md's live-test runtime tooling)
@@ -81,7 +88,10 @@ from the ESP, hands control to `efi_main`, and the loader's
 banner ("`DuetOS UEFI loader v0 (Phase A: toolchain proof)`")
 should appear on the OVMF console. After 2 s of `Stall` the
 loader hits its `cli; hlt` loop — the firmware sees a hung
-guest and the QEMU window stays at the banner.
+guest and the QEMU window stays at the banner. This deliberately retained
+smoke must not be interpreted as a kernel-boot test; the required release
+gate is `tools/test/ctest-boot-smoke.sh`, which boots through GRUB +
+Multiboot2.
 
 ## Anatomy
 

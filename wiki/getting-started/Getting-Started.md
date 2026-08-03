@@ -49,6 +49,11 @@ Output:
 - `build/x86_64-debug/kernel/duetos-kernel.elf`
 - `build/x86_64-debug/duetos.iso`
 
+`duetos.iso` is the supported release shape: on BIOS or UEFI firmware it
+starts GRUB, which hands the kernel over through Multiboot2. The separate
+`boot/uefi/BOOTX64.EFI` target is experimental and does not yet hand off to
+the kernel.
+
 ## Boot in QEMU
 
 ```bash

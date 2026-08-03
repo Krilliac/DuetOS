@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/traps.h"
 #include "diag/hexdump.h"
+#include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -97,6 +98,34 @@ void FormatBytesHex(char* dst, u32 cap, const u8* bytes, u8 n)
         dst[cap - 1] = 0;
 }
 
+// Scan every candidate byte even after the caller's result buffer fills.
+// `stored_count` is bounded by cap; `match_count` records exact truncation so
+// the public ScanBytes path can surface it after dropping any VM locks.
+void ScanSpan(const u8* bytes, u64 size, u64 base, const u8* needle, usize nlen, u64* hits, usize cap,
+              usize& stored_count, usize& match_count)
+{
+    if (size < nlen)
+        return;
+    const u64 last_start = size - static_cast<u64>(nlen);
+    for (u64 off = 0; off <= last_start; ++off)
+    {
+        bool match = true;
+        for (usize k = 0; k < nlen; ++k)
+        {
+            if (bytes[off + k] != needle[k])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (!match)
+            continue;
+        ++match_count;
+        if (stored_count < cap)
+            hits[stored_count++] = base + off;
+    }
+}
+
 } // namespace
 
 namespace
@@ -151,11 +180,14 @@ usize EnumerateProcesses(ProcInfo* out, usize cap)
         ::duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
             continue;
+        ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access)
+            continue;
         ProcInfo& row = out[count];
         row.pid = p->pid;
         StrCopyTrunc(row.name, sizeof(row.name), p->name != nullptr ? p->name : "?");
         row.state = sched::SchedIsPidZombie(p->pid) ? 3 : 0;
-        row.ticks_used = p->ticks_used;
+        row.ticks_used = ::duetos::core::ProcessTicksUsedSnapshot(p);
         row.region_count = mm::AddressSpaceUserPageCount(p->as);
         ++count;
     }
@@ -170,10 +202,13 @@ bool LookupProcess(u64 pid, ProcInfo* out)
     ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr)
         return false;
+    ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return false;
     out->pid = p->pid;
     StrCopyTrunc(out->name, sizeof(out->name), p->name != nullptr ? p->name : "?");
     out->state = sched::SchedIsPidZombie(pid) ? 3 : 0;
-    out->ticks_used = p->ticks_used;
+    out->ticks_used = ::duetos::core::ProcessTicksUsedSnapshot(p);
     out->region_count = mm::AddressSpaceUserPageCount(p->as);
     return true;
 }
@@ -213,7 +248,10 @@ u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
 
     ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
     ::duetos::core::Process* p = process_ref.Get();
-    if (p == nullptr || p->as == nullptr)
+    if (p == nullptr)
+        return 0;
+    ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
         return 0;
     u64 copied = 0;
     while (copied < len)
@@ -244,7 +282,10 @@ u64 WriteMem(u64 pid, u64 va, const u8* in, u64 len)
         return 0;
     ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
     ::duetos::core::Process* p = process_ref.Get();
-    if (p == nullptr || p->as == nullptr)
+    if (p == nullptr)
+        return 0;
+    ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
         return 0;
     u64 copied = 0;
     while (copied < len)
@@ -267,9 +308,15 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
 {
     if (needle == nullptr || nlen == 0 || hits == nullptr || cap == 0)
         return 0;
+    const usize requested_cap = cap;
     if (cap > kScanResultCap)
+    {
         cap = kScanResultCap;
+        KLOG_WARN_2V("apps/dbg", "ScanBytes result capacity clamped", "requested", static_cast<u64>(requested_cap),
+                     "effective", static_cast<u64>(cap));
+    }
     usize hit_count = 0;
+    usize match_count = 0;
 
     // Kernel-mode scan: sweep .text. The same bounds the breakpoint
     // subsystem uses for software-BP installs. Reads are linear
@@ -282,67 +329,74 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
             return 0;
         const u8* lo = reinterpret_cast<const u8*>(lo_addr);
         const u64 size = hi_addr - lo_addr;
-        for (u64 off = 0; off + nlen <= size && hit_count < cap; ++off)
-        {
-            bool match = true;
-            for (usize k = 0; k < nlen; ++k)
-            {
-                if (lo[off + k] != needle[k])
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (match)
-                hits[hit_count++] = reinterpret_cast<u64>(lo + off);
-        }
+        ScanSpan(lo, size, lo_addr, needle, nlen, hits, cap, hit_count, match_count);
+        if (match_count > hit_count)
+            KLOG_WARN_2V("apps/dbg", "ScanBytes results truncated", "matched", static_cast<u64>(match_count), "stored",
+                         static_cast<u64>(hit_count));
         return hit_count;
     }
 
     ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
     ::duetos::core::Process* p = process_ref.Get();
-    if (p == nullptr || p->as == nullptr)
+    if (p == nullptr)
+        return 0;
+    ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
         return 0;
     mm::AddressSpace* as = p->as;
-    // Walk the regions ledger. Each region is a 4 KiB page; we
-    // scan within each page and across page boundaries within a
-    // region by re-resolving every 4 KiB.
+    // The sleepable mutation lock makes the region count and every numeric
+    // index stable for the complete scan. Each iteration copies only a VA
+    // while the structural spinlock is held; no region-table pointer escapes.
+    // AddressSpaceLookupUserFrame then returns an unpinned frame snapshot,
+    // whose lifetime remains stable because this scope still owns the mutation
+    // lock. Page copying and byte scanning happen with the spinlock released.
+    sched::MutexLock(&as->mutation_lock);
     u16 region_count = 0;
+    bool ledger_valid = true;
     {
         sync::SpinLockGuard region_guard(as->regions_lock);
-        region_count = as->region_count;
+        ledger_valid = as->region_count <= as->region_capacity && as->region_count <= as->frame_budget &&
+                       (as->region_count == 0 || as->regions != nullptr);
+        if (ledger_valid)
+            region_count = as->region_count;
     }
     u8 page[mm::kPageSize];
-    for (u16 r = 0; r < region_count && hit_count < cap; ++r)
+    u16 failed_region = 0;
+    for (u16 r = 0; ledger_valid && r < region_count; ++r)
     {
         u64 base = 0;
         {
             sync::SpinLockGuard region_guard(as->regions_lock);
             if (r >= as->region_count)
+            {
+                ledger_valid = false;
+                failed_region = r;
                 break;
+            }
             base = as->regions[r].vaddr;
         }
-        if (!mm::AddressSpaceReadUserMemory(as, base, page, sizeof(page)))
-            continue;
+        const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, base);
+        if (frame == mm::kNullFrame)
+        {
+            ledger_valid = false;
+            failed_region = r;
+            break;
+        }
+        const auto* source = static_cast<const u8*>(mm::PhysToVirt(frame));
+        for (u64 offset = 0; offset < mm::kPageSize; ++offset)
+            page[offset] = source[offset];
         // Scan the 4 KiB page; tail-spill match must fit before
         // the page end (we deliberately don't span pages here —
         // a needle straddling a page boundary won't match. That's
         // a known v0 GAP; documented in the Disasm wiki page.
-        for (u64 off = 0; off + nlen <= 0x1000 && hit_count < cap; ++off)
-        {
-            bool match = true;
-            for (usize k = 0; k < nlen; ++k)
-            {
-                if (page[off + k] != needle[k])
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (match)
-                hits[hit_count++] = base + off;
-        }
+        ScanSpan(page, sizeof(page), base, needle, nlen, hits, cap, hit_count, match_count);
     }
+    sched::MutexUnlock(&as->mutation_lock);
+    if (!ledger_valid)
+        KLOG_WARN_V("apps/dbg", "ScanBytes aborted on incoherent region ledger index", failed_region);
+    if (match_count > hit_count)
+        KLOG_WARN_2V("apps/dbg", "ScanBytes results truncated", "matched", static_cast<u64>(match_count), "stored",
+                     static_cast<u64>(hit_count));
     return hit_count;
 }
 

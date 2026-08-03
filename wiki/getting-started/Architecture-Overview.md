@@ -356,12 +356,17 @@ The repository keeps CI/release automation in-tree as the source of truth:
   - Format enforcement (`clang-format`)
   - Debug + release configure/build presets
   - Boot smoke (`tools/test/ctest-boot-smoke.sh`) in CI
+  - On a qualifying push to `main`, its fully gated `publish-rolling` job is
+    the sole automatic writer of `latest-debug` and `latest-release`
 - [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-  - Builds debug + release assets
-  - Publishes rolling release tags to:
+  - Builds and smoke-gates debug, release, and flavor assets for an intentional
+    promotion
+  - Publishes release channels to:
     - `latest-debug` (debug channel)
     - `latest-release` (release channel)
-  - Triggers from `main`, `v*` tags, and manual dispatch
+    - `latest-flavors` (specialized preset bundle)
+  - Triggers only from `v*` tag pushes and manual dispatch; ordinary `main`
+    pushes cannot enter it
 - [`.github/workflows/lifetime-downloads.yml`](../.github/workflows/lifetime-downloads.yml)
   - Maintains a real cumulative download tally on a separate
     `stats` branch (`lifetime-downloads.json`) that the README's
@@ -388,8 +393,14 @@ Artifact channels are intentionally split:
 The Actions-tab run artifacts are short-retention diagnostics; GitHub Releases
 under the two rolling tags are the long-lived distribution channels.
 
+The tag/manual promotion path has a stricter source-identity rule than the UI
+currently enforces: a pushed `v*` tag must be protected and immutable, and a
+manual `source_ref` must name a full commit SHA or equivalently immutable
+version tag. Do not manually publish from a moving branch such as `main` (the
+current legacy default). Enforcing and attesting that immutable resolution is a
+remaining release-provenance gap.
+
 The `stats` branch is auto-maintained by the lifetime-downloads
 workflow and is intentionally not part of `main`'s history. It
 holds only `lifetime-downloads.json` plus a one-line README, and
 should never be checked out as a working branch.
-

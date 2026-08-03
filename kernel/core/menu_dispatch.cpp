@@ -10,10 +10,10 @@
  * The action-id allocation bands are:
  *   1..6     desktop / start menu — about, cycle, list, ping,
  *            switch-to-tty, help
- *   10..11   raise / close target window (used by hover-menu
- *            entries that already carry a target HWND in ctx)
+ *   10..11   raise / close target window (used by window menus;
+ *            target is the separate generation-tagged identity)
  *   20..25   window system menu — restore, move, size, minimize,
- *            maximize, close. ctx = target HWND.
+ *            maximize, close. target uses that same identity.
  *   30..33   Files-app row context menu — open, rename (GAP),
  *            delete, properties. ctx = row index.
  *   34..39   Files-app row context menu (extended FAT32) —
@@ -184,10 +184,30 @@ void PrintShortcutHelp()
     ConsoleWriteln("");
 }
 
-void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
+void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx, duetos::u32 window_identity)
 {
     using duetos::arch::SerialWrite;
     using duetos::arch::SerialWriteHex;
+
+    // Only the window-action bands consume MenuWindowIdentity. Generic ctx
+    // remains untouched for Files row indices and TrackPopupMenu's sentinel.
+    // Callers hold CompositorLock, so generation resolution and the immediate
+    // action below are one lifetime transaction.
+    const bool is_window_action = action == 10 || action == 11 || (action >= 20 && action <= 25);
+    duetos::drivers::video::WindowHandle window_target = duetos::drivers::video::kWindowInvalid;
+    if (is_window_action)
+    {
+        window_target = duetos::drivers::video::WindowResolvePublicHandle(window_identity);
+        if (window_target == duetos::drivers::video::kWindowInvalid)
+        {
+            SerialWrite("[ui] stale window-menu action cancelled action=");
+            SerialWriteHex(action);
+            SerialWrite(" hwnd=");
+            SerialWriteHex(window_identity);
+            SerialWrite("\n");
+            return;
+        }
+    }
     switch (action)
     {
     case 1: // ABOUT DUETOS
@@ -284,27 +304,26 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         break;
     }
     case 10: // RAISE <ctx>
-        duetos::drivers::video::WindowRaise(ctx);
+        duetos::drivers::video::WindowRaise(window_target);
         SerialWrite("[ui] ctx raise window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     case 11: // CLOSE <ctx>
-        duetos::drivers::video::WindowClose(ctx);
+        duetos::drivers::video::WindowClose(window_target);
         SerialWrite("[ui] ctx close window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
-    // Window system menu (action ids 20..25). ctx = target HWND.
-    // 21 (MOVE) and 22 (SIZE) are GAPs in v0 — see CLAUDE.md
-    // "Subsystem-Isolation" doc; needs a modal-input mode that
-    // doesn't yet exist. 22 SIZE is shipped disabled; 21 MOVE
-    // does a one-shot recenter under the cursor as a degraded
-    // stand-in. Re-enable both when modal-input lands.
+    // Window system menu (action ids 20..25). The target is the
+    // separately captured public HWND; ctx remains an opaque payload.
+    // MOVE and SIZE continue through modal callbacks. Each callback
+    // resolves the press-time identity again so a close/reuse cancels
+    // instead of operating on a later slot generation.
     case 20: // RESTORE
-        duetos::drivers::video::WindowRestore(ctx);
+        duetos::drivers::video::WindowRestore(window_target);
         SerialWrite("[ui] ctx restore window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     case 21: // MOVE — modal cursor-follow
@@ -316,20 +335,26 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         // under it); Esc cancels and restores the anchor.
         struct MoveCtx
         {
-            duetos::drivers::video::WindowHandle hwnd;
+            duetos::u32 window_identity;
             duetos::u32 anchor_cx, anchor_cy;
             duetos::u32 anchor_x, anchor_y;
         };
         static MoveCtx s_move{};
-        s_move.hwnd = ctx;
+        s_move.window_identity = window_identity;
         duetos::drivers::video::CursorPosition(&s_move.anchor_cx, &s_move.anchor_cy);
-        duetos::drivers::video::WindowGetBounds(ctx, &s_move.anchor_x, &s_move.anchor_y, nullptr, nullptr);
+        duetos::drivers::video::WindowGetBounds(window_target, &s_move.anchor_x, &s_move.anchor_y, nullptr, nullptr);
         duetos::drivers::video::ModalInputCallbacks cb{};
         cb.cursor = duetos::drivers::video::CursorShape::Hand;
         cb.user = &s_move;
         cb.motion = [](duetos::u32 cx, duetos::u32 cy, void* user)
         {
             const auto* m = static_cast<const MoveCtx*>(user);
+            const auto hwnd = duetos::drivers::video::WindowResolvePublicHandle(m->window_identity);
+            if (hwnd == duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::ModalInputOnCancel();
+                return;
+            }
             const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(m->anchor_cx);
             const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(m->anchor_cy);
             const duetos::u32 nx =
@@ -340,17 +365,21 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
                 (dy >= 0)
                     ? m->anchor_y + static_cast<duetos::u32>(dy)
                     : (m->anchor_y > static_cast<duetos::u32>(-dy) ? m->anchor_y - static_cast<duetos::u32>(-dy) : 0);
-            duetos::drivers::video::WindowMoveTo(m->hwnd, nx, ny);
+            duetos::drivers::video::WindowMoveTo(hwnd, nx, ny);
         };
         cb.commit = [](duetos::u32 /*cx*/, duetos::u32 /*cy*/, void* /*user*/) {};
         cb.cancel = [](void* user)
         {
             const auto* m = static_cast<const MoveCtx*>(user);
-            duetos::drivers::video::WindowMoveTo(m->hwnd, m->anchor_x, m->anchor_y);
+            const auto hwnd = duetos::drivers::video::WindowResolvePublicHandle(m->window_identity);
+            if (hwnd != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::WindowMoveTo(hwnd, m->anchor_x, m->anchor_y);
+            }
         };
         duetos::drivers::video::ModalInputBegin(cb);
         SerialWrite("[ui] ctx move modal-begin window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     }
@@ -362,56 +391,65 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         // Press commits the size; Esc restores anchor.
         struct SizeCtx
         {
-            duetos::drivers::video::WindowHandle hwnd;
+            duetos::u32 window_identity;
             duetos::u32 anchor_cx, anchor_cy;
             duetos::u32 anchor_w, anchor_h;
         };
         static SizeCtx s_size{};
-        s_size.hwnd = ctx;
+        s_size.window_identity = window_identity;
         duetos::drivers::video::CursorPosition(&s_size.anchor_cx, &s_size.anchor_cy);
-        duetos::drivers::video::WindowGetBounds(ctx, nullptr, nullptr, &s_size.anchor_w, &s_size.anchor_h);
+        duetos::drivers::video::WindowGetBounds(window_target, nullptr, nullptr, &s_size.anchor_w, &s_size.anchor_h);
         duetos::drivers::video::ModalInputCallbacks cb{};
         cb.cursor = duetos::drivers::video::CursorShape::ResizeNWSE;
         cb.user = &s_size;
         cb.motion = [](duetos::u32 cx, duetos::u32 cy, void* user)
         {
             const auto* sz = static_cast<const SizeCtx*>(user);
+            const auto hwnd = duetos::drivers::video::WindowResolvePublicHandle(sz->window_identity);
+            if (hwnd == duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::ModalInputOnCancel();
+                return;
+            }
             const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(sz->anchor_cx);
             const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(sz->anchor_cy);
-            duetos::drivers::video::WindowResizeFromEdge(sz->hwnd,
-                                                         duetos::drivers::video::WindowResizeEdge::BottomRight,
+            duetos::drivers::video::WindowResizeFromEdge(hwnd, duetos::drivers::video::WindowResizeEdge::BottomRight,
                                                          /*ax*/ 0, /*ay*/ 0, sz->anchor_w, sz->anchor_h, dx, dy);
         };
         cb.commit = [](duetos::u32 /*cx*/, duetos::u32 /*cy*/, void* /*user*/) {};
         cb.cancel = [](void* user)
         {
             const auto* sz = static_cast<const SizeCtx*>(user);
-            duetos::drivers::video::WindowResizeFromEdge(sz->hwnd,
-                                                         duetos::drivers::video::WindowResizeEdge::BottomRight, 0, 0,
-                                                         sz->anchor_w, sz->anchor_h, 0, 0);
+            const auto hwnd = duetos::drivers::video::WindowResolvePublicHandle(sz->window_identity);
+            if (hwnd != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::WindowResizeFromEdge(hwnd,
+                                                             duetos::drivers::video::WindowResizeEdge::BottomRight, 0,
+                                                             0, sz->anchor_w, sz->anchor_h, 0, 0);
+            }
         };
         duetos::drivers::video::ModalInputBegin(cb);
         SerialWrite("[ui] ctx size modal-begin window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     }
     case 23: // MINIMIZE
-        duetos::drivers::video::WindowMinimize(ctx);
+        duetos::drivers::video::WindowMinimize(window_target);
         SerialWrite("[ui] ctx minimize window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     case 24: // MAXIMIZE
-        duetos::drivers::video::WindowMaximize(ctx);
+        duetos::drivers::video::WindowMaximize(window_target);
         SerialWrite("[ui] ctx maximize window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     case 25: // CLOSE (system menu) — alias for case 11 with a different label
-        duetos::drivers::video::WindowClose(ctx);
+        duetos::drivers::video::WindowClose(window_target);
         SerialWrite("[ui] ctx sys-close window=");
-        SerialWriteHex(ctx);
+        SerialWriteHex(window_target);
         SerialWrite("\n");
         break;
     // Files-app row context menu. ctx = the row index in the

@@ -23,14 +23,34 @@ set(DUETOS_RUST_TARGET "x86_64-unknown-none" CACHE STRING "Rust bare-metal targe
 set(DUETOS_RUST_PROFILE "release" CACHE STRING "Rust profile used for the kernel Rust link unit")
 set(DUETOS_RUST_BUILD_STD "core,alloc" CACHE STRING "Rust -Z build-std components")
 set(DUETOS_RUST_BUILD_STD_FEATURES "compiler-builtins-mem" CACHE STRING "Rust -Z build-std-features")
+set(DUETOS_RUST_TOOLCHAIN "nightly-2026-01-15")
+
+function(duetos_rust_sandbox_paths name home_var work_var)
+    if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
+        set(temp_root "$ENV{TMPDIR}")
+    elseif(WIN32 AND DEFINED ENV{TEMP} AND NOT "$ENV{TEMP}" STREQUAL "")
+        set(temp_root "$ENV{TEMP}")
+    else()
+        set(temp_root "/tmp")
+    endif()
+    get_filename_component(temp_root "${temp_root}" ABSOLUTE)
+    string(SHA256 sandbox_hash "${CMAKE_BINARY_DIR}|${name}")
+    string(SUBSTRING "${sandbox_hash}" 0 16 sandbox_suffix)
+    set(sandbox_root "${temp_root}/duetos-cargo-${sandbox_suffix}")
+    set(cargo_home "${sandbox_root}/home")
+    set(cargo_work "${sandbox_root}/work")
+    file(MAKE_DIRECTORY "${cargo_home}" "${cargo_work}")
+    set(${home_var} "${cargo_home}" PARENT_SCOPE)
+    set(${work_var} "${cargo_work}" PARENT_SCOPE)
+endfunction()
 
 function(duetos_collect_rust_workspace_depends)
     set(options)
-    set(oneValueArgs AGGREGATE_MANIFEST CHECKER OUTPUT_VAR)
+    set(oneValueArgs AGGREGATE_MANIFEST CHECKER CARGO_HOME CARGO_WORKING_DIRECTORY OUTPUT_VAR)
     set(multiValueArgs)
     cmake_parse_arguments(DUETOS_RUST_WORKSPACE "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-    foreach(required_arg AGGREGATE_MANIFEST CHECKER OUTPUT_VAR)
+    foreach(required_arg AGGREGATE_MANIFEST CHECKER CARGO_HOME CARGO_WORKING_DIRECTORY OUTPUT_VAR)
         if(NOT DUETOS_RUST_WORKSPACE_${required_arg})
             message(FATAL_ERROR "duetos_collect_rust_workspace_depends missing required argument ${required_arg}")
         endif()
@@ -49,11 +69,14 @@ function(duetos_collect_rust_workspace_depends)
         COMMAND "${Python3_EXECUTABLE}" "${checker}"
                 --repo-root "${workspace_root}"
                 --aggregate-manifest "${aggregate_manifest}"
+                --cargo-working-directory "${DUETOS_RUST_WORKSPACE_CARGO_WORKING_DIRECTORY}"
+                --cargo-home "${DUETOS_RUST_WORKSPACE_CARGO_HOME}"
                 --emit-cmake-deps
         RESULT_VARIABLE checker_result
         OUTPUT_VARIABLE checker_output
         ERROR_VARIABLE checker_error
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        TIMEOUT 60
     )
     if(NOT checker_result EQUAL 0)
         string(STRIP "${checker_error}" checker_error)
@@ -68,62 +91,57 @@ function(duetos_collect_rust_workspace_depends)
         message(FATAL_ERROR "Rust workspace checker returned no build dependencies")
     endif()
 
-    # The checker supplies the authoritative current list.  CONFIGURE_DEPENDS
-    # globs rooted only at the derived member manifests make additions/removals
-    # trigger regeneration without duplicating the workspace list by hand.
-    set(workspace_watch_patterns)
-    foreach(dependency IN LISTS workspace_depends)
-        if(dependency MATCHES "/Cargo\\.toml$")
-            get_filename_component(member_dir "${dependency}" DIRECTORY)
-            if(NOT member_dir STREQUAL "${workspace_root}")
-                list(APPEND workspace_watch_patterns
-                    "${member_dir}/*.rs"
-                    "${member_dir}/*.h"
-                    "${member_dir}/*.hh"
-                    "${member_dir}/*.hpp"
-                    "${member_dir}/*.hxx"
-                    "${member_dir}/*.c"
-                    "${member_dir}/*.cc"
-                    "${member_dir}/*.cpp"
-                    "${member_dir}/*.s"
-                    "${member_dir}/*.S"
-                    "${member_dir}/*.asm"
-                    "${member_dir}/*.ld"
-                    "${member_dir}/*.lds"
-                    "${member_dir}/Cargo.toml"
-                    "${member_dir}/.cargo/config"
-                    "${member_dir}/.cargo/config.toml"
-                )
-            endif()
-        endif()
-    endforeach()
-    if(NOT workspace_watch_patterns)
-        message(FATAL_ERROR "Rust workspace checker returned no member manifests")
-    endif()
-
-    file(GLOB_RECURSE workspace_discovered_inputs CONFIGURE_DEPENDS
-        LIST_DIRECTORIES false
-        ${workspace_watch_patterns}
-    )
-    list(APPEND workspace_depends ${workspace_discovered_inputs} "${checker}")
+    # The bounded checker supplies the authoritative current dependency list.
+    # Do not duplicate its traversal with an unbounded CMake GLOB_RECURSE.
+    # The build-time audit target runs on every requested Rust/kernel build;
+    # Cargo is restricted to --lib, so every newly compiled module must be
+    # introduced through an already tracked source or manifest.
+    list(APPEND workspace_depends "${checker}")
     list(REMOVE_DUPLICATES workspace_depends)
     list(SORT workspace_depends)
 
+    get_filename_component(cargo_config_search_dir "${aggregate_manifest}" DIRECTORY)
+    set(cargo_config_watch_paths)
+    set(rustup_toolchain_watch_paths)
+    while(TRUE)
+        list(APPEND cargo_config_watch_paths
+            "${cargo_config_search_dir}/.cargo/config"
+            "${cargo_config_search_dir}/.cargo/config.toml"
+        )
+        list(APPEND rustup_toolchain_watch_paths
+            "${cargo_config_search_dir}/rust-toolchain"
+            "${cargo_config_search_dir}/rust-toolchain.toml"
+        )
+        if(cargo_config_search_dir STREQUAL workspace_root)
+            break()
+        endif()
+        get_filename_component(cargo_config_parent "${cargo_config_search_dir}" DIRECTORY)
+        if(cargo_config_parent STREQUAL cargo_config_search_dir)
+            message(FATAL_ERROR "Rust aggregate manifest is outside the workspace root")
+        endif()
+        set(cargo_config_search_dir "${cargo_config_parent}")
+    endwhile()
+
+    # Content edits to an existing source must re-run dependency derivation.
+    # That closes the add-include-now/edit-included-file-later stale-graph gap.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${workspace_root}/Cargo.toml"
         "${aggregate_manifest}"
         "${checker}"
+        ${workspace_depends}
+        ${cargo_config_watch_paths}
+        ${rustup_toolchain_watch_paths}
     )
     set(${DUETOS_RUST_WORKSPACE_OUTPUT_VAR} "${workspace_depends}" PARENT_SCOPE)
 endfunction()
 
 function(duetos_add_rust_staticlib)
     set(options)
-    set(oneValueArgs NAME MANIFEST_PATH OUTPUT_NAME INCLUDE_DIR LIB_VAR INCLUDE_VAR TARGET_VAR)
+    set(oneValueArgs NAME MANIFEST_PATH OUTPUT_NAME INCLUDE_DIR CARGO_HOME CARGO_WORKING_DIRECTORY LIB_VAR INCLUDE_VAR TARGET_VAR)
     set(multiValueArgs EXTRA_DEPENDS)
     cmake_parse_arguments(DUETOS_RUST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-    foreach(required_arg NAME MANIFEST_PATH OUTPUT_NAME LIB_VAR INCLUDE_VAR TARGET_VAR)
+    foreach(required_arg NAME MANIFEST_PATH OUTPUT_NAME CARGO_HOME CARGO_WORKING_DIRECTORY LIB_VAR INCLUDE_VAR TARGET_VAR)
         if(NOT DUETOS_RUST_${required_arg})
             message(FATAL_ERROR "duetos_add_rust_staticlib missing required argument ${required_arg}")
         endif()
@@ -151,12 +169,9 @@ function(duetos_add_rust_staticlib)
         "${target_dir}/${DUETOS_RUST_TARGET}/${profile_output_dir}/lib${DUETOS_RUST_OUTPUT_NAME}.a")
     set(build_stamp
         "${target_dir}/${DUETOS_RUST_TARGET}/${profile_output_dir}/.${DUETOS_RUST_OUTPUT_NAME}.duetos-build.stamp")
-
-    file(GLOB_RECURSE rust_sources CONFIGURE_DEPENDS
-        "${crate_dir}/src/*.rs"
-        "${crate_dir}/Cargo.toml"
-        "${crate_dir}/.cargo/config.toml"
-    )
+    set(cargo_home "${DUETOS_RUST_CARGO_HOME}")
+    set(cargo_working_directory "${DUETOS_RUST_CARGO_WORKING_DIRECTORY}")
+    get_filename_component(cargo_sandbox_root "${cargo_home}" DIRECTORY)
 
     set(workspace_deps
         "${CMAKE_SOURCE_DIR}/Cargo.toml"
@@ -164,13 +179,49 @@ function(duetos_add_rust_staticlib)
         "${CMAKE_SOURCE_DIR}/.cargo/config.toml"
         "${CMAKE_SOURCE_DIR}/rust-toolchain.toml"
     )
+    set(cargo_config_search_dir "${crate_dir}")
+    while(TRUE)
+        foreach(config_name config config.toml)
+            set(config_candidate "${cargo_config_search_dir}/.cargo/${config_name}")
+            if(EXISTS "${config_candidate}")
+                list(APPEND workspace_deps "${config_candidate}")
+            endif()
+        endforeach()
+        if(cargo_config_search_dir STREQUAL CMAKE_SOURCE_DIR)
+            break()
+        endif()
+        get_filename_component(cargo_config_parent "${cargo_config_search_dir}" DIRECTORY)
+        if(cargo_config_parent STREQUAL cargo_config_search_dir)
+            message(FATAL_ERROR "Rust crate directory is outside the workspace root")
+        endif()
+        set(cargo_config_search_dir "${cargo_config_parent}")
+    endwhile()
+    list(REMOVE_DUPLICATES workspace_deps)
 
     add_custom_command(
         OUTPUT "${build_stamp}"
         BYPRODUCTS "${static_lib}"
-        COMMAND "${CMAKE_COMMAND}" -E env
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${cargo_sandbox_root}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${cargo_home}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${cargo_working_directory}"
+        COMMAND "${CMAKE_COMMAND}" -E chdir "${cargo_working_directory}"
+                "${CMAKE_COMMAND}" -E env
+                --unset=RUSTC
+                --unset=RUSTC_WRAPPER
+                --unset=RUSTC_WORKSPACE_WRAPPER
+                --unset=RUSTFLAGS
+                --unset=CARGO_ENCODED_RUSTFLAGS
+                --unset=CARGO_BUILD_RUSTC
+                --unset=CARGO_BUILD_RUSTC_WRAPPER
+                --unset=CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+                --unset=CARGO_BUILD_RUSTFLAGS
+                --unset=CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER
+                --unset=CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS
+                "CARGO_HOME=${cargo_home}"
                 "CARGO_TARGET_DIR=${target_dir}"
+                "RUSTUP_TOOLCHAIN=${DUETOS_RUST_TOOLCHAIN}"
                 "${DUETOS_CARGO_EXE}" build
+                --lib
                 ${profile_flag}
                 --manifest-path "${manifest_path}"
                 --locked
@@ -178,8 +229,10 @@ function(duetos_add_rust_staticlib)
                 -Z build-std=${DUETOS_RUST_BUILD_STD}
                 -Z build-std-features=${DUETOS_RUST_BUILD_STD_FEATURES}
         COMMAND "${CMAKE_COMMAND}" -E touch "${build_stamp}"
-        DEPENDS ${rust_sources} ${workspace_deps} ${DUETOS_RUST_EXTRA_DEPENDS}
-        WORKING_DIRECTORY "${crate_dir}"
+        DEPENDS "${manifest_path}" ${workspace_deps} ${DUETOS_RUST_EXTRA_DEPENDS}
+        # Cleanup must run from a stable directory outside the sandbox it
+        # removes.  Only the Cargo subprocess enters the recreated work dir.
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         COMMENT "Building ${DUETOS_RUST_NAME} Rust crate (${DUETOS_RUST_PROFILE}, ${DUETOS_RUST_TARGET})"
         VERBATIM
     )

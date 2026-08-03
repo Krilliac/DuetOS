@@ -21,9 +21,6 @@ using namespace duetos::core;
 
 constexpr u32 kHeaderFlagsOffset = 16;
 constexpr u32 kHeaderReservedOffset = 20;
-constexpr u32 kHeaderManifestIdentityOffset = 24;
-constexpr u32 kHeaderSignerIdentityOffset = 32;
-constexpr u32 kHeaderProfileIdentityOffset = 40;
 constexpr u32 kRowTransferRefOffset = 8;
 constexpr u32 kRowPolicyOffset = 12;
 constexpr u32 kRowHashOffset = 16;
@@ -525,8 +522,7 @@ int main()
 
         const u8 first_byte = fixture.bytes[0];
         auto* aliased_plan = reinterpret_cast<ServiceManifestPlanV1*>(fixture.bytes.data());
-        EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &fixture.authority,
-                                            aliased_plan),
+        EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &fixture.authority, aliased_plan),
                   ServiceManifestError::AliasedOutput);
         EXPECT_EQ(fixture.bytes[0], first_byte);
 
@@ -575,6 +571,10 @@ int main()
         }
         fixture.bytes[ServiceOffset(1) + 84] = fixture.bytes[ServiceOffset(0) + 84];
         EXPECT_EQ(ValidateMutated(&fixture, &plan), ServiceManifestError::DuplicateServiceName);
+        fixture = Fixture{};
+        WriteLe32(fixture.bytes.data() + ServiceOffset(1) + kRowTransferRefOffset,
+                  fixture.document.services[0].executable_transfer_ref);
+        EXPECT_EQ(ValidateMutated(&fixture, &plan), ServiceManifestError::DuplicateTransferReference);
     }
 
     // Both native documents and independently sealed hostile bytes must form a

@@ -111,6 +111,30 @@ still balanced.
 (`SpawnElfFile` / `SpawnElfLinux`) build on; the structural validators
 also back the `readelf` / `exec` shell tools.
 
+### Service package ELF staging
+
+`ElfLoadImagePrepare` (`elf_load_image.h/.cpp`) is the non-publishing adapter
+between an authenticated immutable executable object and the loader contracts
+used by execd. It reuses `ElfValidate` and `ElfForEachPtLoad`; it does not carry
+a second ELF header parser. The caller supplies the exact hash from a separately
+authenticated package authority, a nonzero memory-object identity, frame hooks,
+and bounded metadata/plan storage. The adapter:
+
+1. hashes the stable source extent and compares it with that external authority;
+2. preflights every PT_LOAD for checked file/VA bounds, the 256 MiB per-segment
+   ceiling, user-canonical range, W^X, and an executable entry point;
+3. stages segment bytes and zero-filled tails through `LoadImage`, including
+   deterministic shared-page protection merging;
+4. seals the image and exposes its normal `LoadPlan` bytes; and
+5. releases every acquired frame on any post-initialization failure.
+
+It deliberately stops before `ExecAdmission`, address-space mapping, Task
+creation, or scheduler publication. Activation readiness remains false until
+the boot package binds a separately trusted manifest-authority snapshot, stable
+memory-object identities, sealed serviced/execd plans, admission consumption,
+and the lifecycle publication transaction. A successful staging unit test is
+not an authority or a boot-ready service.
+
 ## DLL Loader
 
 `dll_loader.h` is the PE loader's companion for resolved imports and

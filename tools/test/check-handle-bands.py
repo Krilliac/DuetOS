@@ -89,6 +89,12 @@ PROCESS_RELEASE_TOKENS = {
     "kWin32DirBase":      "win32_dirs",
 }
 
+# Opaque generation-tagged handle families dispatch through a decoder rather
+# than comparing the public value to the legacy low-tag band directly.
+CLOSE_DISPATCH_TOKENS = {
+    "kWin32ProcessBase": "IsWin32ProcessHandle",
+}
+
 
 def find_band_constants(root):
     """Find all handle-band constants across the relevant headers."""
@@ -169,6 +175,7 @@ def main():
 
     # --- DoFileClose coverage ---
     close_found = check_file_for_bands(file_syscall, bands)
+    close_by_token = check_file_for_tokens(file_syscall, CLOSE_DISPATCH_TOKENS)
 
     # --- ProcessRelease coverage ---
     # A band is covered if: (a) its constant name appears in
@@ -181,7 +188,7 @@ def main():
     print("=== DoFileClose (file_syscall.cpp) ===")
     for name in sorted(bands):
         src = bands[name]
-        if name in close_found:
+        if name in close_found or name in close_by_token:
             print(f"  OK    {name} ({src})")
         else:
             print(f"  MISSING  {name} ({src})")

@@ -16,7 +16,8 @@
  *   semget / semop / semctl / semtimedop — named semaphore sets.
  *     8-set global pool, 16 semaphores per set. Each semaphore
  *     has a value + WaitQueue. semop runs a vector of operations
- *     atomically (acquire all under arch::Cli or block); supports
+ *     atomically under the subsystem lock or blocks through a stable
+ *     sequence bridge; supports
  *     the increment / decrement-with-wait / wait-on-zero shapes
  *     that real userland exercises.
  *
@@ -36,6 +37,7 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
+#include "time/tick.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -49,6 +51,8 @@ constexpr i32 kShmAllocBusy = -2;
 
 constexpr u32 kSemPoolCap = 8;
 constexpr u32 kSemPerSet = 16;
+static_assert(kShmPoolCap == kSysvIpcIdPoolCapacity);
+static_assert(kSemPoolCap == kSysvIpcIdPoolCapacity);
 
 // IPC flag bits
 constexpr u64 kIpcCreat = 0x200;
@@ -76,12 +80,13 @@ struct ShmSegment
     bool initializing;
     u8 _pad;
     u32 refcount; // initial allocation reference + active attaches
-    i32 key;      // SysV key passed by the caller (IPC_PRIVATE = 0)
+    u64 incarnation;
+    i32 key; // SysV key passed by the caller (IPC_PRIVATE = 0)
     u32 page_count;
     // Creating process. For IPC_PRIVATE (key == 0) segments — which carry no
     // sharing token — DoShmat refuses attach from any other pid so a
-    // co-resident ELF cannot brute-force shmid 1..8 and map a private
-    // segment. Keyed segments (key != 0) stay shareable by design.
+    // co-resident ELF cannot use a discovered private shmid to map another
+    // process's segment. Keyed segments (key != 0) stay shareable by design.
     u64 owner_pid;
     u64 size_bytes;
     mm::PhysAddr* frames; // KMalloc'd page_count entries
@@ -101,9 +106,11 @@ struct SemSet
     i32 key;
     u32 nsems;
     u32 _pad2;
+    u64 incarnation;
+    u64 wait_sequence;
     // Creating process. Only the owner (or a kCapDebug holder) may
-    // RMID / SETVAL the set, so a co-resident ELF can't brute-force
-    // semid 1..8 and destroy or poison another process's semaphores.
+    // RMID / SETVAL the set, so a co-resident ELF cannot use a discovered
+    // semid to destroy or poison another process's semaphores.
     u64 owner_pid;
     Semaphore sems[kSemPerSet];
 };
@@ -111,6 +118,8 @@ struct SemSet
 ShmSegment g_shm_pool[kShmPoolCap];
 sync::SpinLock g_shm_lock{};
 SemSet g_sem_pool[kSemPoolCap];
+constinit sync::SpinLock g_sem_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 // =========================================================
 // SHM helpers
@@ -255,6 +264,16 @@ struct ShmRetiredFrames
     u32 count{};
 };
 
+// Clear reusable SHM state without resetting the public-id generation. The
+// static slot retires permanently once that generation reaches the bounded
+// positive-int namespace maximum.
+void ShmClearSlotLocked(ShmSegment& segment)
+{
+    const u64 incarnation = segment.incarnation;
+    segment = {};
+    segment.incarnation = incarnation;
+}
+
 // Caller holds g_shm_lock. Detach ownership only; physical release is a
 // separate post-lock phase because FreeFrame/KFree are never spin-safe.
 ShmRetiredFrames ShmRetireIfReadyLocked(ShmSegment& segment)
@@ -262,7 +281,7 @@ ShmRetiredFrames ShmRetireIfReadyLocked(ShmSegment& segment)
     if (!segment.in_use || segment.initializing || segment.refcount != 0 || !segment.marked_destroy)
         return {};
     ShmRetiredFrames retired{segment.frames, segment.page_count};
-    segment = {};
+    ShmClearSlotLocked(segment);
     return retired;
 }
 
@@ -278,7 +297,7 @@ void ShmReleaseRetiredFrames(const ShmRetiredFrames& retired)
     mm::KFree(retired.frames);
 }
 
-bool ShmDropReference(u32 slot)
+bool ShmDropReference(u32 slot, u64 expected_incarnation)
 {
     if (slot >= kShmPoolCap)
         return false;
@@ -286,7 +305,7 @@ bool ShmDropReference(u32 slot)
     bool dropped = false;
     const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     ShmSegment& segment = g_shm_pool[slot];
-    if (segment.in_use && !segment.initializing && segment.refcount > 0)
+    if (segment.in_use && !segment.initializing && segment.incarnation == expected_incarnation && segment.refcount > 0)
     {
         --segment.refcount;
         retired = ShmRetireIfReadyLocked(segment);
@@ -297,7 +316,27 @@ bool ShmDropReference(u32 slot)
     return dropped;
 }
 
-i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
+i64 ShmValidateAttachIngress(u32 slot, u64 expected_incarnation, u64 requester_pid)
+{
+    if (slot >= kShmPoolCap)
+        return kEINVAL;
+    const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+    const ShmSegment& segment = g_shm_pool[slot];
+    i64 result = 0;
+    if (!segment.in_use || segment.initializing || segment.marked_destroy ||
+        segment.incarnation != expected_incarnation || segment.frames == nullptr || segment.page_count == 0)
+    {
+        result = kEINVAL;
+    }
+    else if (segment.key == 0 && segment.owner_pid != requester_pid)
+    {
+        result = kEACCES;
+    }
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
+    return result;
+}
+
+i64 ShmAlloc(i32 key, u64 size, u64 owner_pid)
 {
     if (size == 0 || size > static_cast<u64>(kShmMaxPages) * kPage)
         return -1;
@@ -321,17 +360,18 @@ i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
     }
     for (u32 i = 0; i < kShmPoolCap; ++i)
     {
-        if (g_shm_pool[i].in_use)
+        if (g_shm_pool[i].in_use || g_shm_pool[i].incarnation >= kSysvIpcIdGenerationMax)
             continue;
         ShmSegment& segment = g_shm_pool[i];
-        segment = {};
+        ShmClearSlotLocked(segment);
+        ++segment.incarnation;
         segment.in_use = true;
         segment.initializing = true;
         segment.refcount = 1; // shmget owns the initial reference
         segment.key = key;
         segment.owner_pid = owner_pid;
         segment.page_count = static_cast<u32>(page_count);
-        segment.size_bytes = page_count * kPage;
+        segment.size_bytes = size;
         slot = i;
         break;
     }
@@ -359,6 +399,7 @@ i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
 
     const bool allocation_ok = frames != nullptr && allocated == page_count;
     bool published = false;
+    u32 published_id = 0;
     lock_flags = sync::SpinLockAcquire(g_shm_lock);
     ShmSegment& segment = g_shm_pool[slot];
     if (segment.in_use && segment.initializing && segment.frames == nullptr && segment.key == key &&
@@ -368,11 +409,13 @@ i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
         {
             segment.frames = frames;
             segment.initializing = false;
+            published_id = SysvIpcEncodeId(SysvIpcIdFamily::SharedMemory, slot, segment.incarnation);
+            KASSERT(published_id != 0, "linux/shm", "published segment has unencodable id");
             published = true;
         }
         else
         {
-            segment = {};
+            ShmClearSlotLocked(segment);
         }
     }
     sync::SpinLockRelease(g_shm_lock, lock_flags);
@@ -385,7 +428,7 @@ i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
             mm::KFree(frames);
         return -1;
     }
-    return static_cast<i32>(slot);
+    return published_id;
 }
 
 
@@ -404,10 +447,11 @@ i64 DoShmget(u64 key, u64 size, u64 shmflg)
     const bool create = (shmflg & kIpcCreat) != 0;
     const bool excl = (shmflg & kIpcExcl) != 0;
 
-    // A concurrent creator leaves a short-lived Initializing row. Retry
-    // outside the spin lock so keyed shmget cannot create duplicate segments.
-    constexpr u32 kCreateRetryLimit = 64;
-    for (u32 attempt = 0; attempt < kCreateRetryLimit; ++attempt)
+    // A concurrent creator leaves a short-lived Initializing row. Yield
+    // outside the spin lock until its synchronous allocator publishes or
+    // rolls back, preserving Linux key semantics without duplicate segments
+    // or a transient EAGAIN result.
+    while (true)
     {
         if (ikey != 0)
         {
@@ -421,8 +465,17 @@ i64 DoShmget(u64 key, u64 size, u64 shmflg)
                     sync::SpinLockRelease(g_shm_lock, lock_flags);
                     return -17; // -EEXIST
                 }
+                const ShmSegment& segment = g_shm_pool[static_cast<u32>(existing)];
+                if (size > segment.size_bytes)
+                {
+                    sync::SpinLockRelease(g_shm_lock, lock_flags);
+                    return -22; // -EINVAL: existing segment is smaller than requested
+                }
+                const u32 id =
+                    SysvIpcEncodeId(SysvIpcIdFamily::SharedMemory, static_cast<u32>(existing), segment.incarnation);
+                KASSERT(id != 0, "linux/shm", "key lookup found unencodable segment id");
                 sync::SpinLockRelease(g_shm_lock, lock_flags);
-                return existing + 1;
+                return id;
             }
             for (u32 slot = 0; slot < kShmPoolCap; ++slot)
             {
@@ -443,34 +496,40 @@ i64 DoShmget(u64 key, u64 size, u64 shmflg)
                 return -2; // -ENOENT
         }
 
-        const i32 idx = ShmAlloc(ikey, size, process->pid);
-        if (idx == kShmAllocBusy)
+        if (size == 0 || size > static_cast<u64>(kShmMaxPages) * kPage)
+            return kEINVAL;
+
+        const i64 id = ShmAlloc(ikey, size, process->pid);
+        if (id == kShmAllocBusy)
         {
             sched::SchedYield();
             continue;
         }
-        if (idx < 0)
+        if (id < 0)
             return -28; // -ENOSPC
-        arch::SerialWrite("[linux/shm] alloc idx=");
-        arch::SerialWriteHex(static_cast<u64>(idx));
+        arch::SerialWrite("[linux/shm] alloc id=");
+        arch::SerialWriteHex(static_cast<u64>(id));
         arch::SerialWrite(" key=");
         arch::SerialWriteHex(static_cast<u64>(ikey));
         arch::SerialWrite(" size=");
         arch::SerialWriteHex(size);
         arch::SerialWrite("\n");
-        return idx + 1;
+        return id;
     }
-    return -11; // -EAGAIN: a keyed creator did not publish in bounded retries
 }
 
 i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
 {
-    if (shmid == 0 || shmid > kShmPoolCap)
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(shmid, SysvIpcIdFamily::SharedMemory, &decoded))
         return -22; // -EINVAL
-    const u32 idx = static_cast<u32>(shmid - 1);
+    const u32 idx = decoded.index;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return -22;
+    const i64 ingress_result = ShmValidateAttachIngress(idx, decoded.generation, p->pid);
+    if (ingress_result != 0)
+        return ingress_result;
 
     // Outermost transaction: attach-row selection, VA selection, borrowed
     // PTE commit, and row/cursor publication are one Process operation.
@@ -500,16 +559,25 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     // reference keeps `frames` stable through map or rollback.
     sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     auto& seg = g_shm_pool[idx];
-    const bool ref_saturated = seg.refcount == ~u32{0};
-    if (!seg.in_use || seg.initializing || seg.marked_destroy || seg.frames == nullptr || seg.page_count == 0 ||
-        (seg.key == 0 && seg.owner_pid != p->pid) || ref_saturated)
+    const bool exact_identity =
+        seg.in_use && !seg.initializing && !seg.marked_destroy && seg.incarnation == decoded.generation;
+    const bool denied_private = exact_identity && seg.key == 0 && seg.owner_pid != p->pid;
+    const bool ref_saturated = exact_identity && seg.refcount == ~u32{0};
+    i64 pin_error = 0;
+    if (!exact_identity)
+        pin_error = kEIDRM;
+    else if (denied_private)
+        pin_error = kEACCES;
+    else if (ref_saturated)
+        pin_error = -24; // -EMFILE
+    else if (seg.frames == nullptr || seg.page_count == 0)
+        pin_error = kEINVAL;
+    if (pin_error != 0)
     {
-        const bool denied_private =
-            seg.in_use && !seg.initializing && !seg.marked_destroy && seg.key == 0 && seg.owner_pid != p->pid;
         sync::SpinLockRelease(g_shm_lock, lock_flags);
         const bool aborted = ShmAttachAbort(p, reservation);
         KASSERT(aborted, "linux/shm", "segment revalidation lost reserved attach row");
-        return denied_private ? -13 : (ref_saturated ? -24 : -22);
+        return pin_error;
     }
     // Snapshot and retain the exact frame vector in one locked step.
     mm::PhysAddr* const frames = seg.frames;
@@ -522,7 +590,7 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     // PanicAs gate (kernel halt) rather than fail gracefully.
     if (base >= kShmUserMaxExclusive || static_cast<u64>(pages) * kPage > (kShmUserMaxExclusive - base))
     {
-        const bool dropped = ShmDropReference(idx);
+        const bool dropped = ShmDropReference(idx, decoded.generation);
         KASSERT(dropped, "linux/shm", "range rejection lost segment reference");
         const bool aborted = ShmAttachAbort(p, reservation);
         KASSERT(aborted, "linux/shm", "range rejection lost reserved attach row");
@@ -538,7 +606,7 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     // segment reference above keeps the frame vector alive while this sleeps.
     if (!mm::AddressSpaceMapBorrowedRange(p->as, base, frames, pages, kFlags))
     {
-        const bool dropped = ShmDropReference(idx);
+        const bool dropped = ShmDropReference(idx, decoded.generation);
         KASSERT(dropped, "linux/shm", "map refusal lost segment reference");
         const bool aborted = ShmAttachAbort(p, reservation);
         KASSERT(aborted, "linux/shm", "map refusal lost reserved attach row");
@@ -554,7 +622,7 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
         KASSERT(unmapped, "linux/shm", "attach publish rollback mismatched borrowed frames");
         const bool aborted = ShmAttachAbort(p, reservation);
         KASSERT(aborted, "linux/shm", "attach publish rollback lost reserved row");
-        const bool dropped = ShmDropReference(idx);
+        const bool dropped = ShmDropReference(idx, decoded.generation);
         KASSERT(dropped, "linux/shm", "publish rollback lost segment reference");
         return -12;
     }
@@ -584,21 +652,22 @@ i64 DoShmdt(u64 shmaddr)
     if (!ShmAttachClaimByBase(p, shmaddr, &claim))
         return -22;
 
-    const u32 idx = claim.published.shmid - 1;
-    if (idx >= kShmPoolCap)
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(claim.published.shmid, SysvIpcIdFamily::SharedMemory, &decoded))
     {
         const bool restored = ShmAttachRestore(p, claim);
         KASSERT(restored, "linux/shm", "invalid detach row could not be restored");
         return -22;
     }
+    const u32 idx = decoded.index;
 
     // Snapshot the pinned segment vector under the metadata critical section,
     // then drop it before the sleepable AddressSpace transaction.
     mm::PhysAddr* frames = nullptr;
     const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     ShmSegment& seg = g_shm_pool[idx];
-    if (seg.in_use && !seg.initializing && seg.frames != nullptr && seg.page_count == claim.published.page_count &&
-        seg.refcount > 0)
+    if (seg.in_use && !seg.initializing && seg.incarnation == decoded.generation && seg.frames != nullptr &&
+        seg.page_count == claim.published.page_count && seg.refcount > 0)
     {
         frames = seg.frames;
     }
@@ -622,7 +691,7 @@ i64 DoShmdt(u64 shmaddr)
 
     // Only after the PTEs and ledger row are gone may the attach reference
     // release the frame vector.
-    const bool dropped = ShmDropReference(idx);
+    const bool dropped = ShmDropReference(idx, decoded.generation);
     KASSERT(dropped, "linux/shm", "successful detach lost segment reference");
     return 0;
 }
@@ -650,13 +719,13 @@ void LinuxShmDrainProcess(core::Process* p)
         auto& att = p->linux_shm_attaches[i];
         if (!att.in_use)
             continue;
-        const bool indexable = att.shmid != 0 && (att.shmid - 1) < kShmPoolCap;
-        const u32 idx = indexable ? (att.shmid - 1) : 0;
-        if (!indexable)
+        SysvIpcDecodedId decoded{};
+        if (!SysvIpcDecodeId(att.shmid, SysvIpcIdFamily::SharedMemory, &decoded))
         {
             att = {};
             continue;
         }
+        const u32 idx = decoded.index;
 
         // Keep the attach reference live while taking an exact frame snapshot
         // and unmapping. If an invariant mismatch occurs, leak the reference
@@ -665,8 +734,8 @@ void LinuxShmDrainProcess(core::Process* p)
         mm::PhysAddr* frames = nullptr;
         const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
         ShmSegment& segment = g_shm_pool[idx];
-        if (segment.in_use && !segment.initializing && segment.frames != nullptr && segment.refcount > 0 &&
-            segment.page_count == att.page_count)
+        if (segment.in_use && !segment.initializing && segment.incarnation == decoded.generation &&
+            segment.frames != nullptr && segment.refcount > 0 && segment.page_count == att.page_count)
         {
             frames = segment.frames;
         }
@@ -683,7 +752,7 @@ void LinuxShmDrainProcess(core::Process* p)
         }
 
         att = {};
-        const bool dropped = ShmDropReference(idx);
+        const bool dropped = ShmDropReference(idx, decoded.generation);
         KASSERT(dropped, "linux/shm", "drain exact unmap lost segment reference");
     }
 }
@@ -691,16 +760,34 @@ void LinuxShmDrainProcess(core::Process* p)
 i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
 {
     (void)user_buf; // shmid_ds copy-out / copy-in deferred; sub-GAP
-    if (shmid == 0 || shmid > kShmPoolCap)
-        return -22;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return -22;
-    const u32 idx = static_cast<u32>(shmid - 1);
+    if (cmd == kIpcInfo)
+    {
+        // Linux treats shmid as an ignored nonnegative int for IPC_INFO and
+        // returns the highest occupied raw table index (zero when empty).
+        if (shmid > kSysvIpcIdMax)
+            return kEINVAL;
+        u32 highest_index = 0;
+        sync::IrqFlags info_lock_flags = sync::SpinLockAcquire(g_shm_lock);
+        for (u32 slot = 0; slot < kShmPoolCap; ++slot)
+        {
+            const ShmSegment& segment = g_shm_pool[slot];
+            if (segment.in_use && !segment.initializing)
+                highest_index = slot;
+        }
+        sync::SpinLockRelease(g_shm_lock, info_lock_flags);
+        return highest_index;
+    }
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(shmid, SysvIpcIdFamily::SharedMemory, &decoded))
+        return -22;
+    const u32 idx = decoded.index;
     const bool has_debug = core::ProcessHasCap(p, core::kCapDebug);
     sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     ShmSegment& seg = g_shm_pool[idx];
-    if (!seg.in_use || seg.initializing)
+    if (!seg.in_use || seg.initializing || seg.marked_destroy || seg.incarnation != decoded.generation)
     {
         sync::SpinLockRelease(g_shm_lock, lock_flags);
         return -22;
@@ -716,11 +803,6 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
         sync::SpinLockRelease(g_shm_lock, lock_flags);
         return -1; // -EPERM
     }
-    if (cmd == kIpcRmid && seg.marked_destroy)
-    {
-        sync::SpinLockRelease(g_shm_lock, lock_flags);
-        return -22; // the initial shmget reference was already consumed
-    }
     if (cmd == kIpcRmid)
     {
         seg.marked_destroy = true;
@@ -731,7 +813,7 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
         ShmReleaseRetiredFrames(retired);
         return 0;
     }
-    if (cmd == kIpcStat || cmd == kIpcSet || cmd == kIpcInfo)
+    if (cmd == kIpcStat || cmd == kIpcSet)
     {
         sync::SpinLockRelease(g_shm_lock, lock_flags);
         return 0; // accept-as-noop; struct copy is sub-GAP
@@ -747,7 +829,104 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
 namespace
 {
 
-i32 SemFindByKey(i32 key)
+constexpr i64 kSemVmx = 32767;
+constexpr u64 kMaxRelativeWaitTicks = ~u64{0} >> 1;
+
+void SemWaitSequencePublishLocked(u64* sequence)
+{
+    const u64 observed = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    if (observed != ~u64{0})
+        __atomic_store_n(sequence, observed + 1, __ATOMIC_RELEASE);
+}
+
+u64 SemWaitSequenceSnapshotLocked(const u64* sequence)
+{
+    return __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+}
+
+struct SemDeadline
+{
+    bool finite;
+    u64 deadline_tick;
+};
+
+bool SemDeadlineReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
+i64 LoadSemDeadline(u64 user_timeout, SemDeadline* deadline)
+{
+    deadline->finite = user_timeout != 0;
+    deadline->deadline_tick = 0;
+    if (!deadline->finite)
+        return 0;
+
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_nsec;
+    } ts;
+    if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_timeout), sizeof(ts)))
+        return kEFAULT;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1'000'000'000)
+        return kEINVAL;
+
+    const u64 period_ns = ::duetos::time::TickPeriodNs();
+    if (period_ns == 0)
+        return kEINVAL;
+
+    constexpr u64 kMax = ~u64{0};
+    const u64 sec = static_cast<u64>(ts.tv_sec);
+    const u64 nsec = static_cast<u64>(ts.tv_nsec);
+    u64 relative_ticks = kMaxRelativeWaitTicks;
+    if (sec <= (kMax - nsec) / 1'000'000'000ull)
+    {
+        const u64 relative_ns = sec * 1'000'000'000ull + nsec;
+        relative_ticks =
+            relative_ns > kMax - (period_ns - 1) ? kMaxRelativeWaitTicks : (relative_ns + (period_ns - 1)) / period_ns;
+        if (relative_ticks > kMaxRelativeWaitTicks)
+            relative_ticks = kMaxRelativeWaitTicks;
+    }
+    deadline->deadline_tick = sched::SchedNowTicks() + relative_ticks;
+    return 0;
+}
+
+i64 SemWaitCancellable(sched::WaitQueue* wq, const u64* sequence, u64 observed_sequence, const SemDeadline& deadline)
+{
+    const u64 now = sched::SchedNowTicks();
+
+    sched::WaitQueueBlockResult result;
+    if (!deadline.finite && observed_sequence != ~u64{0})
+    {
+        result = sched::WaitQueueBlockIfSequenceUnchangedCancellable(wq, sequence, observed_sequence);
+    }
+    else
+    {
+        // A zero-tick scheduler call still classifies cancellation and a
+        // concurrent sequence publication before reporting timeout.
+        u64 wait_ticks =
+            deadline.finite ? (SemDeadlineReached(now, deadline.deadline_tick) ? 0 : deadline.deadline_tick - now) : 1;
+        if (observed_sequence == ~u64{0} && wait_ticks > 1)
+            wait_ticks = 1;
+        result =
+            sched::WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(wq, sequence, observed_sequence, wait_ticks);
+    }
+
+    if (result == sched::WaitQueueBlockResult::Cancelled)
+        return kEINTR;
+    if (result == sched::WaitQueueBlockResult::TimedOut)
+    {
+        if (!deadline.finite)
+            return 0;
+        if (observed_sequence == ~u64{0} && !SemDeadlineReached(sched::SchedNowTicks(), deadline.deadline_tick))
+            return 0;
+        return kEAGAIN;
+    }
+    return 0;
+}
+
+i32 SemFindByKeyLocked(i32 key)
 {
     if (key == 0)
         return -1;
@@ -757,31 +936,30 @@ i32 SemFindByKey(i32 key)
     return -1;
 }
 
-i32 SemAlloc(i32 key, u32 nsems, u64 owner_pid)
+i32 SemAllocLocked(i32 key, u32 nsems, u64 owner_pid)
 {
     if (nsems == 0 || nsems > kSemPerSet)
         return -1;
-    arch::Cli();
     for (u32 i = 0; i < kSemPoolCap; ++i)
     {
-        if (g_sem_pool[i].in_use)
+        if (g_sem_pool[i].in_use || g_sem_pool[i].incarnation >= kSysvIpcIdGenerationMax)
             continue;
         SemSet& s = g_sem_pool[i];
+        ++s.incarnation;
         s.in_use = true;
         s.marked_destroy = false;
         s.key = key;
         s.nsems = nsems;
         s.owner_pid = owner_pid;
         for (u32 j = 0; j < kSemPerSet; ++j)
-        {
             s.sems[j].value = 0;
-            s.sems[j].wq.head = nullptr;
-            s.sems[j].wq.tail = nullptr;
-        }
-        arch::Sti();
+        // WaitQueue links are persistent static-slot state. At a saturated
+        // epoch, a removed incarnation's one-tick fallback may still be
+        // scheduler-linked while this slot is reused, so never reset them
+        // outside g_sched_lock.
+        SemWaitSequencePublishLocked(&s.wait_sequence);
         return static_cast<i32>(i);
     }
-    arch::Sti();
     return -1;
 }
 
@@ -795,29 +973,58 @@ i64 DoSemget(u64 key, u64 nsems, u64 semflg)
     const i32 ikey = static_cast<i32>(key);
     const bool create = (semflg & kIpcCreat) != 0;
     const bool excl = (semflg & kIpcExcl) != 0;
+    auto lock_flags = sync::SpinLockAcquire(g_sem_lock);
     if (ikey != 0)
     {
-        const i32 existing = SemFindByKey(ikey);
+        const i32 existing = SemFindByKeyLocked(ikey);
         if (existing >= 0)
         {
             if (create && excl)
+            {
+                sync::SpinLockRelease(g_sem_lock, lock_flags);
                 return -17;
-            return existing + 1;
+            }
+            const SemSet& set = g_sem_pool[static_cast<u32>(existing)];
+            if (nsems > set.nsems)
+            {
+                sync::SpinLockRelease(g_sem_lock, lock_flags);
+                return kEINVAL;
+            }
+            const u32 id = SysvIpcEncodeId(SysvIpcIdFamily::Semaphore, static_cast<u32>(existing), set.incarnation);
+            KASSERT(id != 0, "linux/sem", "key lookup found unencodable semaphore id");
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return id;
         }
         if (!create)
+        {
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
             return -2;
+        }
     }
-    const i32 idx = SemAlloc(ikey, static_cast<u32>(nsems), p->pid);
+    if (nsems == 0 || nsems > kSemPerSet)
+    {
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
+        return kEINVAL;
+    }
+    const i32 idx = SemAllocLocked(ikey, static_cast<u32>(nsems), p->pid);
+    u32 id = 0;
+    if (idx >= 0)
+    {
+        const SemSet& set = g_sem_pool[static_cast<u32>(idx)];
+        id = SysvIpcEncodeId(SysvIpcIdFamily::Semaphore, static_cast<u32>(idx), set.incarnation);
+        KASSERT(id != 0, "linux/sem", "published semaphore set has unencodable id");
+    }
+    sync::SpinLockRelease(g_sem_lock, lock_flags);
     if (idx < 0)
         return -28;
-    arch::SerialWrite("[linux/sem] alloc idx=");
-    arch::SerialWriteHex(static_cast<u64>(idx));
+    arch::SerialWrite("[linux/sem] alloc id=");
+    arch::SerialWriteHex(id);
     arch::SerialWrite(" key=");
     arch::SerialWriteHex(static_cast<u64>(ikey));
     arch::SerialWrite(" nsems=");
     arch::SerialWriteHex(nsems);
     arch::SerialWrite("\n");
-    return idx + 1;
+    return id;
 }
 
 namespace
@@ -830,184 +1037,279 @@ struct SemBuf
     i16 sem_flg;
 };
 
-// Try to apply every op atomically. Returns true on success (all
-// applied). Returns false when any op would block; callers can
-// then go to sleep on the first blocking semaphore. Caller holds
-// arch::Cli.
-bool SemTryApplyLocked(SemSet& s, const SemBuf* ops, u32 nops, u32* block_idx_out)
+enum class SemApplyResult : u8
 {
-    // First pass: validate that every op can complete without
-    // blocking. If not, identify which sem is the blocker.
+    Applied,
+    WouldBlock,
+    Invalid,
+    OutOfRange,
+};
+
+// Validate and apply the complete vector while g_sem_lock is held. No state is
+// changed unless every operation can complete.
+SemApplyResult SemTryApplyLocked(SemSet& s, const SemBuf* ops, u32 nops, u32* block_idx_out, bool* block_nowait_out)
+{
+    // Linux evaluates a vector in order and rolls every provisional change
+    // back if a later operation blocks. Stage all values so repeated sem_num
+    // entries observe earlier operations without mutating the live set.
+    i64 staged[kSemPerSet]{};
+    for (u32 i = 0; i < s.nsems; ++i)
+        staged[i] = s.sems[i].value;
+
     for (u32 i = 0; i < nops; ++i)
     {
         const u32 sn = ops[i].sem_num;
         if (sn >= s.nsems)
-            return false;
+            return SemApplyResult::Invalid;
         const i32 op = ops[i].sem_op;
-        const i32 cur = s.sems[sn].value;
-        if (op == 0 && cur != 0)
+        if (op == 0)
+        {
+            if (staged[sn] != 0)
+            {
+                *block_idx_out = sn;
+                *block_nowait_out = (static_cast<u32>(ops[i].sem_flg) & kIpcNowait) != 0;
+                return SemApplyResult::WouldBlock;
+            }
+            continue;
+        }
+
+        const i64 next = staged[sn] + op;
+        if (next < 0)
         {
             *block_idx_out = sn;
-            return false;
+            *block_nowait_out = (static_cast<u32>(ops[i].sem_flg) & kIpcNowait) != 0;
+            return SemApplyResult::WouldBlock;
         }
-        if (op < 0 && cur + op < 0)
+        if (next > kSemVmx)
+            return SemApplyResult::OutOfRange;
+        staged[sn] = next;
+    }
+
+    for (u32 i = 0; i < s.nsems; ++i)
+        s.sems[i].value = static_cast<i32>(staged[i]);
+    return SemApplyResult::Applied;
+}
+
+void SemPublishMutationLocked(SemSet& s, const SemBuf* ops, u32 nops)
+{
+    bool changed = false;
+    bool touched[kSemPerSet]{};
+    for (u32 i = 0; i < nops; ++i)
+    {
+        if (ops[i].sem_op != 0)
         {
-            *block_idx_out = sn;
-            return false;
+            changed = true;
+            touched[ops[i].sem_num] = true;
         }
     }
-    // Apply.
-    for (u32 i = 0; i < nops; ++i)
+    if (!changed)
+        return;
+
+    SemWaitSequencePublishLocked(&s.wait_sequence);
+    for (u32 i = 0; i < s.nsems; ++i)
+        if (touched[i])
+            sched::WaitQueueWakeAll(&s.sems[i].wq);
+}
+
+i64 SemValidateIngress(u32 idx, u64 expected_incarnation)
+{
+    SemSet& s = g_sem_pool[idx];
+    auto lock_flags = sync::SpinLockAcquire(g_sem_lock);
+    if (!s.in_use || s.marked_destroy || s.incarnation != expected_incarnation)
     {
-        const u32 sn = ops[i].sem_num;
-        s.sems[sn].value += ops[i].sem_op;
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
+        return kEINVAL;
     }
-    // Wake every sem queue we touched (incremented). A real Linux
-    // does selective wake based on the op; v0 wakes every sem
-    // we incremented, callers re-check.
-    for (u32 i = 0; i < nops; ++i)
+    sync::SpinLockRelease(g_sem_lock, lock_flags);
+    return 0;
+}
+
+i64 SemOperate(u32 idx, u64 expected_incarnation, const SemBuf* ops, u32 nops, const SemDeadline& deadline)
+{
+    SemSet& s = g_sem_pool[idx];
+
+    while (true)
     {
-        if (ops[i].sem_op > 0)
-            sched::WaitQueueWakeAll(&s.sems[ops[i].sem_num].wq);
+        auto lock_flags = sync::SpinLockAcquire(g_sem_lock);
+        if (!s.in_use || s.marked_destroy || s.incarnation != expected_incarnation)
+        {
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kEIDRM;
+        }
+
+        u32 block_idx = 0;
+        bool block_nowait = false;
+        const SemApplyResult apply = SemTryApplyLocked(s, ops, nops, &block_idx, &block_nowait);
+        if (apply == SemApplyResult::Applied)
+        {
+            SemPublishMutationLocked(s, ops, nops);
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return 0;
+        }
+        if (apply == SemApplyResult::Invalid)
+        {
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kEINVAL;
+        }
+        if (apply == SemApplyResult::OutOfRange)
+        {
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kERANGE;
+        }
+        if (block_nowait)
+        {
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kEAGAIN;
+        }
+
+        sched::WaitQueue* wq = &s.sems[block_idx].wq;
+        const u64 observed_sequence = SemWaitSequenceSnapshotLocked(&s.wait_sequence);
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
+        const i64 wait_result = SemWaitCancellable(wq, &s.wait_sequence, observed_sequence, deadline);
+        if (wait_result != 0)
+        {
+            // Revalidate after every terminal scheduler outcome. RMID that is
+            // already visible wins over both cancellation and timeout; if it
+            // linearizes later, this operation retains its prior outcome.
+            lock_flags = sync::SpinLockAcquire(g_sem_lock);
+            const bool removed = !s.in_use || s.marked_destroy || s.incarnation != expected_incarnation;
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            if (removed)
+                return kEIDRM;
+            return wait_result;
+        }
     }
-    return true;
 }
 
 } // namespace
 
 i64 DoSemop(u64 semid, u64 user_ops, u64 nops)
 {
-    if (semid == 0 || semid > kSemPoolCap)
-        return -22;
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(semid, SysvIpcIdFamily::Semaphore, &decoded))
+        return kEINVAL;
     if (nops == 0 || nops > kSemPerSet)
-        return -22;
-    const u32 idx = static_cast<u32>(semid - 1);
+        return kEINVAL;
+
+    const u32 idx = decoded.index;
+    const u64 expected_incarnation = decoded.generation;
+    const i64 validation_result = SemValidateIngress(idx, expected_incarnation);
+    if (validation_result != 0)
+        return validation_result;
 
     SemBuf ops[kSemPerSet];
     if (!mm::CopyFromUser(ops, reinterpret_cast<const void*>(user_ops), sizeof(SemBuf) * nops))
-        return -14; // -EFAULT
+        return kEFAULT;
 
-    // Detect SEM_NOWAIT: if ANY op carries IPC_NOWAIT we honour it
-    // for the whole batch (matches Linux).
-    bool nowait = false;
-    for (u32 i = 0; i < nops; ++i)
-        if ((static_cast<u32>(ops[i].sem_flg) & kIpcNowait) != 0)
-            nowait = true;
-
-    arch::Cli();
-    SemSet& s = g_sem_pool[idx];
-    if (!s.in_use || s.marked_destroy)
-    {
-        arch::Sti();
-        return -22;
-    }
-    while (true)
-    {
-        u32 block_idx = 0;
-        if (SemTryApplyLocked(s, ops, static_cast<u32>(nops), &block_idx))
-        {
-            arch::Sti();
-            return 0;
-        }
-        if (nowait)
-        {
-            arch::Sti();
-            return -11; // -EAGAIN
-        }
-        sched::WaitQueueBlock(&s.sems[block_idx].wq);
-        arch::Cli();
-        if (!s.in_use || s.marked_destroy)
-        {
-            arch::Sti();
-            return -22; // semset removed under us
-        }
-    }
+    const SemDeadline deadline{.finite = false, .deadline_tick = 0};
+    return SemOperate(idx, expected_incarnation, ops, static_cast<u32>(nops), deadline);
 }
 
 i64 DoSemtimedop(u64 semid, u64 user_ops, u64 nops, u64 user_timeout)
 {
-    (void)user_timeout; // timeout deferred — accept-as-untimed (sub-GAP)
-    return DoSemop(semid, user_ops, nops);
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(semid, SysvIpcIdFamily::Semaphore, &decoded))
+        return kEINVAL;
+    if (nops == 0 || nops > kSemPerSet)
+        return kEINVAL;
+
+    const u32 idx = decoded.index;
+    const u64 expected_incarnation = decoded.generation;
+    const i64 validation_result = SemValidateIngress(idx, expected_incarnation);
+    if (validation_result != 0)
+        return validation_result;
+
+    SemBuf ops[kSemPerSet];
+    if (!mm::CopyFromUser(ops, reinterpret_cast<const void*>(user_ops), sizeof(SemBuf) * nops))
+        return kEFAULT;
+    SemDeadline deadline{};
+    const i64 deadline_result = LoadSemDeadline(user_timeout, &deadline);
+    if (deadline_result != 0)
+        return deadline_result;
+    return SemOperate(idx, expected_incarnation, ops, static_cast<u32>(nops), deadline);
 }
 
 i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg)
 {
-    if (semid == 0 || semid > kSemPoolCap)
-        return -22;
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(semid, SysvIpcIdFamily::Semaphore, &decoded))
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
-        return -22;
-    const u32 idx = static_cast<u32>(semid - 1);
-    arch::Cli();
+        return kEINVAL;
+    const u32 idx = decoded.index;
+    const bool has_debug = core::ProcessHasCap(p, core::kCapDebug);
+    auto lock_flags = sync::SpinLockAcquire(g_sem_lock);
     SemSet& s = g_sem_pool[idx];
-    if (!s.in_use)
+    if (!s.in_use || s.incarnation != decoded.generation)
     {
-        arch::Sti();
-        return -22;
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
+        return kEINVAL;
     }
     // Mutating ops (RMID / SETVAL / IPC_SET) require ownership — a
-    // co-resident ELF must not destroy or poison another process's
-    // semaphore set by guessing semid 1..8. Reads stay open.
-    const bool is_owner = (s.owner_pid == p->pid) || core::ProcessHasCap(p, core::kCapDebug);
+    // co-resident ELF must not destroy or poison another process's semaphore
+    // set merely by discovering its generation-bearing semid. Reads stay open.
+    const bool is_owner = (s.owner_pid == p->pid) || has_debug;
     const bool is_mutating = (cmd == kIpcRmid || cmd == kSemSetval || cmd == kIpcSet);
     if (is_mutating && !is_owner)
     {
-        arch::Sti();
-        return -1; // -EPERM
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
+        return kEPERM;
     }
     if (cmd == kIpcRmid)
     {
         s.marked_destroy = true;
         s.in_use = false;
-        // Wake all waiters on every sem in the set so blocked
-        // semop callers see -EIDRM (we report -EINVAL here to
-        // keep the v0 errno-set small).
+        SemWaitSequencePublishLocked(&s.wait_sequence);
+        // Wake every waiter only after removal and its epoch are visible. Each
+        // blocked operation retains the old incarnation and returns -EIDRM
+        // even if this static slot is immediately reused.
         for (u32 i = 0; i < s.nsems; ++i)
             sched::WaitQueueWakeAll(&s.sems[i].wq);
-        arch::Sti();
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
         return 0;
     }
     if (cmd == kSemGetval)
     {
         if (semnum >= s.nsems)
         {
-            arch::Sti();
-            return -22;
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kEINVAL;
         }
         const i32 val = s.sems[semnum].value;
-        arch::Sti();
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
         return val;
     }
     if (cmd == kSemSetval)
     {
         if (semnum >= s.nsems)
         {
-            arch::Sti();
-            return -22;
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kEINVAL;
         }
         // Clamp to Linux SEMVMX (32767). `arg` is a raw guest u64; an
         // unchecked static_cast<i32> lets a guest set the kernel
         // semaphore value to e.g. INT32_MIN, after which a peer's
         // semop `cur + op` arithmetic in SemTryApplyLocked signed-
         // overflows (UB) and the set is permanently wedged.
-        constexpr u64 kSemVmx = 32767;
-        if (arg > kSemVmx)
+        if (arg > static_cast<u64>(kSemVmx))
         {
-            arch::Sti();
-            return -34; // -ERANGE
+            sync::SpinLockRelease(g_sem_lock, lock_flags);
+            return kERANGE;
         }
         s.sems[semnum].value = static_cast<i32>(arg);
+        SemWaitSequencePublishLocked(&s.wait_sequence);
         sched::WaitQueueWakeAll(&s.sems[semnum].wq);
-        arch::Sti();
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
         return 0;
     }
     if (cmd == kIpcStat || cmd == kIpcSet)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sem_lock, lock_flags);
         return 0; // semid_ds copy-out deferred (sub-GAP)
     }
-    arch::Sti();
-    return -22;
+    sync::SpinLockRelease(g_sem_lock, lock_flags);
+    return kEINVAL;
 }
 
 } // namespace duetos::subsystems::linux::internal

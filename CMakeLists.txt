@@ -379,9 +379,10 @@ message(STATUS "  KASLR                : ${DUETOS_KASLR}")
 message(STATUS "  KASAN diagnostics    : ${DUETOS_KASAN}")
 message(STATUS "  LTO                  : ${DUETOS_LTO}")
 
-# UEFI loader (boot/uefi/) — Phase A toolchain proof. Builds a
-# PE32+ EFI Application ("BOOTX64.EFI") that prints a banner and
-# halts. Wired separately from the kernel because UEFI requires a
+# Experimental direct UEFI loader (boot/uefi/) — Phase A toolchain proof
+# plus Phase B.1 ELF-header validation. Builds a PE32+ EFI Application
+# ("BOOTX64.EFI") that prints its markers and halts without loading kernel
+# segments or handing off. It is wired separately because UEFI requires a
 # different target triple (x86_64-unknown-windows) and a Windows-
 # flavor linker (lld-link); the directory's CMakeLists drives
 # clang/lld-link directly via add_custom_command rather than fight
@@ -431,19 +432,20 @@ set_tests_properties(duetos-boot-smoke PROPERTIES
     # A hung kernel still trips the inner DUETOS_TIMEOUT first;
     # this only guards against the harness itself wedging.
     TIMEOUT 720
-    # Exit 2 from ctest-boot-smoke.sh means a prerequisite is
-    # missing (qemu / iso) — CTEST should report SKIP rather
-    # than FAIL. Mirrors the duetos-uefi-smoke convention.
+    # Exit 2 is a local-developer convenience only: a missing qemu/ISO
+    # prerequisite or environmental timeout reports SKIP. Required release
+    # CI sets DUETOS_BOOT_SMOKE_REQUIRED=1, which makes the driver convert
+    # every would-be skip into a hard failure before CTest can accept it.
     SKIP_RETURN_CODE 2
 )
 
-# UEFI loader smoke test — boots the native BOOTX64.EFI under
+# Experimental direct-UEFI loader smoke — runs BOOTX64.EFI under
 # qemu+OVMF and verifies the Phase A banner reaches COM1. Sister
 # of duetos-boot-smoke (which exercises the GRUB+Multiboot2 path);
-# this one exercises the new boot/uefi/ Phase A path. The driver
-# exits 2 if qemu / OVMF / BOOTX64.EFI is missing — the test is
-# REQUIRED to not be wired into ctest's pass/fail when the
-# prerequisites are absent on the dev host. CTEST's
+# this one exercises only the bounded boot/uefi/ Phase A/B.1 path. The driver
+# exits 2 if qemu / OVMF / BOOTX64.EFI is missing. This experimental test is
+# deliberately optional on developer hosts; it is not the required release
+# boot gate. CTEST's
 # WILL_FAIL=false + SKIP_RETURN_CODE=2 lets the test report SKIP
 # when the install hasn't happened, so a fresh checkout that
 # hasn't run `apt-get install -y qemu-system-x86 ovmf` doesn't

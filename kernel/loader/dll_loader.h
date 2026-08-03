@@ -49,9 +49,10 @@ namespace duetos::core
  *   - Refcounted DLL cache (one DLL shared across processes).
  *   - Freeing / unmapping a DLL from an AS.
  *
- * Context: kernel task. Mirrors `PeLoad`'s thread-safety
- * contract — safe from any caller that can hold the AS
- * creation lock.
+ * Context: kernel task. `DllLoad` may target either a private AS during
+ * spawn or a published AS during LoadLibrary. It uses exact address-space
+ * range reservations to exclude concurrent map/unmap/protect operations;
+ * the caller must keep `as` alive for the complete call.
  */
 
 enum class DllLoadStatus : u8
@@ -101,10 +102,12 @@ struct DllLoadResult
 ///      from the preferred ImageBase.
 ///   5. Parse the Export Directory and populate exports.
 ///
-/// On failure, `as` may hold partial mappings — the caller is
-/// responsible for releasing the AS (mirrors `PeLoad`'s
-/// contract). On success, the IAT for the DLL's OWN imports is
-/// still unresolved; a later slice will recursively resolve them.
+/// Before the first map, the loader reserves every concrete header/section
+/// page range. Any failure releases only pages tagged by those exact receipts,
+/// leaving `as` with no partial DLL mappings and preserving unrelated pages.
+/// Success commits all receipts after relocation and export parsing. The IAT
+/// for the DLL's OWN imports is still unresolved; a later slice recursively
+/// resolves it.
 DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, u64 aslr_delta);
 
 /// Look up an export by name in a loaded DLL image and return

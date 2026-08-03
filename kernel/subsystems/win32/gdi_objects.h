@@ -167,8 +167,8 @@ inline constexpr u32 kStockSystemFixedFont = 16;
 void GdiInit();
 
 // Handle type inspection. Returns one of the kGdiTag* values, or 0
-// if the handle has no tag (which includes every window HDC/HWND
-// since those are small integers from the WindowHandle registry).
+// if the handle has no tag (which includes every window HDC/HWND;
+// public HWNDs reserve bits 24..31 as zero).
 u64 GdiHandleType(u64 h);
 
 // Accessors — return nullptr on an invalid handle OR on a handle
@@ -251,17 +251,18 @@ void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb);
 
 // Per-window DC state. Window HDCs don't need a separate entry in
 // the handle registry because HDC == HWND (v0 design); instead, a
-// parallel table indexed by compositor window handle carries the
+// parallel table indexed by the decoded compositor slot carries the
 // DC state so `SetTextColor(hwnd)` / `MoveToEx(hwnd, ...)` /
 // `SelectObject(hwnd, pen)` all take effect as they would in real
 // Windows. `kMaxWindows` slots matches the compositor's window
 // registry size.
-inline constexpr u32 kMaxWindowDcSlots = 16;
+inline constexpr u32 kMaxWindowDcSlots = 40;
 
 struct WindowDcState
 {
     bool init;
     bool text_color_set;
+    u32 hwnd_identity; // exact public slot+generation identity
     u32 text_color;
     u32 bk_color;
     u8 bk_mode;
@@ -272,11 +273,11 @@ struct WindowDcState
     i32 cur_y;
 };
 
-/// Look up (and lazily initialise) the DC state for a compositor
-/// window handle. Returns nullptr for out-of-range handles. Lazy
-/// init fills Win32 defaults (text=black, bk=white, OPAQUE, no pen
-/// = BLACK_PEN, cur_pos=(0,0)).
-WindowDcState* GdiWindowDcState(u32 window_handle);
+/// Resolve an owned, live public generation-tagged HWND and look up its
+/// per-slot DC state. Stale/foreign identities are rejected. A new generation
+/// resets every selection/colour field so reused compositor slots cannot
+/// inherit state from a destroyed window.
+WindowDcState* GdiWindowDcState(u32 public_hwnd);
 
 // DC colour state (memDC only in v0; window-DC variants are no-op
 // pass-throughs that return the supplied value so

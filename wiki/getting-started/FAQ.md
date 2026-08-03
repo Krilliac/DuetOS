@@ -11,8 +11,10 @@
 ### Is this a Linux distribution?
 
 No. There is no Linux kernel anywhere in this tree. The kernel under
-`kernel/` is written from scratch and booted directly by GRUB/UEFI into
-long mode; nothing else runs below it. `kernel/subsystems/linux/` is a
+`kernel/` is written from scratch. Supported images reach it through GRUB's
+Multiboot2 handoff on BIOS or UEFI firmware; the separate direct
+`BOOTX64.EFI` loader is experimental and does not yet hand off to the kernel.
+Nothing else runs below it. `kernel/subsystems/linux/` is a
 **guest ABI translator** — the same shape as `kernel/subsystems/win32/`,
 a second entry ABI into our kernel so a Linux ELF binary can call
 `syscall` and hit a DuetOS syscall via the translation unit.

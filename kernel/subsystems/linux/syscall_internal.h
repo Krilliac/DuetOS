@@ -51,6 +51,64 @@ inline constexpr i64 kESPIPE = -29;
 inline constexpr i64 kERANGE = -34;
 inline constexpr i64 kENAMETOOLONG = -36;
 inline constexpr i64 kENOSYS = -38;
+inline constexpr i64 kEIDRM = -43;
+
+// SysV IPC identifiers retain Linux's positive signed-int ABI while binding a
+// public id to one exact static-pool incarnation. All three v0 pools have eight
+// slots, so bits [2:0] hold the index, [4:3] hold a nonzero family tag, and
+// [30:5] hold a nonzero generation. Bit 31 is always clear. A slot whose
+// generation reaches the 26-bit maximum remains usable for that incarnation,
+// then retires permanently on removal instead of wrapping and aliasing a stale
+// id.
+enum class SysvIpcIdFamily : u32
+{
+    SharedMemory = 1,
+    Semaphore = 2,
+    MessageQueue = 3,
+};
+
+struct SysvIpcDecodedId
+{
+    u32 index;
+    u32 generation;
+};
+
+inline constexpr u32 kSysvIpcIdIndexBits = 3;
+inline constexpr u32 kSysvIpcIdFamilyBits = 2;
+inline constexpr u32 kSysvIpcIdGenerationShift = kSysvIpcIdIndexBits + kSysvIpcIdFamilyBits;
+inline constexpr u32 kSysvIpcIdPoolCapacity = 1u << kSysvIpcIdIndexBits;
+inline constexpr u32 kSysvIpcIdIndexMask = kSysvIpcIdPoolCapacity - 1;
+inline constexpr u32 kSysvIpcIdFamilyMask = (1u << kSysvIpcIdFamilyBits) - 1;
+inline constexpr u32 kSysvIpcIdGenerationMax = (1u << (31 - kSysvIpcIdGenerationShift)) - 1;
+inline constexpr u32 kSysvIpcIdMax = 0x7FFFFFFFu;
+
+inline constexpr u32 SysvIpcEncodeId(SysvIpcIdFamily family, u32 index, u64 generation)
+{
+    const u32 family_value = static_cast<u32>(family);
+    if (index >= kSysvIpcIdPoolCapacity || family_value == 0 || family_value > kSysvIpcIdFamilyMask ||
+        generation == 0 || generation > kSysvIpcIdGenerationMax)
+    {
+        return 0;
+    }
+    return (static_cast<u32>(generation) << kSysvIpcIdGenerationShift) | (family_value << kSysvIpcIdIndexBits) | index;
+}
+
+inline constexpr bool SysvIpcDecodeId(u64 raw_id, SysvIpcIdFamily expected_family, SysvIpcDecodedId* decoded)
+{
+    if (decoded == nullptr || raw_id == 0 || raw_id > kSysvIpcIdMax)
+        return false;
+    const u32 id = static_cast<u32>(raw_id);
+    const u32 family = (id >> kSysvIpcIdIndexBits) & kSysvIpcIdFamilyMask;
+    const u32 generation = id >> kSysvIpcIdGenerationShift;
+    if (family != static_cast<u32>(expected_family) || generation == 0)
+        return false;
+    decoded->index = id & kSysvIpcIdIndexMask;
+    decoded->generation = generation;
+    return true;
+}
+
+static_assert(SysvIpcEncodeId(SysvIpcIdFamily::MessageQueue, kSysvIpcIdPoolCapacity - 1, kSysvIpcIdGenerationMax) ==
+              kSysvIpcIdMax);
 
 // Resource limit handlers (syscall_rlimit.cpp). v0 reports the
 // real ceilings where it has them (NOFILE 16, NPROC 64, STACK
@@ -137,8 +195,10 @@ i64 DoMunlock(u64 addr, u64 len);
 i64 DoMlockall(u64 flags);
 i64 DoMunlockall();
 
-// Process-control handlers (syscall_proc.cpp). exit / exit_group
-// teardown the calling task via sched::SchedExit; getpid / gettid
+// Process-control handlers (syscall_proc.cpp). exit / exit_group publish a
+// cooperative termination request and return through the dispatcher so live
+// C++ frames unwind before the outer cancellation boundary calls SchedExit;
+// getpid / gettid
 // both return the current task id (one task per process in v0);
 // kill / tgkill targeting self exits, anything else returns
 // -ESRCH because we don't deliver signals yet. setpgid / getpgrp
@@ -315,11 +375,11 @@ i64 DoAccess(u64 user_path, u64 mode);
 i64 DoOpenat(i64 dirfd, u64 user_path, u64 flags, u64 mode);
 i64 DoNewFstatat(i64 dirfd, u64 user_path, u64 user_buf, u64 flags);
 
-// CWD / path handlers (syscall_path.cpp). v0 records per-process
-// CWD in core::Process::linux_cwd; chdir / fchdir update it,
-// getcwd reads it back. The string is volume-relative — every
-// FAT32 / ramfs lookup site already strips the mount prefix at
-// the use point.
+// CWD / path handlers (syscall_path.cpp). chdir / fchdir replace and getcwd
+// snapshots the process-owned CWD through core's coherent leaf-lock API; no
+// syscall caller accesses the backing buffer directly. The string is
+// volume-relative — every FAT32 / ramfs lookup site already strips the mount
+// prefix at the use point.
 i64 DoChdir(u64 user_path);
 i64 DoFchdir(u64 fd);
 i64 DoGetcwd(u64 user_buf, u64 size);
@@ -342,8 +402,9 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
 //     by an 8-segment global pool of physical frames; attach
 //     installs borrowed PTEs into the caller's AS.
 //   semget / semop / semctl / semtimedop — 8-set / 16-sem-per-set
-//     pool with WaitQueue-blocking decrement-with-wait + wait-on-
-//     zero. semtimedop ignores the timeout (sub-GAP).
+//     pool with sequence-linearized cancellable decrement/wait-on-zero.
+//     semtimedop honors its relative timeout; removal and cancellation return
+//     -EIDRM and -EINTR without abandoning live dispatcher frames.
 i64 DoShmget(u64 key, u64 size, u64 shmflg);
 i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg);
 i64 DoShmdt(u64 shmaddr);
@@ -355,8 +416,8 @@ i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg);
 
 // SysV msg queues (msg_queues.cpp). Same shape as SysV sem: 8-queue
 // global pool keyed by IPC key. Each msg has an mtype prefix; recv
-// can filter by mtype (== / <= |mtype|). Blocking via per-queue
-// read_wq / write_wq.
+// can filter by mtype (== / <= |mtype|). Blocking uses stable per-slot
+// sequences with cancellable read_wq / write_wq bridges.
 i64 DoMsgget(u64 key, u64 msgflg);
 i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg);
 i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg);
@@ -428,22 +489,28 @@ i64 DoAddKey(u64 user_type, u64 user_desc, u64 user_payload, u64 plen, u64 keyri
 i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyring);
 i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5);
 
-// Modern pidfd signaling. pidfd_open allocates a LinuxFd
-// (state 12, first_cluster = pid) that pins the target Process
-// via ProcessRetain; close drops the ref. pidfd_send_signal
-// resolves the pidfd back to the target Process and forwards
-// to the real LinuxSignalDeliver path.
+// Modern pidfd signaling. pidfd_open allocates a LinuxFd state-12 slot
+// backed by a generation-checked KFile. The shared KFile owns exactly one
+// strong immutable target Process reference; close of the last duplicate
+// drops it. Operations acquire that exact target through the KFile rather
+// than re-resolving a numeric PID.
 i64 DoPidfdOpen(u64 pid, u64 flags);
 i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
 i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
+
+// Acquire a fresh retained reference to the exact Process target stored in a
+// retained pidfd receipt. Missing/wrong-kind identities return nullptr; callers
+// must balance non-null results with ProcessRelease (prefer ScopedProcessRef).
+core::Process* LinuxPidfdAcquireTarget(const core::LinuxFdAcquired& acquired);
 
 // Global pidfd-exit waitqueue. Wakes every poller blocked
 // on a pidfd whenever ANY Linux process exits. Sub-GAP: a
 // per-pid waitqueue would scope the wake — the global form
 // causes spurious wakes when an unrelated process exits, but
-// the predicate (`SchedIsPidZombie` etc.) is re-evaluated on
-// wake so correctness holds. Used by:
-//   - DoExitGroup     — calls LinuxPidfdExitWake() on the way out.
+// the KFile target's lifecycle is re-evaluated on wake so correctness
+// holds. The exit syscall may issue an advisory early wake; the Process
+// reaper issues the authoritative wake only after publishing Exited. Used by:
+//   - DoExitGroup     — may call LinuxPidfdExitWake() on the way out.
 //   - DoEpollWait     — when at least one watched fd is a
 //                       state-12 pidfd, sleeps on the queue
 //                       instead of via SchedSleepTicks, so
@@ -452,11 +519,6 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
 //                       100 ms timer cadence.
 void LinuxPidfdExitWake();
 sched::WaitQueue* LinuxPidfdExitWq();
-
-// True iff `p` has at least one pidfd (state == 12) in its
-// linux_fds[] table. Cheap (16-slot scan); used by DoEpollWait
-// to decide whether to sleep on the pidfd-exit waitqueue.
-bool LinuxProcessHasPidfd(const core::Process* p);
 
 // Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
 // through a 1 KiB on-stack buffer (no actual zero-copy yet, but

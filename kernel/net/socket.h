@@ -88,7 +88,7 @@ struct Socket
     u32 pins;        // transient operation pins; never exposed to userland
     u16 family;      // AF_INET only in v0
     u16 type;        // SOCK_DGRAM or SOCK_STREAM
-    u32 iface_index; // interface this socket is anchored to (always 0 in v0)
+    u32 iface_index; // selected interface slot (new sockets default to slot 0)
     // Owning userland PID, stamped by the SYS_SOCKET_OP handler on
     // create/accept so process teardown can reclaim leaked sockets via
     // SocketReleaseByOwner. 0 = kernel-owned (e.g. DRSH) — never swept
@@ -227,7 +227,12 @@ i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_pe
 
 /// SOCK_DGRAM send. Builds + transmits an IPv4 UDP datagram via
 /// stack.cpp::NetUdpSend; if dst_ip / dst_port are zero, falls
-/// back to the connected peer. Returns bytes sent or -errno.
+/// back to the connected peer. A per-send exact interface receipt keeps
+/// source selection, ARP lookup, and TX on one driver generation. Wildcard
+/// local addresses adopt the receipt's current IP; an explicit local address
+/// which does not match it fails with -99. Missing interface admission fails
+/// with -100 and a closed/failed TX path with -101.
+/// Returns bytes sent or -errno.
 i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u32 len);
 
 /// SOCK_DGRAM recv. Pops the head of the RX queue, copying up to

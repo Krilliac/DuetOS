@@ -12,13 +12,11 @@
 use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::format::{
-    Extent, Node, BITMAP_LBA, BLOCK_SIZE, INVALID_NODE_ID, MAX_INLINE_EXTENTS, NODE_KIND_DIR, NODE_KIND_UNUSED,
-    ROOT_NODE_ID,
+    Extent, Node, BITMAP_LBA, BLOCK_SIZE, DIR_MAX_CHILDREN, INVALID_NODE_ID, MAX_INLINE_EXTENTS, NODE_KIND_DIR,
+    NODE_KIND_UNUSED, ROOT_NODE_ID,
 };
 use crate::fs::{Fs, FsError, FsResult};
 use crate::ops::Resolved;
-
-pub(crate) const DIR_MAX_CHILDREN: u32 = (BLOCK_SIZE / 4) as u32;
 
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
     pub(crate) fn dir_block(&self, dir: &Node) -> FsResult<u32> {

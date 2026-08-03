@@ -315,16 +315,15 @@ __declspec(dllexport) BOOL __stdcall IsWindowEnabled(HWND h)
  * Thread-targeted messages
  * ------------------------------------------------------------------ */
 
-/* GAP: DuetOS keeps one message queue per process, not per UI thread,
- * so the thread id is ignored and the message lands on the process
- * queue with a NULL hwnd — which is where GetMessage's thread-message
- * path already looks for it. A multi-UI-thread app would see the
- * message on the wrong thread; single-UI-thread apps, which is what
- * PostThreadMessage is overwhelmingly used by, are exact. */
+#define DUETOS_THREAD_MESSAGE_TAG 0x80000000u
+
+/* The high-bit target is an internal SYS_WIN_POST_MSG transport tag. Public
+ * PE32 HWND values reserve the high byte as zero, so it cannot alias a window. */
 __declspec(dllexport) BOOL __stdcall PostThreadMessageA(DWORD tid, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)tid;
-    return PostMessageA((HWND)0, msg, w, l);
+    if (tid == 0 || (tid & DUETOS_THREAD_MESSAGE_TAG) != 0)
+        return 0;
+    return PostMessageA((HWND)(unsigned long)(DUETOS_THREAD_MESSAGE_TAG | tid), msg, w, l);
 }
 
 __declspec(dllexport) BOOL __stdcall PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPARAM l)

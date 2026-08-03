@@ -21,7 +21,7 @@
  *                               itself; the absolute number is lower
  *                               than a real ring-3 syscall would cost.
  *   bench wakeup  [ITERS]     — KEvent set/wait round-trip with the
- *                               worker pinned via SchedSetAffinity to
+ *                               worker pinned before publication to
  *                               the next online CPU. On a single-CPU
  *                               box the worker stays here; the result
  *                               row is labelled `wakeup-same-cpu` so
@@ -53,6 +53,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/traps.h"
+#include "core/panic.h"
 #include "cpu/percpu.h"
 #include "drivers/video/console.h"
 #include "ipc/kevent.h"
@@ -354,12 +355,25 @@ struct WakeupCtx
     volatile bool worker_exited;
 };
 
+struct WakeupAffinity
+{
+    u32 cpu_id;
+    bool applied;
+};
+
+void PrepareWakeupAffinity(::duetos::sched::Task* task, void* context)
+{
+    auto* affinity = static_cast<WakeupAffinity*>(context);
+    affinity->applied = ::duetos::sched::SchedSetAffinity(task, affinity->cpu_id);
+}
+
 void WakeupWorkerEntry(void* arg)
 {
     auto* c = static_cast<WakeupCtx*>(arg);
     while (true)
     {
-        ::duetos::ipc::KEventWait(c->go);
+        KASSERT(::duetos::ipc::KEventWait(c->go) == ::duetos::ipc::KEventWaitResult::Signaled, "shell/bench",
+                "wakeup worker wait did not signal");
         if (c->remaining == 0)
         {
             break;
@@ -407,33 +421,38 @@ BenchResult RunWakeup(u64 iters)
     ctx.remaining = iters;
     ctx.worker_exited = false;
 
-    auto* worker = ::duetos::sched::SchedCreate(WakeupWorkerEntry, &ctx, "bench-wake");
-    if (worker == nullptr)
+    WakeupAffinity affinity{peer_cpu, false};
+    const bool worker_created =
+        (cross_cpu ? ::duetos::sched::SchedCreatePrepared(WakeupWorkerEntry, &ctx, "bench-wake", &PrepareWakeupAffinity,
+                                                          &affinity)
+                   : ::duetos::sched::SchedCreate(WakeupWorkerEntry, &ctx, "bench-wake")) != nullptr;
+    if (!worker_created)
     {
         ConsoleWriteln("BENCH: SchedCreate(worker) failed — kstack/heap exhausted");
         return r;
     }
-    if (cross_cpu)
+    if (cross_cpu && !affinity.applied)
     {
-        // Hint the scheduler to route the worker's first wake onto
-        // the peer CPU. After the first ContextSwitch the
-        // scheduler's own last_cpu update keeps it pinned there
-        // until something migrates it.
-        ::duetos::sched::SchedSetAffinity(worker, peer_cpu);
+        // Keep the measurement alive and drain the worker normally,
+        // but do not mislabel an unrestricted run as cross-CPU.
+        r.name = "wakeup-unpinned";
+        KLOG_WARN_V("shell/bench", "worker initial affinity rejected", peer_cpu);
     }
 
     const u64 t0 = ::duetos::time::ReadTsc();
     for (u64 i = 0; i < iters; ++i)
     {
         ::duetos::ipc::KEventSet(ctx.go);
-        ::duetos::ipc::KEventWait(ctx.done);
+        KASSERT(::duetos::ipc::KEventWait(ctx.done) == ::duetos::ipc::KEventWaitResult::Signaled, "shell/bench",
+                "wakeup completion wait did not signal");
     }
     const u64 t1 = ::duetos::time::ReadTsc();
     // Drain the worker. ctx.remaining is already 0; one more Set
     // tips it past the loop guard, the worker exits and signals
     // done one last time so we don't block here on a dead worker.
     ::duetos::ipc::KEventSet(ctx.go);
-    ::duetos::ipc::KEventWait(ctx.done);
+    KASSERT(::duetos::ipc::KEventWait(ctx.done) == ::duetos::ipc::KEventWaitResult::Signaled, "shell/bench",
+            "wakeup drain wait did not signal");
 
     r.total_cycles = t1 - t0;
     r.ns_per_op = ::duetos::time::TscToNanos(r.total_cycles) / iters;

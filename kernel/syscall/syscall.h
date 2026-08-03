@@ -232,10 +232,11 @@ enum SyscallNumber : u64
 
     // SYS_FILE_OPEN: rdi = user pointer to NUL-terminated ASCII
     // path, rsi = path-length cap (caller-supplied to bound the
-    // CopyFromUser). Returns a Win32-shaped handle
-    // (Process::kWin32HandleBase + slot_idx, i.e. 0x100..0x10F)
-    // on success, or u64(-1) on any failure (cap missing, path
-    // out of jail, not a file, no free slot, bad user pointer).
+    // CopyFromUser). Returns an opaque positive Win32 file handle:
+    // low tag bits 0 through 11 are 0x100 through 0x10F and the non-zero
+    // slot generation occupies bits 12 through 30. Returns u64(-1) on any
+    // failure (cap missing, path out of jail, not a file, no free
+    // slot, bad user pointer).
     // Gated on kCapFsRead — same gate as SYS_READ / SYS_STAT.
     //
     // The handle stays valid until SYS_FILE_CLOSE; reads via
@@ -277,9 +278,9 @@ enum SyscallNumber : u64
     SYS_FILE_FSTAT = 24,
 
     // SYS_MUTEX_CREATE: rdi = bInitialOwner (0 or 1).
-    // Allocates a per-process mutex slot and returns a Win32
-    // pseudo-handle (Process::kWin32MutexBase + slot_idx, i.e.
-    // 0x200..0x207). On bInitialOwner=1 the calling task is
+    // Allocates a per-process KMutex and returns a positive opaque handle
+    // whose low tag identifies the mutex slot and whose high bits carry its
+    // generation. On bInitialOwner=1 the calling task is
     // recorded as the owner with recursion=1 — subsequent
     // SYS_MUTEX_WAIT calls from the same task increment
     // recursion (Win32 mutexes are recursive). Returns u64(-1)
@@ -295,10 +296,11 @@ enum SyscallNumber : u64
     // we return WAIT_OBJECT_0 immediately. Otherwise blocks on the
     // mutex's waitqueue with the given timeout. ReleaseMutex's
     // hand-off sets owner=us before waking, so the lock is already
-    // ours on return. Backs Win32 WaitForSingleObject / WaitForSingleObjectEx
-    // for mutex handles only — handles outside the mutex range
-    // hit the user-mode stub's pseudo-signal path (return 0 for
-    // events / threads / etc., preserving the semantics).
+    // ours on return. The active WaitForSingleObject v4 adapter preserves
+    // the full opaque value for the syscall, classifies generation-tagged
+    // mutex/event/semaphore handles by their low 12-bit tag, and still routes
+    // the legacy slot-only thread band. Unknown types take the transitional
+    // user-mode pseudo-signal path.
     SYS_MUTEX_WAIT = 26,
 
     // SYS_MUTEX_RELEASE: rdi = mutex handle. Returns 0 on
@@ -339,9 +341,9 @@ enum SyscallNumber : u64
     SYS_VUNMAP = 29,
 
     // SYS_EVENT_CREATE: rdi = bManualReset (0 or 1),
-    // rsi = bInitialState (0 or 1). Allocates a per-process
-    // event slot and returns Process::kWin32EventBase + slot
-    // (= 0x300..0x307) on success, u64(-1) on slot exhaustion.
+    // rsi = bInitialState (0 or 1). Allocates a per-process KEvent and
+    // returns its positive generation-tagged opaque handle on success,
+    // u64(-1) on table exhaustion.
     //
     // Manual-reset events stay signaled after a wait succeeds;
     // auto-reset events clear the signal on successful wait.
@@ -453,7 +455,8 @@ enum SyscallNumber : u64
     // SYS_ST_TO_FT. Backs Win32 FileTimeToSystemTime.
     SYS_FT_TO_ST = 42,
 
-    // SYS_FILE_WRITE: rdi = handle (Win32-shaped, 0x100..0x10F),
+    // SYS_FILE_WRITE: rdi = opaque positive Win32 file handle
+    // with low tag 0x100 through 0x10F and non-zero generation in bits 12 through 30,
     // rsi = user pointer to source bytes, rdx = byte count.
     // Writes `rdx` bytes at the handle's current cursor and
     // advances the cursor by the bytes-written count. Returns
@@ -477,8 +480,9 @@ enum SyscallNumber : u64
     // ASCII path, rsi = path-buffer cap (bytes), rdx = user
     // pointer to initial bytes (may be 0/null for empty file),
     // r10 = initial byte count. Creates the file at `path` with
-    // `r10` bytes of initial content; returns a Win32 pseudo-
-    // handle (kWin32HandleBase + slot_idx) on success, u64(-1)
+    // `r10` bytes of initial content; returns an opaque positive
+    // Win32 file handle with low tag 0x100 through 0x10F and non-zero
+    // generation in bits 12 through 30 on success, u64(-1)
     // on failure (bad path / cap denied / parent-dir missing /
     // duplicate name / OOM / I/O failure).
     //
@@ -538,8 +542,10 @@ enum SyscallNumber : u64
     SYS_DEBUG_PRINTW = 50,
 
     // SYS_SEM_CREATE: rdi = initial count, rsi = max count.
-    // Returns Win32SemaphoreHandle (0x500..0x507) or -1.
-    // Backs Win32 CreateSemaphoreW / CreateSemaphoreA.
+    // Returns a positive generation-tagged opaque handle whose low tag is
+    // 0x501..0x53F (internal table identities 1..63), or -1. Bits 12..30
+    // carry the non-zero, non-wrapping generation. Backs Win32
+    // CreateSemaphoreW / CreateSemaphoreA.
     SYS_SEM_CREATE = 51,
 
     // SYS_SEM_RELEASE: rdi = handle, rsi = release count.
@@ -547,9 +553,10 @@ enum SyscallNumber : u64
     // waiters. Backs Win32 ReleaseSemaphore.
     SYS_SEM_RELEASE = 52,
 
-    // SYS_SEM_WAIT: rdi = handle, rsi = timeout_ms. Blocks
-    // until count > 0, decrements, returns 0 (WAIT_OBJECT_0).
-    // Dispatched by the semaphore range in WaitForSingleObject v3.
+    // SYS_SEM_WAIT: rdi = the full opaque handle, rsi = timeout_ms.
+    // Blocks until count > 0, decrements, returns 0 (WAIT_OBJECT_0).
+    // Dispatched by the low-tag semaphore classifier in the active
+    // WaitForSingleObject v4 adapter.
     SYS_SEM_WAIT = 53,
 
     // SYS_THREAD_WAIT: rdi = thread handle (0x400..0x407),
@@ -1409,8 +1416,9 @@ enum SyscallNumber : u64
     //   rdi = size_bytes (1..kSectionMaxBytes; rounds up to
     //         a multiple of 4 KiB).
     //   rsi = Win32 PAGE_* protection on creation.
-    //   rax = section handle (kWin32SectionBase + idx) on
-    //         success, 0 (NULL handle) on any failure.
+    //   rax = positive opaque section handle on success: low tag
+    //         0x900..0x907 plus nonzero generation bits 12..30.
+    //         Returns 0 (NULL handle) on any failure.
     //
     // SYS_SECTION_MAP — map a section's whole range into a
     // target process's AS. Self-process map (process_handle =
@@ -1610,10 +1618,12 @@ enum SyscallNumber : u64
     SYS_PROCESS_SPAWN = 158,
 
     // IOCP — async I/O completion ports. Backed by the KObject-
-    // shaped ipc::IocpPort in the per-process kobj_handles table
-    // (handles = 0xB00 + slot). SYS_IOCP_POST (213) is the
-    // Win32-shaped PostQueuedCompletionStatus entry; SET keeps the
-    // NT-shaped NtSetIoCompletion argument order.
+    // shaped ipc::IocpPort in the per-process kobj_handles table.
+    // Public identities are positive generation-tagged opaque handles with
+    // low tags 0xB01..0xB3F; bits 12..30 carry the non-zero generation.
+    // SYS_IOCP_POST (213) is the Win32-shaped
+    // PostQueuedCompletionStatus entry; SET keeps the NT-shaped
+    // NtSetIoCompletion argument order.
     SYS_IOCP_CREATE = 159,
     SYS_IOCP_SET = 160,
     SYS_IOCP_REMOVE = 161,
@@ -1821,8 +1831,9 @@ enum SyscallNumber : u64
     //   rdi = user u64* read_handle_out  — caller-allocated
     //   rsi = user u64* write_handle_out — caller-allocated
     // Returns 0 on success, (u64)-1 on table-full / pipe-pool-full.
-    // On success both pointers receive a Win32-shaped file handle
-    // (kWin32HandleBase + slot). The two handles share a kernel
+    // On success both pointers receive opaque positive Win32 file handles
+    // with low tag 0x100 through 0x10F and non-zero generation in bits 12 through 30.
+    // The two handles share a kernel
     // pipe pool slot — reads on the read end consume bytes that
     // writes on the write end appended, regardless of which
     // process holds either handle.
@@ -1894,8 +1905,9 @@ enum SyscallNumber : u64
     // inherited stdio handles. Backs kernel32!GetStdHandle's
     // pre-check before falling back to the legacy pseudo-handle.
     //   rdi = u64 idx                  // 0=stdin, 1=stdout, 2=stderr
-    // Returns the inherited Win32 file handle (kWin32HandleBase
-    // range) on success, 0 if no inheritance was set up at spawn,
+    // Returns the inherited opaque positive Win32 file handle with low tag
+    // 0x100 through 0x10F and non-zero generation in bits 12 through 30 on success,
+    // 0 if no inheritance was set up at spawn,
     // (u64)-1 on bad idx.
     SYS_GET_INHERITED_STD = 191,
 
@@ -2025,8 +2037,9 @@ enum SyscallNumber : u64
     //                                    //  or PIPE_ACCESS_OUTBOUND (2);
     //                                    //  PIPE_ACCESS_DUPLEX (3) is
     //                                    //  rejected — sub-GAP
-    // Returns a Win32-shaped file handle (kWin32HandleBase + slot)
-    // for the server end on success, (u64)-1 on:
+    // Returns an opaque positive Win32 file handle with low tag 0x100 through
+    // 0x10F and non-zero generation in bits 12 through 30 for the server
+    // end on success, (u64)-1 on:
     //   - bad open_mode (DUPLEX or unrecognised)
     //   - name already registered (ERROR_PIPE_BUSY shape)
     //   - registry / handle-table / pipe-pool full
@@ -2041,8 +2054,9 @@ enum SyscallNumber : u64
     //
     //   rdi = const char* user name      // bare pipe name
     //   rsi = u64 name_len_cap
-    // Returns a Win32-shaped file handle for the client end on
-    // success, (u64)-1 on miss (name not registered, server end
+    // Returns an opaque positive Win32 file handle with low tag 0x100 through
+    // 0x10F and non-zero generation in bits 12 through 30 for the client end
+    // on success, (u64)-1 on miss (name not registered, server end
     // already closed) or handle-table full. The client's handle
     // does not touch the registry on close — it's an ordinary
     // pipe-pool handle from that point onward.
@@ -2191,7 +2205,8 @@ enum SyscallNumber : u64
     // caller-fabricated completion (STATUS_SUCCESS) on an IOCP
     // handle. Thin Win32-shaped wrapper over the kernel IocpPort's
     // IocpTryPost; pairs with SYS_IOCP_REMOVE for the dequeue side.
-    //   rdi = u64 IOCP handle (kWin32IocpBase range, 0xB00 + slot)
+    //   rdi = u64 IOCP handle (positive opaque token; low tag
+    //         0xB01..0xB3F, generation in bits 12..30)
     //   rsi = u64 dwNumberOfBytesTransferred
     //   rdx = u64 dwCompletionKey
     //   r10 = u64 lpOverlapped (opaque user VA; never dereferenced
@@ -2479,8 +2494,8 @@ enum CompatPolicyBits : u64
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry
-// is a Win32-shaped handle in the caller's win32_handles table
-// (kWin32HandleBase + slot). Zero in any slot means "child
+// is an opaque positive Win32 file handle in the caller's table with low tag
+// 0x100 through 0x10F and non-zero generation in bits 12 through 30. Zero means "child
 // inherits no handle for this stream" — child's GetStdHandle
 // returns the legacy pseudo-handle. The kernel-side spawner
 // resolves each non-zero handle in the parent, then materialises

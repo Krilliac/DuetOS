@@ -26,11 +26,14 @@
 
 #include "mm/address_space.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "cpu/critical.h"
+#include "cpu/ipi_call.h"
 #include "cpu/percpu.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -68,6 +71,12 @@ constinit util::SatU64 g_cr3_switches = 0;
 // sentinel and is never issued, so the source cannot wrap or reuse a value.
 constinit u64 g_next_reservation_token = 1;
 
+// Separate globally unique identities for short-lived write leases.  Keeping
+// this source outside AddressSpace prevents allocator-address ABA: a stale
+// copied lease can never match a row in a later AS allocated at the same VA.
+// UINT64_MAX is a permanent exhaustion sentinel and is never issued.
+constinit u64 g_next_write_lease_token = 1;
+
 [[noreturn]] void PanicAs(const char* message, u64 value)
 {
     core::PanicWithValue("mm/as", message, value);
@@ -88,6 +97,28 @@ u64 AllocateReservationTokenValue()
         }
         const u64 next = current + 1;
         if (__atomic_compare_exchange_n(&g_next_reservation_token, &current, next, /*weak=*/false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+        {
+            return current;
+        }
+    }
+}
+
+u64 AllocateWriteLeaseTokenValue()
+{
+    u64 current = __atomic_load_n(&g_next_write_lease_token, __ATOMIC_ACQUIRE);
+    for (;;)
+    {
+        if (current == 0)
+        {
+            PanicAs("global write-lease token source wrapped", current);
+        }
+        if (current == ~u64{0})
+        {
+            return 0;
+        }
+        const u64 next = current + 1;
+        if (__atomic_compare_exchange_n(&g_next_write_lease_token, &current, next, /*weak=*/false, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE))
         {
             return current;
@@ -122,6 +153,84 @@ inline u64 IndexPt(u64 v)
 inline void Invlpg(u64 v)
 {
     asm volatile("invlpg (%0)" : : "r"(v) : "memory");
+}
+
+struct UserTlbRange
+{
+    u64 start;
+    u64 end;
+};
+
+// IPI-call callback. It deliberately does not inspect current_as: a target
+// may switch away after the active-mask snapshot, but that CR3 reload already
+// flushed the old non-PCID translations and invalidating the new AS is benign.
+void InvalidateUserTlbRange(void* opaque)
+{
+    const auto* range = static_cast<const UserTlbRange*>(opaque);
+    for (u64 virt = range->start; virt < range->end; virt += kPageSize)
+    {
+        Invlpg(virt);
+    }
+}
+
+void ConfirmedUserTlbShootdown(AddressSpace* as, u64 start, u64 end)
+{
+    KASSERT(start < end && ((start | end) & (kPageSize - 1)) == 0, "mm/as", "invalid confirmed user TLB range");
+
+    // Pin the requestor while retaining IF=1. Two CPUs may enter this barrier
+    // together; each must remain able to drain the other's IPI-call mailbox.
+    cpu::CriticalGuard critical_guard;
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    const u32 self_id = (self != nullptr) ? self->cpu_id : 0u;
+
+    UserTlbRange range{.start = start, .end = end};
+    if ((as == nullptr && AddressSpaceCurrent() == nullptr) || AddressSpaceCurrent() == as)
+    {
+        InvalidateUserTlbRange(&range);
+    }
+
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit > acpi::kMaxCpus)
+    {
+        PanicAs("confirmed user TLB CPU limit exceeds target array", limit);
+    }
+    const u32 active_mask = (as != nullptr) ? __atomic_load_n(&as->active_cpu_mask, __ATOMIC_ACQUIRE) : ~u32{0};
+    u32 target_ids[acpi::kMaxCpus] = {};
+    u32 target_count = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        const u32 bit = u32{1} << id;
+        if (id == self_id || (active_mask & bit) == 0)
+        {
+            continue;
+        }
+        cpu::PerCpu* peer = arch::SmpGetPercpu(id);
+        if (peer != nullptr && __atomic_load_n(&peer->tlb_ipi_ready, __ATOMIC_ACQUIRE))
+        {
+            target_ids[target_count++] = id;
+        }
+    }
+    if (target_count == 0)
+    {
+        return;
+    }
+
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    if ((arch::ReadRflags() & kRflagsIf) == 0)
+    {
+        PanicAs("confirmed user TLB shootdown with interrupts disabled", self_id);
+    }
+
+    for (u32 target_index = 0; target_index < target_count; ++target_index)
+    {
+        const u32 id = target_ids[target_index];
+        while (!cpu::IpiCallOne(id, &InvalidateUserTlbRange, &range, /*wait=*/true))
+        {
+            // Mailbox pressure is transient and never grants permission to
+            // recycle a frame behind a peer's stale user translation.
+            asm volatile("pause" ::: "memory");
+        }
+    }
 }
 
 // Allocate a fresh page-table frame, zero it, return its kernel
@@ -630,6 +739,92 @@ bool RangeOverlapsReservation(const AddressSpace* as, u64 lo, u64 hi)
     return false;
 }
 
+bool WriteLeaseRangeValid(u64 lo, u64 len, u64* hi_out)
+{
+    constexpr u64 kUserTopExclusive = 0x0000800000000000ULL;
+    if (hi_out != nullptr)
+    {
+        *hi_out = 0;
+    }
+    if (len == 0 || lo >= kUserTopExclusive || len > kUserTopExclusive - lo)
+    {
+        return false;
+    }
+    const u64 hi = lo + len;
+    const u64 first_page = lo & ~(kPageSize - 1);
+    const u64 last_page = (hi - 1) & ~(kPageSize - 1);
+    const u64 page_count = ((last_page - first_page) / kPageSize) + 1;
+    if (page_count > kAddressSpaceWriteLeaseMaxPages)
+    {
+        return false;
+    }
+    if (hi_out != nullptr)
+    {
+        *hi_out = hi;
+    }
+    return true;
+}
+
+u16 FindWriteLeaseRowLocked(const AddressSpace& as, u64 token_value)
+{
+    if (token_value == 0)
+    {
+        return kAddressSpaceWriteLeaseCapacity;
+    }
+    for (u16 index = 0; index < kAddressSpaceWriteLeaseCapacity; ++index)
+    {
+        if (as.write_leases[index].token_value == token_value)
+        {
+            return index;
+        }
+    }
+    return kAddressSpaceWriteLeaseCapacity;
+}
+
+bool RangeOverlapsWriteLease(AddressSpace* as, u64 lo, u64 hi)
+{
+    KASSERT(as != nullptr && lo < hi, "mm/as", "invalid write-lease overlap query");
+    sync::SpinLockGuard guard(as->write_leases_lock);
+    u16 live = 0;
+    bool overlap = false;
+    for (const AddressSpaceWriteLeaseRow& row : as->write_leases)
+    {
+        if (row.token_value == 0)
+        {
+            if (row.lo != 0 || row.hi != 0)
+            {
+                return true; // corrupt rows fail closed against mutation
+            }
+            continue;
+        }
+        ++live;
+        if (row.lo >= row.hi)
+        {
+            return true;
+        }
+        overlap = overlap || (lo < row.hi && hi > row.lo);
+    }
+    return live != as->write_lease_count ? true : overlap;
+}
+
+bool AddressSpaceHasWriteLeases(AddressSpace* as)
+{
+    sync::SpinLockGuard guard(as->write_leases_lock);
+    u16 live = 0;
+    for (const AddressSpaceWriteLeaseRow& row : as->write_leases)
+    {
+        if (row.token_value != 0)
+        {
+            ++live;
+        }
+        else if (row.lo != 0 || row.hi != 0)
+        {
+            return true;
+        }
+    }
+    return live != 0 || live != as->write_lease_count;
+}
+
 } // namespace
 
 core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
@@ -739,6 +934,8 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     as->reservation_count = 0;
     as->reservation_capacity = kInitialUserVmReservationCapacity;
     as->reservations = reservations;
+    as->write_lease_count = 0;
+    as->next_write_lease_hint = 0;
 
     ++g_created;
 
@@ -823,6 +1020,66 @@ bool AddressSpaceReservationMatches(AddressSpace* as, const AddressSpaceReservat
     AddressSpaceMutationGuard mutation(*as);
     const u16 index = FindReservationIndex(as, token.value_);
     return index != kNoReservation && as->reservations[index].lo == lo && as->reservations[index].hi == hi;
+}
+
+bool AddressSpaceCommitUserReservation(AddressSpace* as, const AddressSpaceReservationToken& token, u64 expected_lo,
+                                       u64 expected_hi)
+{
+    if (as == nullptr || !token.IsValid() || token.owner_ != as || !UserReservationRangeValid(expected_lo, expected_hi))
+    {
+        return false;
+    }
+
+    AddressSpaceMutationGuard mutation(*as);
+    const u16 reservation_index = FindReservationIndex(as, token.value_);
+    if (reservation_index == kNoReservation || as->reservations[reservation_index].lo != expected_lo ||
+        as->reservations[reservation_index].hi != expected_hi)
+    {
+        return false;
+    }
+
+    const u64 expected_pages = (expected_hi - expected_lo) / kPageSize;
+    u64 tagged_pages = 0;
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            const AddressSpaceUserRegion& region = as->regions[i];
+            if (region.reservation_token != token.value_)
+            {
+                continue;
+            }
+            if (region.vaddr < expected_lo || region.vaddr >= expected_hi)
+            {
+                return false;
+            }
+            u64* pte = WalkToPteIn(as->pml4_virt, region.vaddr, nullptr);
+            if (pte == nullptr || (*pte & kPagePresent) == 0 || (*pte & kAddrMask) != region.frame)
+            {
+                return false;
+            }
+            ++tagged_pages;
+        }
+        if (tagged_pages != expected_pages)
+        {
+            return false;
+        }
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            if (as->regions[i].reservation_token == token.value_)
+            {
+                as->regions[i].reservation_token = 0;
+            }
+        }
+    }
+
+    const u16 last = static_cast<u16>(as->reservation_count - 1);
+    if (reservation_index != last)
+    {
+        as->reservations[reservation_index] = as->reservations[last];
+    }
+    --as->reservation_count;
+    return true;
 }
 
 namespace
@@ -1077,6 +1334,157 @@ RetiredUserPage DetachUserPageByIndexLocked(AddressSpace* as, u16 idx)
 }
 } // namespace
 
+bool AddressSpaceCommitUserReservationReplacingOwnedRange(AddressSpace* as,
+                                                          const AddressSpaceReservationToken& destination_token,
+                                                          u64 destination_lo, u64 destination_hi, u64 source_lo,
+                                                          u64 source_hi)
+{
+    if (as == nullptr || !destination_token.IsValid() || destination_token.owner_ != as ||
+        !UserReservationRangeValid(destination_lo, destination_hi) || !UserReservationRangeValid(source_lo, source_hi))
+    {
+        return false;
+    }
+    if (destination_lo < source_hi && destination_hi > source_lo)
+    {
+        return false;
+    }
+
+    AddressSpaceMutationGuard mutation(*as);
+    const u16 reservation_index = FindReservationIndex(as, destination_token.value_);
+    if (reservation_index == kNoReservation || as->reservations[reservation_index].lo != destination_lo ||
+        as->reservations[reservation_index].hi != destination_hi ||
+        RangeOverlapsReservation(as, source_lo, source_hi) || RangeOverlapsWriteLease(as, source_lo, source_hi) ||
+        RangeOverlapsWriteLease(as, destination_lo, destination_hi))
+    {
+        return false;
+    }
+
+    constexpr u64 kSeenWordBits = 64;
+    constexpr u64 kSeenWordCount = (kMaxUserVmRegionsPerAs + kSeenWordBits - 1) / kSeenWordBits;
+    u64 destination_seen[kSeenWordCount]{};
+    u64 source_seen[kSeenWordCount]{};
+    const u64 destination_pages = (destination_hi - destination_lo) / kPageSize;
+    const u64 source_pages = (source_hi - source_lo) / kPageSize;
+    u64 destination_count = 0;
+    u64 source_count = 0;
+
+    // Validate both ledgers and every corresponding leaf before publishing or
+    // retiring anything. The bitsets make duplicate VA rows a refusal rather
+    // than allowing a matching row count to hide a hole.
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            const AddressSpaceUserRegion& region = as->regions[i];
+            const bool in_destination = region.vaddr >= destination_lo && region.vaddr < destination_hi;
+            const bool in_source = region.vaddr >= source_lo && region.vaddr < source_hi;
+
+            if (!in_destination && !in_source)
+            {
+                if (region.reservation_token == destination_token.value_)
+                {
+                    return false;
+                }
+                continue;
+            }
+
+            const u64 page_index =
+                in_destination ? (region.vaddr - destination_lo) / kPageSize : (region.vaddr - source_lo) / kPageSize;
+            u64* const seen = in_destination ? destination_seen : source_seen;
+            const u64 word = page_index / kSeenWordBits;
+            const u64 bit = u64{1} << (page_index % kSeenWordBits);
+            if ((seen[word] & bit) != 0)
+            {
+                return false;
+            }
+            seen[word] |= bit;
+
+            if ((in_destination && region.reservation_token != destination_token.value_) ||
+                (in_source && region.reservation_token != 0))
+            {
+                return false;
+            }
+            u64* pte = WalkToPteIn(as->pml4_virt, region.vaddr, nullptr);
+            if (pte == nullptr || (*pte & kPagePresent) == 0 || (*pte & kAddrMask) != region.frame)
+            {
+                return false;
+            }
+            if (in_destination)
+            {
+                ++destination_count;
+            }
+            else
+            {
+                ++source_count;
+            }
+        }
+    }
+    if (destination_count != destination_pages || source_count != source_pages)
+    {
+        return false;
+    }
+
+    // Validation succeeded under the same outer mutation transaction. Retire
+    // source rows with a persistent scan so swap-removal stays O(region_count)
+    // and no page-sized receipt array is needed on the kernel stack.
+    u16 scan = 0;
+    u64 retired_count = 0;
+    while (retired_count < source_pages)
+    {
+        RetiredUserPage retired{};
+        bool found = false;
+        {
+            sync::SpinLockGuard guard(as->regions_lock);
+            while (scan < as->region_count)
+            {
+                const AddressSpaceUserRegion& region = as->regions[scan];
+                if (region.vaddr >= source_lo && region.vaddr < source_hi)
+                {
+                    KASSERT(region.reservation_token == 0, "mm/as", "validated replacement source changed ownership");
+                    retired = DetachUserPageByIndexLocked(as, scan);
+                    found = true;
+                    break;
+                }
+                ++scan;
+            }
+        }
+        KASSERT(found, "mm/as", "validated replacement source page disappeared");
+        TlbShootdownAddr(as, retired.virt);
+        FreeFrame(retired.frame);
+        ReleaseRetiredPageTables(retired.page_tables);
+        ++retired_count;
+    }
+
+    // Publish the destination only after every source translation and frame
+    // is retired. No recoverable failure remains after the validation pass.
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64 committed_count = 0;
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            if (as->regions[i].reservation_token == destination_token.value_)
+            {
+                KASSERT(as->regions[i].vaddr >= destination_lo && as->regions[i].vaddr < destination_hi, "mm/as",
+                        "replacement destination escaped reservation");
+                as->regions[i].reservation_token = 0;
+                ++committed_count;
+            }
+        }
+        KASSERT(committed_count == destination_pages, "mm/as", "validated replacement destination disappeared");
+    }
+
+    const u16 current_reservation_index = FindReservationIndex(as, destination_token.value_);
+    KASSERT(current_reservation_index != kNoReservation, "mm/as",
+            "replacement destination reservation disappeared during exclusive commit");
+    const u16 last = static_cast<u16>(as->reservation_count - 1);
+    if (current_reservation_index != last)
+    {
+        as->reservations[current_reservation_index] = as->reservations[last];
+    }
+    --as->reservation_count;
+    return true;
+}
+
 bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
 {
     if (as == nullptr)
@@ -1093,7 +1501,7 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
         PanicAs("AddressSpaceUnmapUserPage: virt outside canonical low half", virt);
     }
     AddressSpaceMutationGuard mutation(*as);
-    if (RangeOverlapsReservation(as, virt, virt + kPageSize))
+    if (RangeOverlapsReservation(as, virt, virt + kPageSize) || RangeOverlapsWriteLease(as, virt, virt + kPageSize))
     {
         return false;
     }
@@ -1138,7 +1546,7 @@ bool AddressSpaceReleaseUserReservation(AddressSpace* as, const AddressSpaceRese
     AddressSpaceMutationGuard mutation(*as);
     u16 reservation_index = FindReservationIndex(as, token.value_);
     if (reservation_index == kNoReservation || as->reservations[reservation_index].lo != expected_lo ||
-        as->reservations[reservation_index].hi != expected_hi)
+        as->reservations[reservation_index].hi != expected_hi || RangeOverlapsWriteLease(as, expected_lo, expected_hi))
     {
         return false;
     }
@@ -1391,22 +1799,35 @@ void AddressSpaceClearUserMappings(AddressSpace* as)
 {
     if (as == nullptr)
         return;
-    AddressSpaceMutationGuard mutation(*as);
-    KASSERT(as->reservation_count == 0, "mm/as", "AddressSpaceClearUserMappings with live user-VA reservation token");
     for (;;)
     {
-        RetiredUserPage retired{};
+        bool pinned = false;
         {
-            sync::SpinLockGuard guard(as->regions_lock);
-            if (as->region_count == 0)
+            AddressSpaceMutationGuard mutation(*as);
+            pinned = AddressSpaceHasWriteLeases(as);
+            if (!pinned)
             {
-                break;
+                KASSERT(as->reservation_count == 0, "mm/as",
+                        "AddressSpaceClearUserMappings with live user-VA reservation token");
+                for (;;)
+                {
+                    RetiredUserPage retired{};
+                    {
+                        sync::SpinLockGuard guard(as->regions_lock);
+                        if (as->region_count == 0)
+                        {
+                            return;
+                        }
+                        retired = DetachUserPageByIndexLocked(as, u16(as->region_count - 1));
+                    }
+                    TlbShootdownAddr(as, retired.virt);
+                    FreeFrame(retired.frame);
+                    ReleaseRetiredPageTables(retired.page_tables);
+                }
             }
-            retired = DetachUserPageByIndexLocked(as, u16(as->region_count - 1));
         }
-        TlbShootdownAddr(as, retired.virt);
-        FreeFrame(retired.frame);
-        ReleaseRetiredPageTables(retired.page_tables);
+        KASSERT(pinned, "mm/as", "write-lease wait lost its predicate");
+        sched::SchedYield();
     }
 }
 
@@ -1427,6 +1848,10 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
         PanicAs("AddressSpaceProtectUserPage: kPageGlobal on user page", new_flags);
 
     AddressSpaceMutationGuard mutation(*as);
+    if (RangeOverlapsReservation(as, virt, virt + kPageSize) || RangeOverlapsWriteLease(as, virt, virt + kPageSize))
+    {
+        return false;
+    }
     bool refused_write_to_exec = false;
     {
         sync::SpinLockGuard guard(as->regions_lock);
@@ -1506,7 +1931,8 @@ bool UnmapBorrowedRange(AddressSpace* as, u64 virt, const PhysAddr* expected_fra
     }
 
     AddressSpaceMutationGuard mutation(*as);
-    if (RangeOverlapsReservation(as, virt, virt + count * kPageSize))
+    if (RangeOverlapsReservation(as, virt, virt + count * kPageSize) ||
+        RangeOverlapsWriteLease(as, virt, virt + count * kPageSize))
     {
         return false;
     }
@@ -1563,25 +1989,25 @@ void AddressSpaceActivate(AddressSpace* as)
         return; // fast path: no-op same-AS switch
     }
 
-    // Maintain the per-AS CPU mask used by TLB shootdown to scope
-    // the IPI to peers that actually have this AS loaded. Clear
-    // first, then set on the new AS — order matters so a concurrent
-    // shootdown from a third CPU never sees us in both masks at
-    // once (it could over-IPI us; correctness is preserved).
+    // Publish entry before CR3 and retire the old bit only after CR3 has
+    // flushed its non-PCID translations. The brief overlap is intentional:
+    // an unnecessary IPI is safe, while clearing the old bit first lets a
+    // concurrent reclaimer miss this CPU and recycle a frame before the CR3
+    // reload has removed its stale translation.
     const u32 bit = 1u << (p->cpu_id & 31u);
     AddressSpace* old_as = p->current_as;
-    if (old_as != nullptr)
-    {
-        __atomic_fetch_and(&old_as->active_cpu_mask, ~bit, __ATOMIC_RELEASE);
-    }
     if (as != nullptr)
     {
-        __atomic_fetch_or(&as->active_cpu_mask, bit, __ATOMIC_ACQUIRE);
+        __atomic_fetch_or(&as->active_cpu_mask, bit, __ATOMIC_RELEASE);
     }
 
     const PhysAddr cr3 = (as != nullptr) ? as->pml4_phys : BootPml4Phys();
     arch::WriteCr3(cr3);
     p->current_as = as;
+    if (old_as != nullptr)
+    {
+        __atomic_fetch_and(&old_as->active_cpu_mask, ~bit, __ATOMIC_RELEASE);
+    }
     ++g_cr3_switches;
 }
 
@@ -1602,6 +2028,63 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt)
             return as->regions[i].frame;
     }
     return kNullFrame;
+}
+
+bool AddressSpaceTrySnapshotUserRegionSummary(const AddressSpace* as, AddressSpaceUserRegionSummary* out)
+{
+    if (out == nullptr)
+    {
+        return false;
+    }
+    *out = AddressSpaceUserRegionSummary{};
+    if (as == nullptr)
+    {
+        return false;
+    }
+
+    // Panic/stop diagnostics must never wait here: this CPU or an
+    // unacknowledged peer may already own the structural lock.
+    sync::SpinLockTryGuard guard(as->regions_lock);
+    if (!guard)
+    {
+        return false;
+    }
+
+    const u16 count = as->region_count;
+    if (count > as->region_capacity || count > as->frame_budget || (count != 0 && as->regions == nullptr))
+    {
+        return false;
+    }
+
+    AddressSpaceUserRegionSummary summary{};
+    summary.page_count = count;
+    if (count == 0)
+    {
+        *out = summary;
+        return true;
+    }
+
+    constexpr u64 kUserLastPage = 0x00007FFFFFFFF000ULL;
+    summary.min_vaddr = ~u64{0};
+    for (u16 index = 0; index < count; ++index)
+    {
+        const u64 vaddr = as->regions[index].vaddr;
+        if ((vaddr & (kPageSize - 1)) != 0 || vaddr > kUserLastPage)
+        {
+            return false;
+        }
+        if (vaddr < summary.min_vaddr)
+        {
+            summary.min_vaddr = vaddr;
+        }
+        const u64 end = vaddr + kPageSize;
+        if (end > summary.max_vaddr_exclusive)
+        {
+            summary.max_vaddr_exclusive = end;
+        }
+    }
+    *out = summary;
+    return true;
 }
 
 namespace
@@ -1657,6 +2140,197 @@ bool AddressSpaceReadUserMemory(AddressSpace* as, u64 user_va, void* kernel_dst,
 bool AddressSpaceWriteUserMemory(AddressSpace* as, u64 user_va, const void* kernel_src, u64 len)
 {
     return CopyUserMemoryTransaction(as, user_va, const_cast<void*>(kernel_src), len, true);
+}
+
+AddressSpaceWriteLeaseStatus AddressSpaceAcquireWriteLease(AddressSpace* as, u64 user_va, u64 len,
+                                                           AddressSpaceWriteLease* out_lease)
+{
+    u64 hi = 0;
+    if (as == nullptr || out_lease == nullptr || !WriteLeaseRangeValid(user_va, len, &hi))
+    {
+        return AddressSpaceWriteLeaseStatus::InvalidArgument;
+    }
+    if (out_lease->owner_ != nullptr || out_lease->token_value_ != 0 || out_lease->lo_ != 0 || out_lease->hi_ != 0)
+    {
+        // Never overwrite a live or non-canonical output object: doing so could
+        // orphan both the exact ledger row and its AddressSpace reference.
+        return AddressSpaceWriteLeaseStatus::InvalidArgument;
+    }
+
+    AddressSpaceMutationGuard mutation(*as);
+    sync::SpinLockGuard lease_guard(as->write_leases_lock);
+    if (as->write_lease_count > kAddressSpaceWriteLeaseCapacity ||
+        as->next_write_lease_hint >= kAddressSpaceWriteLeaseCapacity)
+    {
+        return AddressSpaceWriteLeaseStatus::CorruptState;
+    }
+
+    u16 live = 0;
+    u16 free_slot = kAddressSpaceWriteLeaseCapacity;
+    for (u16 offset = 0; offset < kAddressSpaceWriteLeaseCapacity; ++offset)
+    {
+        const u16 index = static_cast<u16>((as->next_write_lease_hint + offset) % kAddressSpaceWriteLeaseCapacity);
+        const AddressSpaceWriteLeaseRow& row = as->write_leases[index];
+        if (row.token_value != 0)
+        {
+            if (row.lo >= row.hi)
+            {
+                return AddressSpaceWriteLeaseStatus::CorruptState;
+            }
+            ++live;
+            continue;
+        }
+        if (row.lo != 0 || row.hi != 0)
+        {
+            return AddressSpaceWriteLeaseStatus::CorruptState;
+        }
+        if (free_slot == kAddressSpaceWriteLeaseCapacity)
+        {
+            free_slot = index;
+        }
+    }
+    if (live != as->write_lease_count)
+    {
+        return AddressSpaceWriteLeaseStatus::CorruptState;
+    }
+    if (free_slot == kAddressSpaceWriteLeaseCapacity)
+    {
+        return AddressSpaceWriteLeaseStatus::CapacityExhausted;
+    }
+
+    {
+        sync::SpinLockGuard regions_guard(as->regions_lock);
+        const u64 first_page = user_va & ~(kPageSize - 1);
+        const u64 last_page = (hi - 1) & ~(kPageSize - 1);
+        for (u64 page = first_page;; page += kPageSize)
+        {
+            u64* pte = WalkToPteIn(as->pml4_virt, page, nullptr);
+            constexpr u64 kReadableUser = kPagePresent | kPageUser;
+            if (pte == nullptr || (*pte & kReadableUser) != kReadableUser)
+            {
+                return AddressSpaceWriteLeaseStatus::Unmapped;
+            }
+            if ((*pte & kPageWritable) == 0)
+            {
+                return AddressSpaceWriteLeaseStatus::NotWritable;
+            }
+            if (page == last_page)
+            {
+                break;
+            }
+        }
+    }
+
+    const u64 token_value = AllocateWriteLeaseTokenValue();
+    if (token_value == 0)
+    {
+        return AddressSpaceWriteLeaseStatus::TokenExhausted;
+    }
+    as->write_leases[free_slot] = AddressSpaceWriteLeaseRow{user_va, hi, token_value};
+    ++as->write_lease_count;
+    as->next_write_lease_hint = static_cast<u16>((free_slot + 1U) % kAddressSpaceWriteLeaseCapacity);
+    AddressSpaceRetain(as);
+    out_lease->owner_ = as;
+    out_lease->token_value_ = token_value;
+    out_lease->lo_ = user_va;
+    out_lease->hi_ = hi;
+    return AddressSpaceWriteLeaseStatus::Ok;
+}
+
+bool AddressSpaceCopyToWriteLease(const AddressSpaceWriteLease& lease, u64 offset, const void* kernel_src, u64 len)
+{
+    if (!lease.IsValid() || (len != 0 && kernel_src == nullptr))
+    {
+        return false;
+    }
+    const u64 lease_bytes = lease.hi_ - lease.lo_;
+    if (offset > lease_bytes || len > lease_bytes - offset)
+    {
+        return false;
+    }
+
+    AddressSpace* const as = lease.owner_;
+    sync::SpinLockGuard lease_guard(as->write_leases_lock);
+    const u16 slot = FindWriteLeaseRowLocked(*as, lease.token_value_);
+    if (slot == kAddressSpaceWriteLeaseCapacity)
+    {
+        return false;
+    }
+    const AddressSpaceWriteLeaseRow& row = as->write_leases[slot];
+    if (row.lo != lease.lo_ || row.hi != lease.hi_ || row.token_value != lease.token_value_)
+    {
+        return false;
+    }
+    if (len == 0)
+    {
+        return true;
+    }
+
+    sync::SpinLockGuard regions_guard(as->regions_lock);
+    const u64 first_lease_page = row.lo & ~(kPageSize - 1);
+    const u64 last_lease_page = (row.hi - 1) & ~(kPageSize - 1);
+    for (u64 page = first_lease_page;; page += kPageSize)
+    {
+        u64* pte = WalkToPteIn(as->pml4_virt, page, nullptr);
+        constexpr u64 kWritableUser = kPagePresent | kPageUser | kPageWritable;
+        if (pte == nullptr || (*pte & kWritableUser) != kWritableUser)
+        {
+            return false;
+        }
+        if (page == last_lease_page)
+        {
+            break;
+        }
+    }
+
+    const auto* source = static_cast<const u8*>(kernel_src);
+    u64 destination = row.lo + offset;
+    u64 remaining = len;
+    while (remaining != 0)
+    {
+        u64* pte = WalkToPteIn(as->pml4_virt, destination, nullptr);
+        KASSERT(pte != nullptr, "mm/as", "validated write-lease PTE disappeared");
+        const u64 page_offset = destination & (kPageSize - 1);
+        const u64 chunk = remaining < kPageSize - page_offset ? remaining : kPageSize - page_offset;
+        auto* direct = static_cast<u8*>(PhysToVirt(*pte & kAddrMask)) + page_offset;
+        memcpy(direct, source, chunk);
+        source += chunk;
+        destination += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+bool AddressSpaceReleaseWriteLease(AddressSpaceWriteLease* lease)
+{
+    if (lease == nullptr || !lease->IsValid())
+    {
+        return false;
+    }
+    AddressSpace* const as = lease->owner_;
+    const u64 token_value = lease->token_value_;
+    {
+        sync::SpinLockGuard guard(as->write_leases_lock);
+        const u16 slot = FindWriteLeaseRowLocked(*as, token_value);
+        if (slot == kAddressSpaceWriteLeaseCapacity)
+        {
+            return false;
+        }
+        const AddressSpaceWriteLeaseRow& row = as->write_leases[slot];
+        if (row.lo != lease->lo_ || row.hi != lease->hi_ || row.token_value != token_value ||
+            as->write_lease_count == 0)
+        {
+            return false;
+        }
+        as->write_leases[slot] = AddressSpaceWriteLeaseRow{};
+        --as->write_lease_count;
+    }
+    lease->owner_ = nullptr;
+    lease->token_value_ = 0;
+    lease->lo_ = 0;
+    lease->hi_ = 0;
+    AddressSpaceRelease(as);
+    return true;
 }
 
 void AddressSpaceRetain(AddressSpace* as)
@@ -1739,6 +2413,7 @@ void AddressSpaceRelease(AddressSpace* as)
 
     {
         AddressSpaceMutationGuard mutation(*as);
+        KASSERT(!AddressSpaceHasWriteLeases(as), "mm/as", "AddressSpaceRelease with live write lease");
         u16 regions_at_destroy = 0;
         {
             sync::SpinLockGuard guard(as->regions_lock);
@@ -1883,6 +2558,43 @@ void AddressSpaceSelfTest()
     {
         PanicAs("self-test: transaction-copy accepted a cross-page range", kTestVa);
     }
+
+    // A write lease holds only a logical PTE/lifetime pin: it must exclude
+    // unmap and protection changes without retaining mutation_lock, copy via
+    // the direct map, and reject replay after consumption. Compile-time copy
+    // deletion prevents an otherwise-dangling owner pointer after AS release.
+    AddressSpaceWriteLease write_lease{};
+    if (AddressSpaceAcquireWriteLease(a, kTestVa + 37, sizeof(write_probe), &write_lease) !=
+            AddressSpaceWriteLeaseStatus::Ok ||
+        !write_lease.IsValid() ||
+        AddressSpaceAcquireWriteLease(a, kTestVa + 41, sizeof(write_probe), &write_lease) !=
+            AddressSpaceWriteLeaseStatus::InvalidArgument)
+    {
+        PanicAs("self-test: writable mapping lease acquisition/reuse guard failed", kTestVa);
+    }
+    const u8 leased_probe[4] = {0x51, 0xA5, 0x7E, 0xD0};
+    if (AddressSpaceProtectUserPage(a, kTestVa, kPagePresent | kPageUser | kPageNoExecute) ||
+        AddressSpaceUnmapUserPage(a, kTestVa) ||
+        !AddressSpaceCopyToWriteLease(write_lease, 0, leased_probe, sizeof(leased_probe)) ||
+        !AddressSpaceReleaseWriteLease(&write_lease) || AddressSpaceReleaseWriteLease(&write_lease) ||
+        !AddressSpaceReadUserMemory(a, kTestVa + 37, read_probe, sizeof(read_probe)))
+    {
+        PanicAs("self-test: exact write-lease exclusion/copy/replay failed", kTestVa);
+    }
+    for (u32 i = 0; i < sizeof(leased_probe); ++i)
+    {
+        if (read_probe[i] != leased_probe[i])
+        {
+            PanicAs("self-test: write-lease data mismatch", i);
+        }
+    }
+    AddressSpaceWriteLease unmapped_lease{};
+    if (AddressSpaceAcquireWriteLease(b, kTestVa + 37, sizeof(write_probe), &unmapped_lease) !=
+            AddressSpaceWriteLeaseStatus::Unmapped ||
+        unmapped_lease.IsValid())
+    {
+        PanicAs("self-test: write lease accepted unmapped sibling range", kTestVa);
+    }
     if (!AddressSpaceProtectUserPage(a, kTestVa, kPagePresent | kPageUser | kPageNoExecute) ||
         AddressSpaceWriteUserMemory(a, kTestVa + 37, write_probe, sizeof(write_probe)))
     {
@@ -1946,6 +2658,142 @@ void AddressSpaceSelfTest()
     if (!AddressSpaceReleaseUserReservation(b, token_b, kReservedVa, kReservedHi))
     {
         PanicAs("self-test: empty reservation release failed", kReservedVa);
+    }
+
+    // Fully populated reservations may commit into ordinary AS ownership;
+    // incomplete ones must remain exact-token capabilities and unwind safely.
+    constexpr u64 kCommittedVa = 0x0000000052000000ULL;
+    constexpr u64 kCommittedHi = kCommittedVa + 2 * kPageSize;
+    AddressSpaceReservationToken committed_token{};
+    if (!AddressSpaceReserveUserRange(a, kCommittedVa, kCommittedHi, &committed_token))
+    {
+        PanicAs("self-test: committed reservation setup failed", kCommittedVa);
+    }
+    for (u64 va = kCommittedVa; va < kCommittedHi; va += kPageSize)
+    {
+        PhysAddr committed_frame = AllocateFrame().value_or(kNullFrame);
+        if (committed_frame == kNullFrame ||
+            !AddressSpaceMapReservedUserPage(a, committed_token, va, committed_frame,
+                                             kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+        {
+            PanicAs("self-test: committed reservation map failed", va);
+        }
+    }
+    if (!AddressSpaceCommitUserReservation(a, committed_token, kCommittedVa, kCommittedHi) ||
+        AddressSpaceReservationMatches(a, committed_token, kCommittedVa, kCommittedHi) ||
+        !AddressSpaceUnmapUserPage(a, kCommittedVa) || !AddressSpaceUnmapUserPage(a, kCommittedVa + kPageSize))
+    {
+        PanicAs("self-test: reservation commit did not publish ordinary ownership", kCommittedVa);
+    }
+
+    constexpr u64 kPartialVa = 0x0000000053000000ULL;
+    constexpr u64 kPartialHi = kPartialVa + 2 * kPageSize;
+    AddressSpaceReservationToken partial_token{};
+    PhysAddr partial_frame = AllocateFrame().value_or(kNullFrame);
+    if (partial_frame == kNullFrame || !AddressSpaceReserveUserRange(a, kPartialVa, kPartialHi, &partial_token) ||
+        !AddressSpaceMapReservedUserPage(a, partial_token, kPartialVa, partial_frame,
+                                         kPagePresent | kPageWritable | kPageUser | kPageNoExecute) ||
+        AddressSpaceCommitUserReservation(a, partial_token, kPartialVa, kPartialHi) ||
+        !AddressSpaceReleaseUserReservation(a, partial_token, kPartialVa, kPartialHi) ||
+        AddressSpaceProbePte(a, kPartialVa) != kNullFrame)
+    {
+        PanicAs("self-test: partial reservation commit was not fail-closed", kPartialVa);
+    }
+
+    // A move-style replacement validates both complete ranges before it
+    // retires the source or publishes the destination. Protection changes are
+    // excluded while the destination capability remains live.
+    constexpr u64 kReplaceSourceVa = 0x0000000054000000ULL;
+    constexpr u64 kReplaceSourceHi = kReplaceSourceVa + 2 * kPageSize;
+    constexpr u64 kReplaceDestinationVa = 0x0000000055000000ULL;
+    constexpr u64 kReplaceDestinationHi = kReplaceDestinationVa + 3 * kPageSize;
+    for (u64 va = kReplaceSourceVa; va < kReplaceSourceHi; va += kPageSize)
+    {
+        PhysAddr source_frame = AllocateFrame().value_or(kNullFrame);
+        if (source_frame == kNullFrame ||
+            !AddressSpaceMapUserPage(a, va, source_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+        {
+            PanicAs("self-test: replacement source setup failed", va);
+        }
+    }
+    AddressSpaceReservationToken replace_token{};
+    if (!AddressSpaceReserveUserRange(a, kReplaceDestinationVa, kReplaceDestinationHi, &replace_token))
+    {
+        PanicAs("self-test: replacement destination reservation failed", kReplaceDestinationVa);
+    }
+    for (u64 va = kReplaceDestinationVa; va < kReplaceDestinationHi; va += kPageSize)
+    {
+        PhysAddr destination_frame = AllocateFrame().value_or(kNullFrame);
+        if (destination_frame == kNullFrame ||
+            !AddressSpaceMapReservedUserPage(a, replace_token, va, destination_frame,
+                                             kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+        {
+            PanicAs("self-test: replacement destination setup failed", va);
+        }
+    }
+    if (AddressSpaceProtectUserPage(a, kReplaceDestinationVa, kPagePresent | kPageUser | kPageNoExecute) ||
+        !AddressSpaceCommitUserReservationReplacingOwnedRange(
+            a, replace_token, kReplaceDestinationVa, kReplaceDestinationHi, kReplaceSourceVa, kReplaceSourceHi) ||
+        AddressSpaceReservationMatches(a, replace_token, kReplaceDestinationVa, kReplaceDestinationHi))
+    {
+        PanicAs("self-test: combined replacement transaction failed", kReplaceDestinationVa);
+    }
+    for (u64 va = kReplaceSourceVa; va < kReplaceSourceHi; va += kPageSize)
+    {
+        if (AddressSpaceProbePte(a, va) != kNullFrame)
+        {
+            PanicAs("self-test: combined replacement retained source page", va);
+        }
+    }
+    if (!AddressSpaceProtectUserPage(a, kReplaceDestinationVa, kPagePresent | kPageUser | kPageNoExecute))
+    {
+        PanicAs("self-test: combined replacement did not publish destination", kReplaceDestinationVa);
+    }
+    for (u64 va = kReplaceDestinationVa; va < kReplaceDestinationHi; va += kPageSize)
+    {
+        if (!AddressSpaceUnmapUserPage(a, va))
+        {
+            PanicAs("self-test: replacement destination cleanup failed", va);
+        }
+    }
+
+    // An incomplete source must leave both the ordinary source and exact
+    // destination reservation intact so the caller can roll back safely.
+    constexpr u64 kFailedSourceVa = 0x0000000056000000ULL;
+    constexpr u64 kFailedSourceHi = kFailedSourceVa + 2 * kPageSize;
+    constexpr u64 kFailedDestinationVa = 0x0000000057000000ULL;
+    constexpr u64 kFailedDestinationHi = kFailedDestinationVa + 2 * kPageSize;
+    PhysAddr failed_source_frame = AllocateFrame().value_or(kNullFrame);
+    if (failed_source_frame == kNullFrame ||
+        !AddressSpaceMapUserPage(a, kFailedSourceVa, failed_source_frame,
+                                 kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+    {
+        PanicAs("self-test: failed-replacement source setup failed", kFailedSourceVa);
+    }
+    AddressSpaceReservationToken failed_replace_token{};
+    if (!AddressSpaceReserveUserRange(a, kFailedDestinationVa, kFailedDestinationHi, &failed_replace_token))
+    {
+        PanicAs("self-test: failed-replacement destination reservation failed", kFailedDestinationVa);
+    }
+    for (u64 va = kFailedDestinationVa; va < kFailedDestinationHi; va += kPageSize)
+    {
+        PhysAddr destination_frame = AllocateFrame().value_or(kNullFrame);
+        if (destination_frame == kNullFrame ||
+            !AddressSpaceMapReservedUserPage(a, failed_replace_token, va, destination_frame,
+                                             kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+        {
+            PanicAs("self-test: failed-replacement destination setup failed", va);
+        }
+    }
+    if (AddressSpaceCommitUserReservationReplacingOwnedRange(a, failed_replace_token, kFailedDestinationVa,
+                                                             kFailedDestinationHi, kFailedSourceVa, kFailedSourceHi) ||
+        !AddressSpaceReservationMatches(a, failed_replace_token, kFailedDestinationVa, kFailedDestinationHi) ||
+        AddressSpaceProbePte(a, kFailedSourceVa) == kNullFrame ||
+        AddressSpaceProbePte(a, kFailedDestinationVa) == kNullFrame ||
+        !AddressSpaceReleaseUserReservation(a, failed_replace_token, kFailedDestinationVa, kFailedDestinationHi) ||
+        !AddressSpaceUnmapUserPage(a, kFailedSourceVa))
+    {
+        PanicAs("self-test: failed replacement was not failure-atomic", kFailedSourceVa);
     }
 
     // Exercise a borrowed transaction across a PDPT boundary. A mismatched
@@ -2020,46 +2868,41 @@ void AddressSpaceSelfTest()
 // ---------------------------------------------------------------------------
 // TLB shootdown. See address_space.h for the contract.
 //
-// Today (uniprocessor v0) the implementation is a local `invlpg` per page
-// when the caller's CPU is in the target AS, plus a defensive `invlpg` on
-// the same CPU when it's NOT — the latter is a no-op for the hardware
-// (the entry can't be cached) but documents the intent.
-//
-// When SMP comes online, the broadcast path lights up: every AP whose
-// current AS matches `as` is sent the TLB-shootdown IPI; the helper waits
-// for each target to ack via a generation counter before returning, so
-// the caller can rely on "shootdown done" semantics. The IPI vector and
-// handler are owned by arch/x86_64/smp.{h,cpp}.
+// The caller is migration-pinned while the exact sparse active/ready peer
+// set is snapshotted. Every target executes the invalidation through the
+// confirmed IPI-call mailbox path; a slow peer is waited out, never treated
+// as permission to reclaim. Not-yet-ready APs are excluded because their
+// monotonic shootdown-domain join performs a full TLB flush before publish.
 // ---------------------------------------------------------------------------
 
 void TlbShootdownAddr(AddressSpace* as, u64 virt)
 {
-    // Local flush — fast path. AddressSpaceCurrent() == as means
-    // the page we just unmapped is in this CPU's active CR3, so
-    // its TLB definitely has a stale entry; invlpg evicts it.
-    if (AddressSpaceCurrent() == as)
+    const u64 start = virt & ~(kPageSize - 1);
+    if (start > ~u64{0} - kPageSize)
     {
-        Invlpg(virt);
+        PanicAs("TlbShootdownAddr range overflow", virt);
     }
-
-    // Remote flush — broadcast to every AP whose CR3 matches `as`.
-    // No-op when only the BSP is online. The arch layer owns the
-    // per-CPU "current AS" lookup and the IPI vector encoding.
-    arch::SmpTlbShootdownAddr(as, virt);
+    ConfirmedUserTlbShootdown(as, start, start + kPageSize);
 }
 
 void TlbShootdownRange(AddressSpace* as, u64 virt, u64 len)
 {
-    const u64 page = 0x1000;
-    const u64 end = virt + len;
-    for (u64 v = virt & ~(page - 1); v < end; v += page)
+    if (len == 0)
     {
-        if (AddressSpaceCurrent() == as)
-        {
-            Invlpg(v);
-        }
+        return;
     }
-    arch::SmpTlbShootdownRange(as, virt, len);
+    if (virt > ~u64{0} - len)
+    {
+        PanicAs("TlbShootdownRange input overflow", virt);
+    }
+    const u64 raw_end = virt + len;
+    if (raw_end > ~u64{0} - (kPageSize - 1))
+    {
+        PanicAs("TlbShootdownRange alignment overflow", raw_end);
+    }
+    const u64 start = virt & ~(kPageSize - 1);
+    const u64 end = (raw_end + kPageSize - 1) & ~(kPageSize - 1);
+    ConfirmedUserTlbShootdown(as, start, end);
 }
 
 } // namespace duetos::mm

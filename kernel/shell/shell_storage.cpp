@@ -454,11 +454,11 @@ void CmdMkfsDuetfs(u32 argc, char** argv)
 
 // `install <handle> INSTALL` — run the disk-installer pipeline.
 // DESTRUCTIVE. Lays down a fresh GPT (ESP + system + crash-dump),
-// formats ESP and system as FAT32, seeds /esp/boot/grub/grub.cfg
-// with a chainload stub, and mounts the new partitions at /esp +
-// /system. Bootloader-bytes copy (BOOTX64.EFI + duetos-kernel.elf)
-// is a follow-on slice — see wiki/reference/Daily-Driver-Readiness.md
-// Tier 0 for the residual scope. Admin-gated; requires the literal
+// formats the ESP and system, generates /esp/boot/grub/grub.cfg,
+// stages the experimental direct UEFI loader and optional kernel bytes,
+// and mounts the new partitions at /esp + /system. It does not install
+// GRUB's BIOS/EFI boot images, so this is layout preparation rather than
+// a supported bootable installation. Admin-gated; requires the literal
 // "INSTALL" confirmation token to proceed.
 void CmdInstall(u32 argc, char** argv)
 {
@@ -556,13 +556,13 @@ void CmdInstall(u32 argc, char** argv)
     ConsoleWrite("..");
     WriteHexCol(report.crashdump_last_lba, 0);
     ConsoleWriteln(" reserved (DuetOS-private type GUID)");
-    // Bootloader bytes status. BOOTX64.EFI is always embedded (small
-    // — 6 KiB — built by boot/uefi/) and stamped into the ESP. The
-    // kernel ELF is gated by DUETOS_INSTALLER_KERNEL_EMBED; report
-    // accordingly so the operator knows whether out-of-band staging
-    // is still needed.
+    // Boot-staging status. BOOTX64.EFI is always embedded (small — 6 KiB,
+    // built by boot/uefi/) and stamped into the ESP, but that direct loader
+    // is experimental and does not hand off to the kernel. The kernel ELF is
+    // gated by DUETOS_INSTALLER_KERNEL_EMBED; report byte staging separately
+    // from supported bootability.
     const duetos::u64 kern_len = duetos::fs::RamfsKernelElfSize();
-    ConsoleWriteln("  ESP /EFI/BOOT/BOOTX64.EFI written from embedded blob");
+    ConsoleWriteln("  ESP /EFI/BOOT/BOOTX64.EFI written (experimental; no kernel handoff)");
     if (report.staged_slot != 0)
     {
         const char slot_name = (report.staged_slot == 2) ? 'b' : 'a';
@@ -571,7 +571,7 @@ void CmdInstall(u32 argc, char** argv)
         ConsoleWriteln(".elf staged + read-back validated");
         ConsoleWrite("  A/B state persisted: pending=");
         ConsoleWriteChar(slot_name);
-        ConsoleWriteln("; grub.cfg default boots the new slot,");
+        ConsoleWriteln("; grub.cfg selects the new slot once GRUB is installed,");
         ConsoleWriteln("    falling back to the other slot, then the legacy /system kernel");
     }
     else if (kern_len > 0)
@@ -591,7 +591,7 @@ void CmdInstall(u32 argc, char** argv)
         ConsoleWriteln("  /system kernel.elf not embedded (DUETOS_INSTALLER_KERNEL_EMBED=OFF)");
         ConsoleWriteln("    — stage /system/boot/duetos-kernel.elf from the live ISO");
         ConsoleWriteln("    or via USB. Rebuild with -DDUETOS_INSTALLER_KERNEL_EMBED=ON");
-        ConsoleWriteln("    for a fully self-installable image.");
+        ConsoleWriteln("    to include kernel bytes (GRUB boot images are still required).");
     }
     else
     {
@@ -599,6 +599,8 @@ void CmdInstall(u32 argc, char** argv)
         WriteHexCol(kern_len, 0);
         ConsoleWriteln(" bytes)");
     }
+    ConsoleWriteln("  NOT BOOTABLE YET: install GRUB BIOS/EFI boot images and use the");
+    ConsoleWriteln("    generated Multiboot2 grub.cfg for the supported release path.");
 }
 
 // `lastdump` — operator readout for the last-built minidump.

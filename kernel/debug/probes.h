@@ -2,6 +2,10 @@
 
 #include "util/types.h"
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
 /*
  * DuetOS — static kernel probes.
  *
@@ -13,11 +17,10 @@
  * context) — think Linux kprobes / DTrace dtrace(1M), scaled
  * down to what's useful at v0.
  *
- * The macro captures the caller's return address via
- * `__builtin_return_address(0)` so each probe site is self-
- * identifying in the log even without source symbols. In debug
- * builds this rip resolves via the kernel's embedded symbol
- * table in the serial log's trap/panic dumps.
+ * The macro captures the caller's return address via the compiler's
+ * return-address intrinsic so each probe site is self-identifying in the
+ * log even without source symbols. In debug builds this rip resolves via
+ * the kernel's embedded symbol table in the serial log's trap/panic dumps.
  *
  * Scope note: this is separate from the live-breakpoint
  * subsystem (`kernel/debug/breakpoints.h`). A probe is a static
@@ -448,23 +451,24 @@ void ProbeInit();
 
 // Fire a probe. The `do {} while (0)` is so the macro works in
 // `if (x) KBP_PROBE(foo); else y;` without dangling-else footguns.
-// `__builtin_return_address(0)` is the caller's rip — one level
-// up (us → ProbeFire → MSVC-style stack walk would be off by
-// one; we already ARE at the caller, so we cast the frame we're
-// inside to the "caller" tag by taking __builtin_return_address(0)
-// which on a non-inlined call is literally the CALL-return of the
-// caller of ProbeFire. In practice the log line shows "the byte
-// right after the KBP_PROBE call site" which resolves back to
-// the macro's source line via the embedded symbol table.
+// The selected compiler intrinsic captures the caller's return address. On a
+// non-inlined call that is the byte immediately after the KBP_PROBE call site,
+// which resolves back to the macro's source line via the embedded symbol table.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define DUETOS_PROBE_RETURN_ADDRESS() _ReturnAddress()
+#else
+#define DUETOS_PROBE_RETURN_ADDRESS() __builtin_return_address(0)
+#endif
+
 #define KBP_PROBE(probe_id)                                                                                            \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)), 0);       \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(DUETOS_PROBE_RETURN_ADDRESS()), 0);     \
     } while (0)
 
 #define KBP_PROBE_V(probe_id, value)                                                                                   \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)),           \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(DUETOS_PROBE_RETURN_ADDRESS()),         \
                                    static_cast<::duetos::u64>(value));                                                 \
     } while (0)

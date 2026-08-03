@@ -8,8 +8,9 @@
  * (kernel/ipc/iocp.{h,cpp}) + the unified `Process::kobj_handles`
  * table, alongside KMutex / KEvent / KSemaphore. The legacy
  * fixed 8-port global pool (`iocp_job.cpp`) was retired by this
- * migration; the wire ABI is unchanged — handles are
- * `kWin32IocpBase (0xB00) + ipc_handle`.
+ * migration. Handles are positive PE32-safe opaque tokens: their
+ * low 12-bit band identifies IOCP and their high bits preserve the
+ * generation used by the unified handle table.
  */
 
 #include "util/types.h"

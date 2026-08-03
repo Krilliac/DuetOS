@@ -124,27 +124,27 @@ const char* ChannelName(DbgChannel ch)
 
 void DbgEnable(u32 mask)
 {
-    g_dbg_mask |= mask;
+    __atomic_fetch_or(&g_dbg_mask, mask, __ATOMIC_ACQ_REL);
 }
 
 void DbgDisable(u32 mask)
 {
-    g_dbg_mask &= ~mask;
+    __atomic_fetch_and(&g_dbg_mask, ~mask, __ATOMIC_ACQ_REL);
 }
 
 void DbgSet(u32 mask)
 {
-    g_dbg_mask = mask;
+    __atomic_store_n(&g_dbg_mask, mask, __ATOMIC_RELEASE);
 }
 
 u32 DbgMask()
 {
-    return g_dbg_mask;
+    return __atomic_load_n(&g_dbg_mask, __ATOMIC_ACQUIRE);
 }
 
 bool DbgIsEnabled(DbgChannel ch)
 {
-    return (g_dbg_mask & static_cast<u32>(ch)) != 0;
+    return (DbgMask() & static_cast<u32>(ch)) != 0;
 }
 
 const char* DbgChannelName(DbgChannel ch)
@@ -183,9 +183,10 @@ DbgChannel DbgChannelNext(DbgChannel cursor)
 void DbgListChannels()
 {
     Log(LogLevel::Info, "kdbg", "channels:");
+    const u32 mask = DbgMask();
     for (u32 i = 0; i < kChannelCount; ++i)
     {
-        const bool on = (g_dbg_mask & static_cast<u32>(kChannels[i].ch)) != 0;
+        const bool on = (mask & static_cast<u32>(kChannels[i].ch)) != 0;
         // Render through SerialWrite directly — Log's "with string"
         // form would force a fixed message + label, less readable
         // here than aligned columns.
@@ -194,7 +195,7 @@ void DbgListChannels()
         arch::SerialWrite(on ? " : on\n" : " : off\n");
     }
     arch::SerialWrite("  mask=");
-    WriteHex(g_dbg_mask);
+    WriteHex(mask);
     arch::SerialWrite("\n");
 }
 

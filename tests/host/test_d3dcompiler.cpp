@@ -147,10 +147,15 @@ static const DxGuid kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x
 
 // --- include the d3dcompiler source as a translation unit ----
 
-// Suppress the dllexport attribute warning by overriding via macro.
-// The C source uses the form `__attribute__((dllexport))`; we
-// replace `dllexport` with `used` so the attribute remains valid.
+// Suppress the dllexport attribute warning by overriding via macro. The C
+// source uses GNU `__attribute__((dllexport))` syntax even when its production
+// target is MSVC. Native MSVC does not parse that syntax, while GCC/Clang need
+// a valid hosted attribute to avoid -Wignored-attributes under -Werror.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define __attribute__(attributes)
+#else
 #define dllexport used
+#endif
 
 // d3dcompiler.c uses C-style linkage. Including it from C++ is fine
 // because the file is mostly C-compatible syntax; the `volatile` /
@@ -160,21 +165,26 @@ static const DxGuid kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x
 // on a handful of patterns the MSVC build accepts. Quiet those
 // here so the test stays focused on the compiler's behaviour
 // rather than its style.
+#if !defined(_MSC_VER) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wconversion"
 #pragma GCC diagnostic ignored "-Wshadow"
 #pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 
 extern "C"
 {
 #include "../../userland/libs/d3dcompiler/d3dcompiler.c"
 }
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#undef __attribute__
+#else
 #pragma GCC diagnostic pop
-
 #undef dllexport
+#endif
 
 // --- helpers for tests ---------------------------------------
 

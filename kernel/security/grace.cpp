@@ -277,8 +277,12 @@ void GraceCacheSelfTest()
     const Cap kTestCap = core::kCapFsWrite;
     static core::Process process{};
     process.pid = kFakePid;
-    process.cap_ceiling = core::CapSetTrusted();
-    process.caps = core::CapSetEmpty();
+    if (core::AuthorizationContextKeyIsValid(process.authorization) &&
+        !core::AuthorizationRelease(&process.authorization))
+        Panic("grace", "synthetic authorization reset failed");
+    if (!core::AuthorizationCreateTrusted(core::CapSetEmpty(), core::CapSetTrusted(), core::kTickBudgetTrusted,
+                                          &process.authorization))
+        Panic("grace", "synthetic authorization create failed");
 
     if (GraceCacheLookup(kFakePid, kTestCap))
         Panic("grace", "empty cache returned a hit");
@@ -315,6 +319,8 @@ void GraceCacheSelfTest()
     }
 
     GraceCacheInit();
+    if (!core::AuthorizationRelease(&process.authorization))
+        Panic("grace", "synthetic authorization release failed");
     arch::SerialWrite("[grace] self-test: PASS\n");
 }
 

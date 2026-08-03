@@ -52,6 +52,13 @@ static GdbServerRegSnapshot g_peer_snapshots[kMaxCpuThreadsFs]{};
 static bool g_peer_dirty[kMaxCpuThreadsFs]{};
 static u32 g_running_thread_id = 1;
 static u32 g_current_thread_id = 1;
+static arch::GdbStopRendezvous g_stop_rendezvous{};
+
+// A count rather than a timer deadline: the stop-loop runs with interrupts
+// disabled, so an IRQ-driven clock may not advance. One million collective
+// acquire samples is long enough for ordinary NMI delivery while remaining a
+// deterministic finite bound when a peer is wedged inside an earlier NMI.
+static constexpr u64 kGdbStopRendezvousSpinBudget = 1'000'000;
 
 // Commit a (possibly G-edited) peer register snapshot back to its
 // frozen trap frame. Called by GdbServerEnterAndWait (public scope)
@@ -228,6 +235,25 @@ u32 ThreadIdToCpuId(i64 tid, u32 fallback_cpu)
     return cpu;
 }
 
+// Peer register state is usable only when the bounded rendezvous accepted that
+// CPU for this exact generation. Rechecking the per-CPU release-published
+// generation prevents stale masks or frames from making a peer writable after
+// release or during a later stop.
+bool PeerAcknowledgedForCurrentStop(u32 cpu_id, cpu::PerCpu* peer)
+{
+    if (cpu_id >= kMaxCpuThreads || peer == nullptr || g_stop_rendezvous.generation == 0)
+        return false;
+    const u64 bit = u64{1} << cpu_id;
+    if ((g_stop_rendezvous.acknowledged_mask & bit) == 0 ||
+        arch::SmpGdbStopGeneration() != g_stop_rendezvous.generation)
+    {
+        return false;
+    }
+    if (__atomic_load_n(&peer->gdb_frozen_generation, __ATOMIC_ACQUIRE) != g_stop_rendezvous.generation)
+        return false;
+    return peer->gdb_frozen_frame != nullptr;
+}
+
 // Repoint g_regs / g_regs_writable based on g_current_thread_id.
 // Called from the H handler after thread-id parsing. For the
 // running CPU, points at g_trap_snapshot (the BSP-side snapshot
@@ -261,13 +287,12 @@ void ResyncSnapshotForCurrentThread()
     }
 
     cpu::PerCpu* peer = arch::SmpGetPercpu(cpu_id);
-    if (peer == nullptr || peer->gdb_frozen_frame == nullptr)
+    if (!PeerAcknowledgedForCurrentStop(cpu_id, peer))
     {
-        // Peer slot empty (not online, or never frozen). Zero out
-        // the scratch buffer so a `g` reply doesn't leak the
-        // previous selection's state. G writes still hit the
-        // scratch but won't be committed — there's no frame to
-        // commit them to.
+        // Peer slot empty, unacknowledged, or acknowledged for another
+        // generation. Zero the scratch so a `g` reply cannot leak an older
+        // selection, and make `G` fail instead of accepting an uncommittable
+        // write.
         g_peer_snapshots[cpu_id] = GdbServerRegSnapshot{};
         g_peer_dirty[cpu_id] = false;
         g_regs = &g_peer_snapshots[cpu_id];
@@ -509,7 +534,13 @@ void HandlePacket()
         }
         mon_cmd[dn] = '\0';
         ::duetos::diag::MonitorWriter w(mon_txt, sizeof(mon_txt));
-        if (!::duetos::diag::GdbMonitorDispatch(mon_cmd, dn, w))
+        const ::duetos::diag::GdbMonitorStopContext stop_context{
+            .generation = g_stop_rendezvous.generation,
+            .expected_mask = g_stop_rendezvous.expected_mask,
+            .acknowledged_mask = g_stop_rendezvous.acknowledged_mask,
+            .complete = g_stop_rendezvous.complete,
+        };
+        if (!::duetos::diag::GdbMonitorDispatch(mon_cmd, dn, w, &stop_context))
         {
             SendCStr(""); // not a "duet" line — unsupported
             return;
@@ -699,8 +730,14 @@ void HandlePacket()
     {
         // G<hex> — parse the same little-endian byte order the
         // 'g' handler emits and copy back into the writable
-        // snapshot. Silently OK when no writable snapshot is
-        // published.
+        // snapshot. A selected peer that did not acknowledge this exact stop
+        // generation is deliberately non-writable; report an error instead of
+        // accepting a register update that can never be committed safely.
+        if (g_regs_writable == nullptr)
+        {
+            SendCStr("E01");
+            return;
+        }
         if (g_regs_writable != nullptr)
         {
             const u32 body_off = 1;
@@ -1034,7 +1071,7 @@ void HandlePacket()
                     if ((peers_handled & peer_bit) == 0)
                     {
                         cpu::PerCpu* peer = arch::SmpGetPercpu(peer_cpu);
-                        if (peer != nullptr && peer->gdb_frozen_frame != nullptr)
+                        if (PeerAcknowledgedForCurrentStop(peer_cpu, peer))
                         {
                             // Refresh the snapshot only if no `G`
                             // write already mutated it during this
@@ -1497,13 +1534,41 @@ void GdbServerEnterAndWait(StopReason reason)
         return;
     }
 
-    // SMP rendezvous: NMI-broadcast a freeze to every other CPU so
-    // they can't keep mutating shared state while this CPU is paused
-    // in the GDB stop loop. Each peer's vector-2 NMI handler captures
-    // its rip/rsp into PerCpu::gdb_snapshot_* and spins on the
-    // global stop-active flag. No-op on single-CPU systems (the
-    // all-excluding-self ICR shorthand simply matches zero targets).
-    arch::SmpStopBroadcastNmi();
+    // SMP rendezvous: publish a fresh generation, NMI-broadcast a freeze to
+    // every other online CPU, and collectively wait for release-published
+    // acknowledgements before exposing any stop-loop packet surface. The wait
+    // is finite: an incomplete result keeps acknowledged peers frozen but lets
+    // the debugger detach/continue instead of wedging on a missing CPU.
+    const arch::GdbStopRendezvous rendezvous = arch::SmpStopBroadcastNmiAndWait(kGdbStopRendezvousSpinBudget);
+    if (arch::SmpGdbStopGeneration() != rendezvous.generation)
+    {
+        // Recursive entry did not acquire the active-generation slot. Do not
+        // overwrite the outer stop's packet/peer context or attempt to release
+        // peers that belong to it.
+        static constexpr char kNestedStopRejected[] =
+            "[gdb-server] nested stop rejected: another generation is active\n";
+        arch::SerialWriteNRecursiveFault(kNestedStopRejected, sizeof(kNestedStopRejected) - 1);
+        return;
+    }
+    g_stop_rendezvous = rendezvous;
+
+    // A frozen peer may own the normal COM1 spinlock. Build each line locally
+    // and use the recursive-fault writer, whose lock attempt and fallback
+    // serializer are both bounded.
+    char stop_line[256]{};
+    ::duetos::diag::MonitorWriter stop_log(stop_line, sizeof(stop_line));
+    stop_log.Str("[gdb-server] stop generation=0x");
+    stop_log.Hex(g_stop_rendezvous.generation);
+    stop_log.Str(" expected=0x");
+    stop_log.Hex(g_stop_rendezvous.expected_mask);
+    stop_log.Str(" acknowledged=0x");
+    stop_log.Hex(g_stop_rendezvous.acknowledged_mask);
+    stop_log.Str(" missing=0x");
+    stop_log.Hex(g_stop_rendezvous.missing_mask);
+    stop_log.Str(" complete=");
+    stop_log.Str(g_stop_rendezvous.complete ? "yes" : "no");
+    stop_log.Line();
+    arch::SerialWriteNRecursiveFault(stop_log.Data(), stop_log.Len());
 
     // Emit the peer captures to the kernel log so the operator sees
     // what every other CPU was doing when the stop landed. GDB's
@@ -1522,15 +1587,22 @@ void GdbServerEnterAndWait(StopReason reason)
             cpu::PerCpu* peer = arch::SmpGetPercpu(id);
             if (peer == nullptr)
                 continue;
-            arch::SerialWrite("[gdb-server] peer cpu_id=");
-            arch::SerialWriteHex(id);
-            arch::SerialWrite(" frozen=");
-            arch::SerialWriteHex(peer->gdb_frozen);
-            arch::SerialWrite(" rip=");
-            arch::SerialWriteHex(peer->gdb_snapshot_rip);
-            arch::SerialWrite(" rsp=");
-            arch::SerialWriteHex(peer->gdb_snapshot_rsp);
-            arch::SerialWrite("\n");
+            const u64 acknowledged_generation = __atomic_load_n(&peer->gdb_frozen_generation, __ATOMIC_ACQUIRE);
+            char peer_line[192]{};
+            ::duetos::diag::MonitorWriter peer_log(peer_line, sizeof(peer_line));
+            peer_log.Str("[gdb-server] peer cpu_id=0x");
+            peer_log.Hex(id);
+            peer_log.Str(" acknowledged-generation=0x");
+            peer_log.Hex(acknowledged_generation);
+            if (PeerAcknowledgedForCurrentStop(id, peer))
+            {
+                peer_log.Str(" rip=0x");
+                peer_log.Hex(peer->gdb_snapshot_rip);
+                peer_log.Str(" rsp=0x");
+                peer_log.Hex(peer->gdb_snapshot_rsp);
+            }
+            peer_log.Line();
+            arch::SerialWriteNRecursiveFault(peer_log.Data(), peer_log.Len());
         }
     }
 
@@ -1569,16 +1641,19 @@ void GdbServerEnterAndWait(StopReason reason)
         if (!g_peer_dirty[cpu])
             continue;
         cpu::PerCpu* peer = arch::SmpGetPercpu(cpu);
-        if (peer == nullptr || peer->gdb_frozen_frame == nullptr)
-            continue;
-        CommitPeerSnapshotToFrame(g_peer_snapshots[cpu], peer->gdb_frozen_frame);
+        if (PeerAcknowledgedForCurrentStop(cpu, peer))
+            CommitPeerSnapshotToFrame(g_peer_snapshots[cpu], peer->gdb_frozen_frame);
         g_peer_dirty[cpu] = false;
     }
 
-    // Release peers: they're spinning on arch::SmpGdbStopActive()
-    // — clearing it lets each one exit its NMI handler and resume
-    // whatever it was doing.
-    arch::SmpStopReleaseNmi();
+    // Release only the generation we established. A stale/nested stop owner
+    // cannot clear a newer generation and resume its peers accidentally.
+    if (!arch::SmpStopReleaseNmi(g_stop_rendezvous.generation))
+    {
+        static constexpr char kReleaseRejected[] = "[gdb-server] stop release rejected: generation no longer active\n";
+        arch::SerialWriteNRecursiveFault(kReleaseRejected, sizeof(kReleaseRejected) - 1);
+    }
+    g_stop_rendezvous = {};
 }
 
 ResumeAction GdbServerLastResume()
@@ -1786,6 +1861,17 @@ bool RouteToStopLoop(arch::TrapFrame* frame, StopReason reason, bool rollback_ri
     if (g_sink == nullptr)
     {
         return false; // GDB never wired up
+    }
+    if (arch::SmpGdbStopGeneration() != 0)
+    {
+        // A trap raised by the stop-loop CPU itself must not overwrite the
+        // outer session's shared register/parser state before EnterAndWait can
+        // reject the generation. Treat the nested trap as consumed and return
+        // to the outer loop with its complete context intact.
+        static constexpr char kNestedTrapConsumed[] =
+            "[gdb-server] nested trap consumed while stop generation active\n";
+        arch::SerialWriteNRecursiveFault(kNestedTrapConsumed, sizeof(kNestedTrapConsumed) - 1);
+        return true;
     }
     TrapFrameToSnapshot(frame, g_trap_snapshot);
     if (rollback_rip)

@@ -134,7 +134,7 @@ void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
     // ITIMER_REAL slot.
     if (p->linux_alarm_deadline_ns != 0 && now >= p->linux_alarm_deadline_ns)
     {
-        p->linux_pending_signals |= (1ULL << kSigAlrm);
+        (void)::duetos::core::ProcessLinuxSignalRaisePending(p, static_cast<u32>(kSigAlrm));
         if (p->linux_alarm_interval_ns > 0)
         {
             u64 missed = (now - p->linux_alarm_deadline_ns) / p->linux_alarm_interval_ns + 1;
@@ -157,8 +157,8 @@ void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
         // counter for every interval the process slept past
         // the deadline (Linux's "overrun" semantics).
         const u32 signo = (t.signo == 0) ? static_cast<u32>(kSigAlrm) : t.signo;
-        if (signo < 64)
-            p->linux_pending_signals |= (1ULL << signo);
+        if (signo >= 1 && signo < ::duetos::core::Process::kLinuxSignalCount)
+            (void)::duetos::core::ProcessLinuxSignalRaisePending(p, signo);
         if (t.interval_ns > 0)
         {
             const u64 missed = (now - t.deadline_ns) / t.interval_ns + 1;

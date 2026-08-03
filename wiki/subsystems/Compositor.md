@@ -1047,15 +1047,92 @@ not deadlock the readers (modal `MessageBox` / `InputBox`,
 `SYS_WIN_TRACK_POPUP`) are fire-and-forget with a callback or a
 Mutex+Condvar wait, never a synchronous spin on the reader thread.
 
+Ring-3 GUI delivery is task-owned. Each registered PE window stores its
+immutable creating `{pid, tid}`, while the queue registry stores only those
+numeric ids—never a borrowed scheduler `Task*`. A queue holds 64 messages and
+rejects a post when full rather than evicting an older message. `GetMessage`
+and `PeekMessage` use a three-phase receive transaction:
+
+1. snapshot the first matching entry plus its queue mutation epoch, exact head
+   ticket, and message ticket;
+2. release every queue/compositor lock and copy the wire `MSG` to user memory;
+3. commit only if that exact claim is still current.
+
+A failed user copy therefore leaves the queue untouched. If a sibling consumer
+wins first, the stale commit fails and the syscall snapshots again, so it cannot
+drop the new head or reorder filtered messages. Task teardown drains the exact
+`{pid,tid}` queue and closes that task's windows; process teardown retains a
+pid-wide fallback.
+
+Each registry slot has a 64-bit mutation epoch that never resets across reuse.
+It advances on allocation, every successful post or remove, every HWND purge
+(including a zero-match purge), and task/process reap even when the active
+queue is empty. Epoch saturation retires the slot rather than wrapping. An
+empty probe receives an opaque epoch token and distinguishes `Empty` from
+terminal `Gone`; non-blocking clients can revalidate that token before acting.
+
+Successful posts request their own waiter notification. When a post or reap
+occurs while the compositor mutex is held, the request is deferred and
+coalesced; `CompositorUnlock` drops the mutex before broadcasting on the
+scheduler wait queue. The wake helper also restores the caller's prior IF state
+instead of unconditionally enabling interrupts.
+
+`GetMessage` additionally snapshots a global monotonic message-event sequence
+before probing its task queue. After an empty probe, the scheduler checks that
+same sequence and enqueues the task under one `g_sched_lock` hold. A producer
+therefore either changes the sequence before enqueue (the caller immediately
+re-probes) or finds the task fully blocked when it broadcasts. The sequence
+saturates rather than wrapping, and the saturated state refuses to block. This
+removes the former 1-tick polling fallback without reopening the SMP lost-wake
+window. The wait is cancellation-aware: a kill-side dequeue returns
+`Cancelled`, letting the syscall unwind before the outer task boundary
+finalizes it.
+
+Posting never allocates a queue. The creating task establishes it through its
+first GUI operation; `PostThreadMessage` therefore fails if the target has not
+created a USER queue, and a late sender cannot resurrect a queue after task
+reap has made that `{pid,tid}` terminal.
+
+`SYS_WIN_POST_MSG` is deliberately narrower than desktop Win32 today. HWND
+posts are accepted only when the target belongs to the caller's process;
+thread-targeted posts likewise require the target TID to belong to that same
+process. Stale, kernel-owned, and cross-process targets fail closed. Opening
+cross-process delivery requires a credential-aware GUI broker with an explicit
+message allowlist and pointer-marshalling rules; queue ownership alone is not
+an authorization boundary.
+
+Public HWNDs are positive 24-bit opaque identities: bits 0..5 contain
+`slot+1`, bits 6..23 contain a non-zero 18-bit generation, and bits 24..31 are
+zero for PE32 and GDI-tag compatibility. Lookup, destroy, message dispatch, and
+popup completion all generation-check. A slot whose generation saturates is
+retired instead of wrapping. The per-window GDI DC side table rejects stale or
+foreign HWNDs, keys on the full public identity, and resets when a slot is
+reused.
+Kernel-native apps still retain raw `WindowHandle` slots, so their closed slots
+keep the prior no-reuse lifetime until those callers migrate to opaque handles;
+only ring-3 generations are currently recycled.
+Window close also removes every raw slot reference held by the compositor's
+capture, focus, caret, parent, timer, z-order, active-window, and button-widget
+tables before a ring-3 slot becomes reusable. Button bindings are compacted out
+instead of being allowed to attach to a later generation in the same slot.
+Mouse move, edge-resize, and scrollbar gestures retain the press-time public
+HWND and re-resolve it under the compositor lock on every packet; close/reuse
+cancels the gesture instead of redirecting it to the next slot generation.
+Window-targeted popup menus likewise keep a separate public HWND and resolve it
+at action time (and during each modal MOVE/SIZE callback). `MenuContext()` stays
+an opaque payload, so Files row contexts 30..39/44..47 and the TrackPopup
+sentinel retain their existing encodings.
+
 ## Capability / Privilege Surface
 
 The `SYS_WIN_*` and `SYS_GDI_*` families are the only way a guest
 PE / ELF reaches the compositor, and they are gated at the syscall
-boundary like every other guest effect — a PE cannot paint outside
-its own window or enumerate another process's windows. Per-window
-ownership is tracked by pid (`RegisteredWindow`), so cursor / popup
-/ paint requests only affect windows the caller owns. In-kernel
-native apps are trusted code and call the compositor directly. See
+boundary like every other guest effect — a PE cannot mutate, paint, or post
+messages outside its own process's windows. System enumeration may return
+another process's opaque public HWND, but it conveys no authority: asynchronous
+`PostMessage` rejects it. Per-window ownership is tracked by creating pid+tid
+(`RegisteredWindow`), so cursor / popup / paint requests only affect windows
+the caller owns. In-kernel native apps are trusted code and call the compositor directly. See
 [Capabilities](../security/Capabilities.md) and
 [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 
@@ -1064,9 +1141,17 @@ native apps are trusted code and call the compositor directly. See
 - **No GDI paint inside the client area for unfiled Win32 PEs** —
   `BitBlt` / `TextOut` / `Rectangle` work in the right context but
   the client area defaults to a no-op fill.
-- **Per-window message queues**: `GetMessage` / `PeekMessage` return
-  `WM_QUIT` for unhandled paths so event-driven programs exit their
-  pump immediately.
+- **Cross-thread synchronous `SendMessage`**: rejected until a kernel GUI
+  broker can marshal execution onto the owning task. Same-task sends call the
+  stored WNDPROC directly; `PostThreadMessage` and `PostQuitMessage` are routed
+  asynchronously to the exact target task queue.
+- **Cross-process asynchronous GUI messages**: rejected until the same broker
+  has credentials, a message allowlist, and safe marshalling for pointer-bearing
+  message families. Same-process `PostMessage` remains supported.
+- **Message wait fanout**: all GUI queues currently share one broadcast wait
+  queue. The sequence-checked scheduler handoff is race-free, but a post wakes
+  every message pump and each task re-probes its own queue. Move to sharded or
+  per-task wait queues if GUI thread counts make that fanout measurable.
 - **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: live. The
   userland `TrackPopupMenu` thunk walks the HMENU tree depth-first
   and packs it into a single flat array (`TpItemWire[32]`); each
@@ -1148,8 +1233,7 @@ native apps are trusted code and call the compositor directly. See
   Refresh, with Delete flagged disabled because the trusted
   ramfs is constinit `.rodata` and there is no unlink primitive
   to route through.
-- **Win32 common controls, outline fonts, multi-threaded
-  message queues**: still on the windowing track's deferred
+- **Win32 common controls and outline fonts**: still on the windowing track's deferred
   list. (Native modal dialogs ship via `dialog.{h,cpp}` —
   `MessageBox` / `InputBox`; native scrollbars ship via
   `scrollbar.{h,cpp}` with full hit-test + drag-the-thumb

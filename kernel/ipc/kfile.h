@@ -31,14 +31,15 @@ struct Process;
  *     round-trips through HandleTable.
  *   - Carries a `KFileKind` tag so the destroy callback can
  *     route to the right per-state pool release (pipe / eventfd
- *     / socket / timerfd / signalfd / epoll / inotify / pidfd /
- *     posix_mq / memfd / fanotify / dirfd) without KFile having
+ *     / socket / timerfd / signalfd / epoll / inotify / posix_mq /
+ *     memfd / fanotify / dirfd) without KFile having
  *     to know each pool's API. The Linux fd-table migration
  *     wires a `KFile*` sidecar onto every LinuxFd slot so
  *     every per-fd lifecycle event (close, dup, fork, exec
  *     teardown) goes through the unified handle table instead
  *     of open-coded `*Retain` / `*Release` calls in the syscall
- *     layer.
+ *     layer. Pidfd is the deliberate exception: its KFile owns one
+ *     strong Process identity reference instead of a pool callback.
  *
  * THREADING
  *   Per-instance `pos` field is racy under SMP unless the
@@ -82,7 +83,7 @@ enum class KFileKind : u8
     Epoll = 9,        ///< epoll → pool index
     Inotify = 10,     ///< inotify → pool index
     DirSnapshot = 11, ///< directory snapshot (Win32 win32_dirs[] slot)
-    Pidfd = 12,       ///< pidfd → pool index = target pid (for now)
+    Pidfd = 12,       ///< pidfd → immutable retained Process target
     PosixMq = 13,     ///< POSIX MQ → pool index
     Memfd = 14,       ///< memfd → pool index
     Fanotify = 15,    ///< fanotify → pool index
@@ -127,8 +128,8 @@ struct KFile
     /// Reserved padding so the struct stays 8-byte aligned.
     u8 _pad[2];
 
-    /// Per-state pool index. Meaningful for kinds 3..15;
-    /// ignored for None / Tty / Fat32File. The destroy
+    /// Per-state pool index. Meaningful for pool-backed kinds;
+    /// ignored for None / Tty / Fat32File / Pidfd. The destroy
     /// callback receives this verbatim.
     u32 pool_index;
 
@@ -148,6 +149,13 @@ struct KFile
     /// child's dirfd slots), so the owner outlives every KFile
     /// reference.
     ::duetos::core::Process* owner;
+
+    /// Strong immutable identity target for `KFileKind::Pidfd`.
+    /// Exactly one reference is owned by the shared KFile object,
+    /// regardless of how many fd-table handles duplicate that KFile.
+    /// nullptr for every other kind. This is deliberately separate
+    /// from `owner`, which is a borrowed dirfd callback context.
+    ::duetos::core::Process* retained_process_target;
 
     /// Opaque vnode handle — backend-specific (ramfs / fat32 /
     /// future-vfs). Used by `kFileKindFat32File` to point at the
@@ -192,6 +200,20 @@ struct KFile
 /// to the returned KFile (see `KFile::owner` notes).
 ::duetos::core::Result<KFile*> KFileCreateWithOwner(KFileKind kind, u32 pool_index, KFileProcessRelease release,
                                                     ::duetos::core::Process* owner, void* vnode, u32 flags);
+
+/// Create a pidfd open-file description with a strong, immutable Process
+/// identity. `target` is borrowed by the call and retained exactly once on
+/// success; failure takes no reference. Handle duplication shares this KFile,
+/// so dup/fork/pidfd_getfd do not multiply target ownership. The last KFile
+/// release drops the Process reference outside KObject/HandleTable locks.
+::duetos::core::Result<KFile*> KFileCreatePidfd(::duetos::core::Process* target);
+
+/// Acquire a fresh retained reference to a pidfd's immutable Process target.
+/// The caller must already hold a KFile/KObject reference so destruction
+/// cannot race this read, and must balance a non-null result with
+/// `ProcessRelease` (prefer `ScopedProcessRef`). Returns nullptr for a null,
+/// non-pidfd, or structurally invalid KFile.
+::duetos::core::Process* KFileAcquirePidfdTarget(const KFile* f);
 
 /// Read accessors — diagnostic only.
 u64 KFilePosition(const KFile* f);

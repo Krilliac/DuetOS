@@ -65,7 +65,11 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
 - `/Cargo.toml` is the workspace root and owns the profiles for every Rust
   crate linked into the kernel.
 - `/Cargo.lock` is tracked so dependency resolution is reproducible; CMake
-  invokes cargo with `--locked`.
+  invokes cargo with `--locked`. This freezes package selection but is **not**
+  an offline or hermetic dependency source: a clean Cargo home may still fetch
+  the registry index and crates. Use a previously populated cache for offline
+  builds; a separately reviewed vendored-source policy is still required before
+  the Rust build can be called network-independent.
 - `/.cargo/config.toml` selects `x86_64-unknown-none` and the `build-std`
   knobs needed by freestanding crates.
 - `/kernel/rust/` is the single Rust staticlib link unit. Subsystem crates are
@@ -286,28 +290,58 @@ contracts:
 
 1. The aggregate crate has one local dependency and one `pub use` for every
    other workspace member, with no extras.
-2. Rust sources, hand-written headers, manifests, build scripts, Cargo config,
-   the lockfile, and the pinned toolchain are all visible to the CMake archive
-   dependency graph.
-3. Every raw-pointer export is an `unsafe extern fn` with an inventoried ABI; a
+2. Rust sources, hand-written headers, manifests, literal data includes,
+   the canonical repository-root Cargo config, the lockfile, and the pinned toolchain are all
+   visible to the CMake archive dependency graph. Kernel crates use the
+   conventional in-member source layout: custom target paths, `build.rs`,
+   source `include!`, manifest patch/replace tables, and unlisted local path
+   dependencies fail closed. Cargo config is exact-schema validated so `paths`,
+   source replacement, compiler/wrapper overrides, and nested configs cannot
+   redirect the audited graph. The root toolchain file is likewise validated
+   against the exact dated channel, component, target, and profile; no other
+   rustup override is permitted in the tree.
+3. Every raw-pointer export is an `unsafe extern fn` using the single supported
+   `C` ABI; a
    safe export is accepted only by exact name in the checker's scalar-only
    allowlist, and a signature change away from C scalars invalidates that entry. Exported
-   functions using `C`, `C-unwind`, or `system` ABI spellings are inventoried;
-   any other explicit extern ABI is a hard finding (`FFI014`).
-4. Rust export symbol names and each crate's hand-written C declaration names
-   agree. `FFI003` also applies a conservative lexical check for direct helper
-   signatures that return an unconstrained generic or `'static` borrow from a
-   raw pointer.
+   function using `C-unwind`, `system`, or any other extern ABI is a hard
+   finding (`FFI014`). The canonical parity gate enforces the same C-only rule.
+4. Rust exports and each crate's hand-written C declarations agree by symbol,
+   calling convention, return type, arity, scalar width, pointer depth, and
+   pointee constness. The canonical parity gate is
+   `tools/test/check-rust-ffi-signatures.py`; any parser error or mismatch is a
+   fail-closed `FFI013` build-truth error. `FFI003` also applies a conservative
+   lexical check for direct helper signatures that return an unconstrained
+   generic or `'static` borrow from a raw pointer.
 
 The normal audit exits nonzero for either build errors or FFI findings. CMake
-uses the path-only emit mode: it still fails closed on workspace/build-graph
-errors, while existing FFI findings remain an explicit hardening backlog rather
-than being silently grandfathered into the safe-export allowlist.
+uses the path-only emit mode: it fails closed on workspace/build-graph errors
+and on canonical signature-parity failures, while other FFI findings remain an
+   explicit hardening backlog rather than being silently grandfathered into the
+   safe-export allowlist. Inventory is a single streaming traversal per member,
+   prunes member-root `.git`, `target`, and `__pycache__` output only (nested
+   Rust modules with those identifiers remain audited), rejects symlinks and
+name-surrogate reparse boundaries, permits contained nonredirecting OneDrive
+cloud-filter tags, and enforces global entry, byte, record, diagnostic, and
+emitted-output caps before retaining more data. Emitted paths reject CMake-list
+and line-protocol delimiters. Existing inputs and every in-repository Cargo
+config/toolchain candidate from `kernel/rust` through the repository root are
+   configure dependencies, so content edits and newly introduced overrides rerun
+   the audit before Cargo. An always-run build target rechecks the graph before
+   every requested Rust/kernel build. CMake consumes the bounded exact input list
+   rather than recursively globbing member trees, and Cargo is restricted to
+   `--lib`, so a newly compiled module requires a tracked source or manifest
+   change. The parity checker itself is returned as a CMake build input.
 
-Canonical cross-language signature parity (arity, C/Rust type mapping, and
-pointer constness) is not implemented yet. The audit reports that omission as a
-hard blocker (`FFI013`); symbol-name parity must not be interpreted as proof that
-the declarations are ABI-identical.
+Cargo/rustup configuration above the repository root is not a trusted project
+input. CMake runs Cargo from a controlled OS-temporary working directory outside
+the repository, recreates its empty Cargo home, and makes the always-run audit
+reject any Cargo config on either effective ancestor search path. It also pins
+`RUSTUP_TOOLCHAIN` and clears compiler/wrapper/flag override variables. Release
+jobs explicitly provision that exact dated toolchain with `rust-src` and the
+bare-metal target before building. The source audit guarantees the complete
+in-repository portion of the configuration search path even though Cargo
+receives the validated target/build-std policy through explicit command flags.
 
 `FFI003` is a bounded source-signature heuristic, not a Rust borrow/lifetime
 proof. It deliberately catches the current unconstrained helper pattern and may
@@ -351,15 +385,18 @@ command, `duetos_collect_rust_workspace_depends(...)` validates the explicit
 workspace/aggregate relationship and derives all current member source, header,
 manifest, and build inputs. `CONFIGURE_DEPENDS` globs are rooted only at those
 derived member directories so adding or removing a matching input regenerates
-the dependency list without a hand-maintained crate table. `kernel/CMakeLists.txt`
-links that one `.a` into both kernel ELF stages and includes each subsystem's
-hand-written C header directory for C++ wrappers.
+the dependency list without a hand-maintained crate table. A separate FFI
+validation stamp depends on every derived input and runs the normal audit before
+Cargo, so editing an existing Rust export, header declaration, or checker cannot
+reuse an earlier parity result. `kernel/CMakeLists.txt` links the resulting one
+`.a` into both kernel ELF stages and includes each subsystem's hand-written C
+header directory for C++ wrappers.
 
-The custom command owns a completion stamp and declares the Cargo archive as a
-byproduct. Cargo may legitimately reuse an unchanged archive after a header- or
-checker-only dependency change; touching the stamp after the successful Cargo
-command records that completed validation without rewriting the archive or
-leaving Ninja permanently dirty.
+The Cargo custom command owns a completion stamp and declares the archive as a
+byproduct. Header- or checker-only edits first refresh the validation stamp;
+Cargo may then legitimately reuse an unchanged archive, while touching its own
+completion stamp records the successful dependency edge without rewriting the
+archive or leaving Ninja permanently dirty.
 
 ## Profiles
 

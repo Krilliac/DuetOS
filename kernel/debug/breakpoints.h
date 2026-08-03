@@ -245,10 +245,12 @@ bool BpReadRegs(BreakpointId id, arch::TrapFrame* out);
 BpError BpWriteRegs(BreakpointId id, const arch::TrapFrame* in);
 
 /// Read `len` bytes of the stopped task's user memory starting at
-/// `user_va` into `out`. Walks the target task's AddressSpace to
-/// find the backing frame(s); returns the number of bytes
-/// successfully copied (may be less than `len` if the page is
-/// unmapped). Safe to call from any non-trap context.
+/// `user_va` into `out`. Retains the captured AddressSpace, then copies
+/// each page under its VM mutation transaction; no physical-frame or
+/// direct-map pointer escapes that transaction. Returns the number of
+/// bytes successfully copied (may be less than `len` if a page is
+/// unmapped or changes between page transactions). Safe to call from
+/// task context outside traps/IRQs; the function may block on VM mutation.
 u64 BpReadMem(BreakpointId id, u64 user_va, u8* out, u64 len);
 
 /// Resume the task stopped on `id`. The task's saved rflags keep

@@ -27,11 +27,11 @@
  *   home — every ABI front-end converges on the same refcounted,
  *   handle-tabled, type-tagged primitive.
  *
- * WHAT THIS COMMIT IS NOT
- *   v0 lands the type + Set/Reset/Wait + a self-test that round-
- *   trips through HandleTable. The `SYS_EVENT_*` syscalls keep
- *   using the legacy Win32 array — migrating them is a separate
- *   slice (Win32 ABI semantics need careful preservation).
+ * ABI ROUTING
+ *   `SYS_EVENT_*` resolves a generation-tagged handle through the
+ *   process HandleTable and calls this object directly. The ABI
+ *   adapter translates the explicit wait result without owning a
+ *   second event state machine.
  *
  * RESET SEMANTICS
  *   - `manual_reset == true`: `Set` wakes EVERY waiter and the
@@ -52,6 +52,14 @@
 
 namespace duetos::ipc
 {
+
+enum class KEventWaitResult : u8
+{
+    Signaled,
+    TimedOut,
+    Cancelled,
+    Failed,
+};
 
 struct KEvent
 {
@@ -82,21 +90,23 @@ void KEventReset(KEvent* e);
 /// Block until the event is signaled. On auto-reset, atomically
 /// clears the signal before returning so only one waiter
 /// consumes a single `Set`. Wakes immediately if the event is
-/// already signaled at the time of the call.
-void KEventWait(KEvent* e);
+/// already signaled at the time of the call. Cooperative task
+/// cancellation returns `Cancelled` only after the companion
+/// mutex is reacquired and the operation's object pin is dropped.
+KEventWaitResult KEventWait(KEvent* e);
 
 /// Timed variant. Blocks at most `ticks` timer ticks for the
-/// event to signal. Returns true if the wait consumed a signal
-/// (auto-reset cleared, manual-reset stayed signaled), false on
-/// timeout. The deadline is computed once at entry and respected
-/// across spurious wakeups + race-losses against other waiters.
-/// `ticks == 0` is "test only" — returns true iff the event is
-/// already signaled at call time (and consumes it on auto-reset).
+/// event to signal. The result distinguishes signal consumption,
+/// timeout, cooperative cancellation, and invalid/lifetime failure.
+/// The deadline is computed once at entry and respected across
+/// spurious wakeups + race-losses against other waiters. `ticks ==
+/// 0` is "test only" — returns `Signaled` iff the event is already
+/// signaled at call time (and consumes it on auto-reset), otherwise
+/// `TimedOut` without blocking.
 ///
 /// Backs the timed-wait variant of WaitForSingleObject on an
-/// event handle; the SYS_EVENT_WAIT migration in the roadmap
-/// routes through here.
-bool KEventWaitTimed(KEvent* e, u64 ticks);
+/// event handle through `SYS_EVENT_WAIT`.
+KEventWaitResult KEventWaitTimed(KEvent* e, u64 ticks);
 
 /// Non-blocking peek at the signaled state. Locks the inner
 /// mutex briefly. Returns the current value of `signaled` —

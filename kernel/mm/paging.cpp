@@ -11,15 +11,17 @@
  *   translations at 4 KiB granularity. Operates over the
  *   in-kernel direct map of physical memory installed by
  *   boot.S, so a PT entry's frame address is also dereferenced
- *   directly (no recursive-mapping trickery).
+ *   directly (no recursive-mapping trickery). Kernel-range reclamation uses
+ *   the per-CPU IPI-call mailboxes as a confirmed remote invalidation barrier.
  *
  * HOW
  *   `WalkOrCreate` is the central helper: given a (PML4, va,
  *   create_missing), it descends 4 levels, allocating a fresh
  *   frame for each missing intermediate table when
  *   `create_missing=true`. Map/unmap call it then write the
- *   leaf PTE. TLB shootdown is local-only at v0; SMP shootdown
- *   is a planned slice.
+ *   leaf PTE. UnmapPage invalidates the caller's TLB; owners that reclaim
+ *   kernel backing frames additionally call KernelTlbReclaimBarrier before
+ *   releasing those frames.
  *
  *   Bit semantics centralised in `EncodePte` so kPage* flags
  *   compose into the right PTE layout (NX bit moves between
@@ -37,9 +39,14 @@
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
+#include "cpu/critical.h"
+#include "cpu/ipi_call.h"
+#include "cpu/percpu.h"
 #include "diag/diag_decode.h"
 #include "log/klog.h"
 #include "core/panic.h"
@@ -94,6 +101,24 @@ inline u64 IndexPt(uptr v)
 inline void Invlpg(uptr v)
 {
     asm volatile("invlpg (%0)" : : "r"(v) : "memory");
+}
+
+struct KernelTlbRange
+{
+    uptr start;
+    uptr end;
+};
+
+// IPI-call callback. Runs on the target CPU with IF=0 and performs no
+// allocation, logging, or locking. The request lives on the caller's stack;
+// IpiCallOne(wait=true) keeps it alive until this callback has returned.
+void InvalidateKernelTlbRange(void* opaque)
+{
+    const auto* range = static_cast<const KernelTlbRange*>(opaque);
+    for (uptr virt = range->start; virt < range->end; virt += kPageSize)
+    {
+        Invlpg(virt);
+    }
 }
 
 inline u64 ReadMsr(u32 msr)
@@ -606,6 +631,12 @@ bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
     return _copy_user_from(kernel_dst, user_src, len) != 0;
 }
 
+bool ProbeUserWriteRange(const void* user_dst, u64 len)
+{
+    const u64 dst_addr = reinterpret_cast<u64>(user_dst);
+    return IsUserAddressRange(dst_addr, len) && IsUserRangeAccessible(dst_addr, len, /*need_writable=*/true);
+}
+
 namespace
 {
 
@@ -902,6 +933,80 @@ void UnmapPage(uptr virt)
     *pte = 0;
     Invlpg(virt);
     ++g_mappings_removed;
+}
+
+void KernelTlbReclaimBarrier(uptr virt, u64 len)
+{
+    if (len == 0)
+    {
+        return;
+    }
+    if ((virt & kPageMask) != 0)
+    {
+        PanicPaging("KernelTlbReclaimBarrier: unaligned virtual address", virt);
+    }
+    if ((len & kPageMask) != 0)
+    {
+        PanicPaging("KernelTlbReclaimBarrier: unaligned length", len);
+    }
+    if (virt > static_cast<uptr>(~0ULL) - len)
+    {
+        PanicPaging("KernelTlbReclaimBarrier: range overflow", virt);
+    }
+
+    // Keep the requestor on one CPU while its peer snapshot is dispatched.
+    // CriticalGuard leaves IRQs enabled, so simultaneous requestors can still
+    // run one another's IPI callbacks instead of forming a wait cycle.
+    cpu::CriticalGuard critical_guard;
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    const u32 self_id = (self != nullptr) ? self->cpu_id : 0u;
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit > acpi::kMaxCpus)
+    {
+        PanicPaging("KernelTlbReclaimBarrier: CPU limit exceeds target array", limit);
+    }
+
+    u32 target_ids[acpi::kMaxCpus] = {};
+    u32 target_count = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        if (id == self_id)
+        {
+            continue;
+        }
+        cpu::PerCpu* peer = arch::SmpGetPercpu(id);
+        if (peer != nullptr && __atomic_load_n(&peer->tlb_ipi_ready, __ATOMIC_ACQUIRE))
+        {
+            target_ids[target_count++] = id;
+        }
+    }
+    if (target_count == 0)
+    {
+        return;
+    }
+
+    // With IF=0, two CPUs entering this synchronous barrier together could
+    // each wait for a mailbox callback the other cannot service. Reclamation
+    // cannot safely fall back to freeing frames, so fail-stop at the caller.
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    if ((arch::ReadRflags() & kRflagsIf) == 0)
+    {
+        PanicPaging("KernelTlbReclaimBarrier: ready peer with interrupts disabled", self_id);
+    }
+
+    KernelTlbRange range{.start = virt, .end = virt + len};
+    for (u32 target_index = 0; target_index < target_count; ++target_index)
+    {
+        const u32 id = target_ids[target_index];
+
+        // Mailbox saturation is transient and is not permission to reclaim
+        // behind a peer's stale TLB entry. Retry until the call is queued;
+        // once queued, wait=true itself does not return before completion.
+        while (!cpu::IpiCallOne(id, &InvalidateKernelTlbRange, &range, /*wait=*/true))
+        {
+            asm volatile("pause" ::: "memory");
+        }
+    }
 }
 
 void* MapMmio(PhysAddr phys, u64 bytes)

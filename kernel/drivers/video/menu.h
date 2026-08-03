@@ -69,6 +69,12 @@ void MenuSetColours(u32 body_rgb, u32 border_rgb, u32 ink_rgb, u32 accent_rgb);
 /// already open (replaces the stack with a fresh root).
 void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context = 0);
 
+/// Open a window-targeted menu while keeping its generation-tagged public
+/// HWND separate from the generic `context`. Window actions resolve this
+/// identity at dispatch time; Files row contexts and TrackPopup sentinels keep
+/// their existing context encoding and use MenuOpen instead.
+void MenuOpenWindow(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context, u32 public_hwnd);
+
 /// Push a new panel as a child of the topmost panel's row `row`.
 /// No-op if `row` lacks the Submenu flag, has no submenu pointer,
 /// or the stack is already at kMenuMaxStack. Anchors the child
@@ -89,6 +95,9 @@ u32 MenuStackDepth();
 /// resolve action_ids that depend on a target. Defaults to 0 when
 /// closed.
 u32 MenuContext();
+
+/// Optional public HWND attached by MenuOpenWindow, or 0 for a generic menu.
+u32 MenuWindowIdentity();
 
 /// Mark every panel closed. Safe any time.
 void MenuClose();

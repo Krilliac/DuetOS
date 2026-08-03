@@ -15,7 +15,7 @@ toolchain. The build produces:
 - `kernel/duetos-kernel.elf` — the kernel ELF
 - `userland/libs/<dll>/<dll>.dll` — userland Win32 DLLs (PE32+)
 - `kernel/smoke-pes/<app>/<app>.exe` — generated Win32 smoke fixtures (PE32+)
-- `duetos.iso` — hybrid ISO bootable on SeaBIOS + UEFI
+- `duetos.iso` — supported hybrid ISO: GRUB + Multiboot2 on SeaBIOS or UEFI firmware
 
 ## Presets
 
@@ -287,13 +287,37 @@ produces when it forgets a brand-new header. It compiles fine locally
 and breaks every clean checkout, so it is worth catching before the
 push, not in CI.
 
+When a build tree is not available — low-memory host, missing WSL
+toolchain, or a `fleet-preflight` STOP — the `tools/test/test-*.py`
+contract gates still run standalone, because they are static source
+checks rather than compiled tests:
+
+```bash
+python tools/test/run-contract-tests.py                # all gates
+python tools/test/run-contract-tests.py --pattern arp  # one subsystem
+```
+
+The runner defaults to a 420s per-test timeout on purpose:
+`test-parallel-claim-safety.py` drives real git repositories through
+subprocess and legitimately takes ~240s on a loaded host, so a short
+timeout misreports a passing suite as a hang. Pass `--jsonl <path>` to
+capture per-test timings.
+
 ## CI
 
 CI is wired in `.github/workflows/`:
 
-- `build.yml` runs format + debug/release builds and CI smoke checks.
-- `release.yml` publishes rolling channels (`latest-debug`,
-  `latest-release`) from `main` and `v*` tags.
+- `build.yml` runs format + debug/release builds and CI smoke checks. Its
+  `publish-rolling` job is the **sole automatic publisher entered by a
+  qualifying push to `main`** (documentation-only pushes are path-ignored).
+  Publication waits for format, Rust, debug, release, QEMU smoke, hosted tests,
+  and the pre-publish lifetime-download snapshot before replacing
+  `latest-debug` and `latest-release`.
+- `release.yml` is the intentional promotion path. It runs only for `v*` tag
+  pushes or manual dispatch, builds and smoke-gates the release assets, and can
+  refresh `latest-debug`, `latest-release`, and `latest-flavors`. A push to
+  `main` cannot enter this workflow, so it cannot race `build.yml`'s rolling
+  publisher.
 - `lifetime-downloads.yml` maintains a cumulative download tally on
   a `stats` branch that the README's "lifetime downloads" badge
   reads via shields.io's `endpoint` type. Without it, the badge
@@ -303,6 +327,13 @@ CI is wired in `.github/workflows/`:
   `download_count = 0`. The workflow runs before each publish to
   fold accumulated downloads into the tally, plus on a 30-minute
   schedule for organic downloads.
+
+Tag and manual promotions must identify an immutable source. A `v*` tag must
+already be protected and treated as immutable; a manual `source_ref` must be a
+full commit SHA or an equivalently protected immutable version tag, never a
+moving branch such as `main`. `release.yml` currently accepts an arbitrary ref
+string (and retains its legacy `main` UI default), so this is an operator rule,
+not yet an enforced provenance gate.
 
 See [Architecture Overview > CI topology](../getting-started/Architecture-Overview.md#14-ci-topology-and-artifact-channels).
 

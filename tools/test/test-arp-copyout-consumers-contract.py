@@ -102,7 +102,10 @@ class ArpCopyoutConsumerContractTests(unittest.TestCase):
     def test_socket_datagram_send_uses_stack_copyout(self) -> None:
         send = function_body(SOCKET_CPP, "SocketSendDgram")
         self.assertRegex(send, r"\bArpEntry\s+arp\s*\{\s*\}\s*;")
-        self.assertIn("ArpLookup(0, dst, &arp)", send)
+        # The contract is the copy-out shape (stack ArpEntry + &arp), not which
+        # interface index the send path resolves on — SocketSendDgram now looks
+        # up ARP on the socket's bound interface rather than a hardcoded 0.
+        self.assertRegex(send, r"\bArpLookup\([^()]*,\s*dst,\s*&arp\)")
         self.assertIn("dst_mac = arp.mac", send)
         self.assertNotRegex(send, r"\b(?:const\s+)?ArpEntry\s*\*")
         self.assertNotIn("arp->", send)

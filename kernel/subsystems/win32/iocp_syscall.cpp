@@ -12,8 +12,9 @@
  *   - capacity 8 ports / 16 packets → 64 handles / 32 packets,
  *   - finite NtRemoveIoCompletion timeouts are now honoured
  *     (best-effort tick granularity) instead of "block forever".
- * Wire ABI unchanged: handles are `kWin32IocpBase (0xB00) +
- * ipc_handle`, return values keep the legacy 1 / 0 / -1 shape.
+ * Handles are positive PE32-safe opaque values whose low 12-bit
+ * band identifies IOCP and whose high bits preserve generation;
+ * return values keep the legacy 1 / 0 / -1 shape.
  *
  * Field mapping between the syscall ABI and `ipc::IocpCompletion`:
  *   completion_key  ↔ completion_key
@@ -44,18 +45,13 @@ namespace
 constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
 constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
 
-// Map a Win32 IOCP handle to a kobj_handles slot id, or
-// `ipc::kHandleInvalid` if the value is out of range. Flat
-// subtraction of the per-type base — same shape as the mutex /
-// event / semaphore translations.
+// Validate and decode the generation-preserving Win32 type tag.
 ipc::Handle Win32HandleToIpc(u64 handle)
 {
-    if (handle < core::Process::kWin32IocpBase ||
-        handle >= core::Process::kWin32IocpBase + core::Process::kWin32IocpCap)
-    {
-        return ipc::kHandleInvalid;
-    }
-    return static_cast<ipc::Handle>(handle - core::Process::kWin32IocpBase);
+    ipc::Handle decoded = ipc::kHandleInvalid;
+    return ipc::HandleDecodeTagged(handle, static_cast<u32>(core::Process::kWin32IocpBase), &decoded)
+               ? decoded
+               : ipc::kHandleInvalid;
 }
 
 // Resolve + type-check + take a lookup reference, after verifying
@@ -74,12 +70,7 @@ ipc::IocpPort* LookupPortRef(core::Process* proc, u64 handle, u64 required_right
         KLOG_ONCE_WARN_V("subsystems/win32/iocp", who, handle);
         return nullptr;
     }
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, required_rights))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/iocp", "handle lacks required right; handle", handle);
-        return nullptr;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp);
+    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp, required_rights);
     if (obj == nullptr)
     {
         return nullptr;
@@ -114,7 +105,8 @@ i64 SysIocpCreate()
         return -1;
     }
     ipc::IocpPort* port = create_r.value();
-    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &port->base);
+    const u64 rights = ipc::HandleRightsForProcess(ipc::KObjectType::Iocp, core::ProcessCapsSnapshot(proc));
+    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &port->base, rights);
     if (!insert_r.has_value())
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/iocp", "create: kobj_handles full in pid", proc->pid);
@@ -122,7 +114,12 @@ i64 SysIocpCreate()
         ipc::KObjectRelease(&port->base);
         return -1;
     }
-    const u64 handle = core::Process::kWin32IocpBase + insert_r.value();
+    u64 handle = 0;
+    if (!ipc::HandleEncodeTagged(insert_r.value(), static_cast<u32>(core::Process::kWin32IocpBase), &handle))
+    {
+        (void)ipc::HandleTableRemove(proc->kobj_handles, insert_r.value());
+        return -1;
+    }
     KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/iocp", "NtCreateIoCompletion OK; handle", handle);
     return static_cast<i64>(handle);
 }
@@ -164,6 +161,17 @@ i64 SysIocpRemove(u64 handle, u64 user_key, u64 user_apc, u64 user_iosb, u64 tim
     {
         return -1;
     }
+    // Reject stable-invalid destinations before a destructive dequeue. These
+    // probes are deliberately not held across the possibly-INFINITE wait: they
+    // are fail-fast snapshots, not page pins, so every later CopyToUser still
+    // handles a concurrent unmap through its recoverable fault path.
+    if ((user_key != 0 && !mm::ProbeUserWriteRange(reinterpret_cast<const void*>(user_key), sizeof(u64))) ||
+        (user_apc != 0 && !mm::ProbeUserWriteRange(reinterpret_cast<const void*>(user_apc), sizeof(u64))) ||
+        (user_iosb != 0 && !mm::ProbeUserWriteRange(reinterpret_cast<const void*>(user_iosb), 2 * sizeof(u64))))
+    {
+        ipc::KObjectRelease(&port->base);
+        return -1;
+    }
     // Timeout mapping: 0 = non-blocking probe, INFINITE (0xFFFFFFFF,
     // or the full-width -1 ntdll passes) = block until post/close,
     // anything else = best-effort tick-granularity budget. The
@@ -183,11 +191,21 @@ i64 SysIocpRemove(u64 handle, u64 user_key, u64 user_apc, u64 user_iosb, u64 tim
         timeout_ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
     }
     ipc::IocpCompletion c = {};
-    const bool got = ipc::IocpWait(port, &c, timeout_ticks);
+    const ipc::IocpWaitResult wait_result = ipc::IocpWait(port, &c, timeout_ticks);
     ipc::KObjectRelease(&port->base);
-    if (!got)
+    // The lookup reference is gone before any result mapping. Cancelled is
+    // only an internal unwind sentinel: the syscall dispatcher's outer
+    // cancellation guard finalizes the task before ring 3 can observe -1.
+    switch (wait_result)
     {
+    case ipc::IocpWaitResult::TimedOut:
+    case ipc::IocpWaitResult::Closed:
         return 0;
+    case ipc::IocpWaitResult::Cancelled:
+    case ipc::IocpWaitResult::Failed:
+        return -1;
+    case ipc::IocpWaitResult::Dequeued:
+        break;
     }
     if (user_key != 0)
     {
@@ -227,11 +245,12 @@ i64 SysIocpClose(u64 handle)
         KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpClose handle out of range", handle);
         return -1;
     }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp);
-    if (obj == nullptr)
+    auto detached = ipc::HandleTableDetach(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp, ipc::kHandleRightDestroy);
+    if (!detached.has_value())
     {
         return -1;
     }
+    ipc::KObject* obj = detached.value();
     auto* port = reinterpret_cast<ipc::IocpPort*>(obj);
     // Flip `closed` + broadcast BEFORE dropping the table reference:
     // a consumer parked inside IocpWait holds its own lookup ref, so
@@ -241,8 +260,7 @@ i64 SysIocpClose(u64 handle)
     // duplicated handle still exists — revisit if a workload
     // duplicates IOCP handles.
     ipc::IocpClose(port);
-    (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
-    ipc::KObjectRelease(obj); // drop the lookup ref
+    ipc::KObjectRelease(obj); // drop the detached table-owned ref
     return 0;
 }
 

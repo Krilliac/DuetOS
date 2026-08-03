@@ -34,6 +34,7 @@
 #include "sched/workpool.h"
 
 #include "acpi/acpi.h"
+#include "arch/x86_64/smp.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
@@ -97,6 +98,18 @@ struct WorkerCtx
     WorkPool* pool;
     u32 idx; ///< 0..worker_count-1; doubles as preferred lane index.
 };
+
+struct InitialAffinity
+{
+    u32 cpu_id;
+    bool applied;
+};
+
+void PrepareInitialAffinity(Task* task, void* context)
+{
+    auto* affinity = static_cast<InitialAffinity*>(context);
+    affinity->applied = SchedSetAffinity(task, affinity->cpu_id);
+}
 
 // Try to claim one item from `l`. Returns true on success and writes
 // the item into `*out`. Caller must NOT hold `inner` (we take the
@@ -282,8 +295,10 @@ WorkPool* WorkPoolCreate(u32 worker_count, u32 queue_capacity, const char* name_
         }
         ctx->pool = p;
         ctx->idx = i;
-        sched::Task* t = sched::SchedCreate(&WorkerMain, ctx, p->name_prefix);
-        if (t == nullptr)
+        const u32 online = static_cast<u32>(arch::SmpCpusOnline());
+        const u32 affinity_cpus = (online == 0u) ? 1u : ((online < 32u) ? online : 32u);
+        InitialAffinity affinity{i % affinity_cpus, false};
+        if (sched::SchedCreatePrepared(&WorkerMain, ctx, p->name_prefix, &PrepareInitialAffinity, &affinity) == nullptr)
         {
             duetos::mm::KFree(ctx);
             p->shutdown = true;
@@ -298,12 +313,12 @@ WorkPool* WorkPoolCreate(u32 worker_count, u32 queue_capacity, const char* name_
             KLOG_WARN_S("workpool", "WorkPoolCreate: SchedCreate failed", "name", name_prefix);
             return nullptr;
         }
-        // Bias each worker toward its preferred CPU so the work-
-        // item callback's CPU-local data has a chance to stay
-        // warm. SchedSetAffinity is a soft hint today — the
-        // scheduler may still migrate — but the bias is what we
-        // need to pair with round-robin Submit for spread.
-        sched::SchedSetAffinity(t, i % static_cast<u32>(acpi::kMaxCpus));
+        // The callback hard-pins the worker before publication, so
+        // no immediate run/exit/reap can race a raw Task* affinity
+        // update. Pairing this spread with round-robin Submit keeps
+        // CPU-local callback data warm without post-create ABA risk.
+        if (!affinity.applied)
+            KLOG_WARN_V("workpool", "worker initial affinity rejected", affinity.cpu_id);
         ++p->workers_alive;
     }
     sched::MutexUnlock(&p->inner);

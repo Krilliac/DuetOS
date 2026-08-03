@@ -16,13 +16,13 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
-#include "drivers/net/net.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "sync/spinlock.h"
 #include "time/tick.h"
+#include "util/defer.h"
 
 namespace duetos::net
 {
@@ -31,13 +31,20 @@ namespace
 {
 
 Socket g_pool[kSocketPoolCap] = {};
+// UDP allocation has to drop g_sock_lock while KMalloc builds the RX
+// ring. Reserve the chosen slot before that drop so a preempting task
+// (even on the BSP before AP bring-up) or a peer CPU cannot choose the
+// same slot. Reservations are file-local, never exposed as live socket
+// handles, and are committed or rolled back under g_sock_lock.
+bool g_slot_reserved[kSocketPoolCap] = {};
 SocketStats g_stats = {};
 
-// Guards `g_pool` and `g_stats`. Acquire disables interrupts, so the
-// same lock serialises the NIC RX dispatch (SocketUdpDispatch, which
-// runs from the netif IRQ tail) against task-context socket calls on
-// every CPU. The v0 scheme was `arch::Cli` alone, which only excludes
-// the local CPU: with per-CPU runqueues and work-stealing live, a
+// Guards `g_pool`, `g_slot_reserved`, and `g_stats`. Acquire disables
+// interrupts, so the same lock serialises the NIC RX dispatch
+// (SocketUdpDispatch, which runs from the netif IRQ tail) against
+// task-context socket calls on every CPU. The v0 scheme was
+// `arch::Cli` alone, which only excludes the local CPU: with per-CPU
+// runqueues and work-stealing live, a
 // SocketRelease on CPU 1 could free a socket's UDP RX ring while a
 // SocketRecvDgram on CPU 0 was still copying out of it.
 //
@@ -55,6 +62,12 @@ constinit sync::SpinLock g_sock_lock = {
 bool IpZero(Ipv4Address a)
 {
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;
+}
+
+bool IpEqual(Ipv4Address left, Ipv4Address right)
+{
+    return left.octets[0] == right.octets[0] && left.octets[1] == right.octets[1] &&
+           left.octets[2] == right.octets[2] && left.octets[3] == right.octets[3];
 }
 
 // Caller holds g_sock_lock.
@@ -118,6 +131,7 @@ struct SocketSnapshot
     bool loopback_paired = false;
     u8 shutdown_flags = 0;
     u16 type = 0;
+    u32 iface_index = kInvalidNetInterfaceIndex;
     u16 local_port = 0;
     Ipv4Address local_ip{};
     Ipv4Address peer_ip{};
@@ -141,6 +155,7 @@ SocketSnapshot SnapshotSocketLocked(const Socket& s)
     out.loopback_paired = s.loopback_paired;
     out.shutdown_flags = s.shutdown_flags;
     out.type = s.type;
+    out.iface_index = s.iface_index;
     out.local_port = s.local_port;
     out.local_ip = s.local_ip;
     out.peer_ip = s.peer_ip;
@@ -152,6 +167,58 @@ SocketSnapshot SnapshotSocketLocked(const Socket& s)
     out.recv_timeout_ticks = s.recv_timeout_ticks;
     out.udp_count = s.udp_count;
     return out;
+}
+
+// TCP interface retirement invalidates TcbIds under the TCP lock, but the
+// socket pool deliberately is not called from that teardown path: doing so
+// would introduce a g_tcb_lock -> g_sock_lock edge against socket operations
+// which snapshot under g_sock_lock and then enter TCP. Reconcile lazily at
+// socket API boundaries instead. The TCP liveness probe is always outside the
+// socket lock, and the exact observed TcbId is revalidated before mutation.
+//
+// A listener with an already-published loopback child remains accept-capable;
+// leave it intact until that child is consumed so interface retirement cannot
+// strand the accepted socket. The next API boundary then clears the stale
+// wire listener.
+bool ReconcileRetiredStreamTcb(SocketOperationPin& pin)
+{
+    tcp::TcbId observed = tcp::kInvalidTcbId;
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
+    const Socket& snapshot = *pin.socket;
+    if (snapshot.in_use && !snapshot.closing && snapshot.type == kSocketTypeStream && !snapshot.loopback_paired)
+        observed = snapshot.tcb;
+    sync::SpinLockRelease(g_sock_lock, flags);
+
+    if (observed == tcp::kInvalidTcbId || tcp::Alive(observed))
+        return false;
+
+    flags = sync::SpinLockAcquire(g_sock_lock);
+    Socket& current = pin.mutable_socket();
+    bool reconciled = false;
+    if (current.in_use && !current.closing && current.type == kSocketTypeStream && !current.loopback_paired &&
+        current.tcb == observed)
+    {
+        if (current.listening && current.loopback_pending_accept_idx != -1)
+        {
+            // This listener can still satisfy the pending local accept. Keep
+            // the stale ID long enough for that one operation; no TCP call is
+            // made with it because SocketAcceptNonblocking checks loopback
+            // first. A later boundary reconciles it after the queue drains.
+            sync::SpinLockRelease(g_sock_lock, flags);
+            return false;
+        }
+        const bool was_connected = current.connected;
+        current.tcb = tcp::kInvalidTcbId;
+        current.connected = false;
+        current.listening = false;
+        if (was_connected)
+            current.shutdown_flags |= 0x3;
+        sched::WaitQueueWakeAll(&current.read_wq);
+        sched::WaitQueueWakeAll(&current.accept_wq);
+        reconciled = true;
+    }
+    sync::SpinLockRelease(g_sock_lock, flags);
+    return reconciled;
 }
 
 // Caller holds g_sock_lock. A teardown is only taken once both the
@@ -206,6 +273,59 @@ void FinishSocketTeardown(const SocketTeardown& td)
         ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(td.loopback_pipe_send_idx));
 }
 
+// Caller holds g_sock_lock. Reserved slots are allocation transactions
+// in flight; they are not free even though their Socket is not live yet.
+u32 FindFreeSocketSlotLocked()
+{
+    for (u32 i = 0; i < kSocketPoolCap; ++i)
+    {
+        if (!g_pool[i].in_use && !g_slot_reserved[i])
+            return i;
+    }
+    return kSocketPoolCap;
+}
+
+// Caller holds g_sock_lock and owns either the free stream slot or the
+// matching UDP reservation. No allocation, scheduling point, or external
+// subsystem call is allowed here: publication is one lock transaction.
+void PublishSocketLocked(Socket& s, u16 domain, u16 type, SocketDgram* rx)
+{
+    KASSERT(!s.in_use, "net/socket", "publishing over a live socket slot");
+    s.closing = false;
+    s.refs = 1;
+    s.pins = 0;
+    s.family = domain;
+    s.type = type;
+    s.iface_index = 0;
+    s.owner_pid = 0; // stamped by SocketSetOwner from the syscall handler
+    s.bound = false;
+    s.connected = false;
+    s.listening = false;
+    s.shutdown_flags = 0;
+    s.local_port = 0;
+    s.peer_port = 0;
+    s.local_ip = {};
+    s.peer_ip = {};
+    s.udp_head = 0;
+    s.udp_tail = 0;
+    s.udp_count = 0;
+    s.udp_rx = rx;
+    s.tcb = tcp::kInvalidTcbId;
+    s.loopback_paired = false;
+    s.loopback_pipe_recv_idx = -1;
+    s.loopback_pipe_send_idx = -1;
+    s.loopback_pending_accept_idx = -1;
+    s.recv_timeout_ticks = 0; // block forever until a caller opts in
+    s.read_wq.head = nullptr;
+    s.read_wq.tail = nullptr;
+    s.accept_wq.head = nullptr;
+    s.accept_wq.tail = nullptr;
+    // Publish last. The lock is the real synchronization boundary, but
+    // keeping the liveness bit last also makes accidental lockless probes
+    // fail closed instead of observing a partially initialized socket.
+    s.in_use = true;
+}
+
 } // namespace
 
 i32 SocketAlloc(u16 domain, u16 type)
@@ -226,71 +346,50 @@ i32 SocketAlloc(u16 domain, u16 type)
     }
 
     auto flags = sync::SpinLockAcquire(g_sock_lock);
-    for (u32 i = 0; i < kSocketPoolCap; ++i)
+    const u32 slot = FindFreeSocketSlotLocked();
+    if (slot == kSocketPoolCap)
     {
-        if (g_pool[i].in_use)
-            continue;
-        Socket& s = g_pool[i];
-        // KMalloc may not run under a spinlock — drop it and re-test
-        // the slot on the way back in.
         sync::SpinLockRelease(g_sock_lock, flags);
-        SocketDgram* rx = nullptr;
-        if (type == kSocketTypeDgram)
-        {
-            rx = static_cast<SocketDgram*>(mm::KMalloc(sizeof(SocketDgram) * kSocketUdpRxQueueCap));
-            if (rx == nullptr)
-            {
-                // UDP RX ring allocation failed — caller sees EMFILE-
-                // shaped error but the kernel had no signal of the
-                // OOM. Log so a panic dump captures the saturation.
-                KLOG_ERROR("net/socket", "SocketAlloc: UDP rx ring KMalloc failed");
-                return -1;
-            }
-        }
-        flags = sync::SpinLockAcquire(g_sock_lock);
-        if (g_pool[i].in_use)
-        {
-            sync::SpinLockRelease(g_sock_lock, flags);
-            if (rx != nullptr)
-                mm::KFree(rx);
-            return -1;
-        }
-        s.in_use = true;
-        s.closing = false;
-        s.refs = 1;
-        s.pins = 0;
-        s.family = domain;
-        s.type = type;
-        s.iface_index = 0;
-        s.owner_pid = 0; // stamped by SocketSetOwner from the syscall handler
-        s.bound = false;
-        s.connected = false;
-        s.listening = false;
-        s.shutdown_flags = 0;
-        s.local_port = 0;
-        s.peer_port = 0;
-        s.local_ip = {};
-        s.peer_ip = {};
-        s.udp_head = 0;
-        s.udp_tail = 0;
-        s.udp_count = 0;
-        s.udp_rx = rx;
-        s.tcb = tcp::kInvalidTcbId;
-        s.loopback_paired = false;
-        s.loopback_pipe_recv_idx = -1;
-        s.loopback_pipe_send_idx = -1;
-        s.loopback_pending_accept_idx = -1;
-        s.recv_timeout_ticks = 0; // block forever until a caller opts in
-        s.read_wq.head = nullptr;
-        s.read_wq.tail = nullptr;
-        s.accept_wq.head = nullptr;
-        s.accept_wq.tail = nullptr;
+        return -1;
+    }
+
+    if (type == kSocketTypeStream)
+    {
+        // A stream socket has no out-of-lock construction. Publish it
+        // before releasing the lock so no preemption/SMP collision can
+        // observe the same slot as free.
+        PublishSocketLocked(g_pool[slot], domain, type, nullptr);
         ++g_stats.allocs;
         sync::SpinLockRelease(g_sock_lock, flags);
-        return static_cast<i32>(i);
+        return static_cast<i32>(slot);
     }
+
+    // UDP needs an RX ring, and KMalloc must never run under a spinlock.
+    // Claim the slot first, then construct and commit it transactionally.
+    g_slot_reserved[slot] = true;
     sync::SpinLockRelease(g_sock_lock, flags);
-    return -1;
+
+    SocketDgram* rx = static_cast<SocketDgram*>(mm::KMalloc(sizeof(SocketDgram) * kSocketUdpRxQueueCap));
+    if (rx == nullptr)
+    {
+        flags = sync::SpinLockAcquire(g_sock_lock);
+        KASSERT(g_slot_reserved[slot] && !g_pool[slot].in_use, "net/socket",
+                "UDP socket reservation lost before OOM rollback");
+        g_slot_reserved[slot] = false;
+        sync::SpinLockRelease(g_sock_lock, flags);
+        // UDP RX ring allocation failed — caller sees EMFILE-shaped
+        // error but the kernel still records the actual OOM cause.
+        KLOG_ERROR("net/socket", "SocketAlloc: UDP rx ring KMalloc failed");
+        return -1;
+    }
+
+    flags = sync::SpinLockAcquire(g_sock_lock);
+    KASSERT(g_slot_reserved[slot] && !g_pool[slot].in_use, "net/socket", "UDP socket reservation lost before publish");
+    PublishSocketLocked(g_pool[slot], domain, type, rx);
+    g_slot_reserved[slot] = false;
+    ++g_stats.allocs;
+    sync::SpinLockRelease(g_sock_lock, flags);
+    return static_cast<i32>(slot);
 }
 
 void SocketRetain(u32 idx)
@@ -408,16 +507,24 @@ bool SocketIsListening(u32 idx)
 {
     if (idx >= kSocketPoolCap)
         return false;
+    SocketOperationPin pin(idx);
+    if (!pin)
+        return false;
+    (void)ReconcileRetiredStreamTcb(pin);
     sync::SpinLockGuard guard(g_sock_lock);
-    return g_pool[idx].in_use && !g_pool[idx].closing && g_pool[idx].listening;
+    return pin.socket->in_use && !pin.socket->closing && pin.socket->listening;
 }
 
 bool SocketIsConnected(u32 idx)
 {
     if (idx >= kSocketPoolCap)
         return false;
+    SocketOperationPin pin(idx);
+    if (!pin)
+        return false;
+    (void)ReconcileRetiredStreamTcb(pin);
     sync::SpinLockGuard guard(g_sock_lock);
-    return g_pool[idx].in_use && !g_pool[idx].closing && g_pool[idx].connected;
+    return pin.socket->in_use && !pin.socket->closing && pin.socket->connected;
 }
 
 bool SocketReadShutdown(u32 idx)
@@ -492,6 +599,7 @@ bool SocketListen(u32 idx, u32 backlog)
     SocketOperationPin pin(idx);
     if (!pin)
         return false;
+    (void)ReconcileRetiredStreamTcb(pin);
     auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& s = pin.mutable_socket();
     if (!s.in_use || s.closing || s.type != kSocketTypeStream || !s.bound)
@@ -536,6 +644,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
     SocketOperationPin pin(idx);
     if (!pin)
         return false;
+    (void)ReconcileRetiredStreamTcb(pin);
     auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& s = pin.mutable_socket();
     if (!s.in_use || s.closing)
@@ -687,6 +796,7 @@ i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_pe
     SocketOperationPin pin(listener_idx);
     if (!pin)
         return -1;
+    (void)ReconcileRetiredStreamTcb(pin);
     auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& l = pin.mutable_socket();
     if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.loopback_pending_accept_idx == -1)
@@ -718,6 +828,7 @@ i32 SocketAcceptNonblocking(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out
     SocketOperationPin pin(listener_idx);
     if (!pin)
         return -1;
+    (void)ReconcileRetiredStreamTcb(pin);
     // Loopback first — cheaper.
     const i32 lb = SocketAcceptLoopback(listener_idx, out_peer_ip, out_peer_port);
     if (lb >= 0)
@@ -736,7 +847,14 @@ i32 SocketAcceptNonblocking(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out
     u16 peer_port;
     const tcp::TcbId child = tcp::AcceptNonblocking(listener_tcb, &peer_ip, &peer_port);
     if (child == tcp::kInvalidTcbId)
+    {
+        if (!tcp::Alive(listener_tcb))
+        {
+            (void)ReconcileRetiredStreamTcb(pin);
+            return -1;
+        }
         return -11; // EAGAIN
+    }
 
     const i32 new_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
     if (new_idx < 0)
@@ -866,21 +984,24 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         s.bound = true;
         state = SnapshotSocketLocked(s);
     }
-    if (drivers::net::NicCount() == 0)
+    NetInterfaceSnapshot interface{};
+    if (!NetStackAcquireInterface(state.iface_index, &interface))
         return -100;
-    Ipv4Address src = state.local_ip;
-    if (IpZero(src))
-        src = InterfaceIp(0);
+    DUETOS_DEFER(NetStackReleaseInterface(interface.binding));
+
+    if (!IpZero(state.local_ip) && !IpEqual(state.local_ip, interface.ip))
+        return -99;
+    const Ipv4Address src = IpZero(state.local_ip) ? interface.ip : state.local_ip;
     MacAddress dst_mac{};
     ArpEntry arp{};
-    if (ArpLookup(0, dst, &arp))
+    if (ArpLookup(interface.binding.iface_index, dst, &arp))
         dst_mac = arp.mac;
     else
     {
         for (u8& b : dst_mac.octets)
             b = 0xFF;
     }
-    if (!NetUdpSend(/*iface_index=*/0, dst_mac, dst, port, src, state.local_port, data, len))
+    if (!NetUdpSend(interface.binding.iface_index, dst_mac, dst, port, src, state.local_port, data, len))
         return -101;
     {
         sync::SpinLockGuard guard(g_sock_lock);
@@ -962,6 +1083,7 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
     SocketOperationPin pin(idx);
     if (!pin)
         return -9;
+    (void)ReconcileRetiredStreamTcb(pin);
     SocketSnapshot state;
     {
         sync::SpinLockGuard guard(g_sock_lock);
@@ -998,7 +1120,12 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
     {
         const i32 n = tcp::Send(state.tcb, data + sent_total, len - sent_total);
         if (n < 0)
-            return (sent_total > 0) ? static_cast<i64>(sent_total) : -32;
+        {
+            const bool retired = !tcp::Alive(state.tcb);
+            if (retired)
+                (void)ReconcileRetiredStreamTcb(pin);
+            return (sent_total > 0) ? static_cast<i64>(sent_total) : (retired ? -107 : -32);
+        }
         if (n == 0)
         {
             // Buffer full — sleep on the wait queue until acks
@@ -1030,6 +1157,7 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
     SocketOperationPin pin(idx);
     if (!pin)
         return -9;
+    (void)ReconcileRetiredStreamTcb(pin);
     SocketSnapshot state;
     {
         sync::SpinLockGuard guard(g_sock_lock);
@@ -1098,6 +1226,7 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
                 return 0;
             continue;
         }
+        (void)ReconcileRetiredStreamTcb(pin);
         return -107; // dead TCB
     }
 }
@@ -1222,6 +1351,7 @@ u32 SocketPollEvents(u32 idx)
     SocketOperationPin pin(idx);
     if (!pin)
         return 0;
+    (void)ReconcileRetiredStreamTcb(pin);
     SocketSnapshot state;
     {
         sync::SpinLockGuard guard(g_sock_lock);

@@ -2,11 +2,11 @@
  * DuetOS — disk installer orchestration, v0.
  *
  * Companion to installer.h. Drives the GPT-init + FAT32-format +
- * mount + ESP-stub-write sequence that turns a blank block device
- * into a DuetOS-bootable layout. Bootloader-bytes copy is a
- * separate slice (build-time bootstrap problem); v0 lays down the
- * partition table and the filesystem skeletons so the layout is
- * correct.
+ * mount + ESP-staging sequence that turns a blank block device into
+ * a DuetOS install layout. It stages the experimental direct UEFI
+ * loader, optional kernel bytes, and GRUB configuration, but does not
+ * install GRUB's BIOS/EFI boot images. The resulting disk is layout
+ * preparation only, not a supported bootable installation.
  *
  * Failure semantics: every step before the GPT write is purely
  * validation; the disk is not touched until we've gated on
@@ -162,10 +162,11 @@ bool WriteEspBootSkeleton(const fat32::Volume* vol)
     // Drop the embedded BOOTX64.EFI bytes at the canonical UEFI
     // fall-back removable-media path. UEFI firmware that boots a
     // removable disk without an explicit boot variable looks for
-    // \EFI\BOOT\BOOTX64.EFI; this is what makes the freshly-
-    // installed disk actually boot on real hardware. Bytes come
-    // from the in-kernel ramfs blob populated at build time by
-    // kernel/CMakeLists.txt's BOOTX64.EFI embed step.
+    // \EFI\BOOT\BOOTX64.EFI. The embedded image is the experimental
+    // direct loader and currently halts after ELF-header validation;
+    // writing it proves path/layout staging but does not make the disk
+    // bootable. Bytes come from the in-kernel ramfs blob populated at
+    // build time by kernel/CMakeLists.txt's BOOTX64.EFI embed step.
     const u8* efi_bytes = RamfsBootX64EfiBytes();
     const u64 efi_len = RamfsBootX64EfiSize();
     if (efi_bytes != nullptr && efi_len > 0)

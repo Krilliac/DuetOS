@@ -8,18 +8,18 @@
  * WHAT
  *   Backs every user32!*Window* import the Win32 thunks page
  *   routes into the kernel. Owns the in-kernel window table,
- *   the per-window message queue, the WndProc dispatch state,
+ *   the per-task message queue, the WndProc dispatch state,
  *   timer table, and the paint-lifecycle (BeginPaint /
  *   EndPaint / InvalidateRect / UpdateWindow) state.
  *
  * HOW
- *   Window handles are kernel-internal indices into a fixed
- *   pool. The compositor (subsystems/graphics/graphics.cpp)
+ *   Public HWNDs are positive, PE32-safe slot+generation identities backed by
+ *   fixed compositor slots. The compositor (subsystems/graphics/graphics.cpp)
  *   walks the pool every frame and renders visible windows
  *   into the framebuffer.
  *
  *   Message dispatch: WM_TIMER / WM_PAINT / input events get
- *   posted into the per-window queue; the user-space Win32
+ *   posted into the creating task's queue; the user-space Win32
  *   message loop drains the queue via SYS_WIN_GET_MSG.
  *
  *   The kernel does NOT run the WndProc. It stores the
@@ -67,39 +67,14 @@ namespace duetos::subsystems::win32
 namespace
 {
 
-// Per-process title storage. WindowRegister takes the title pointer
-// by reference (the kernel string lifetime must out-live the
-// window). PE titles come in via user memory which we can't safely
-// keep a pointer into across scheduler switches. We copy the title
-// into a fixed-size arena keyed by compositor slot so the window
-// has a stable kernel-owned string. kMaxWindows slots keep us
-// symmetric with the registry capacity — one title per slot.
-constinit char g_title_arena[duetos::drivers::video::kMaxWindows][duetos::core::kWinTitleMax + 1] = {};
-
-// Whether each arena slot is in use. We don't free entries on
-// DESTROY for v0 — the window table itself is append-only in the
-// widget layer. A future process-reaper slice reclaims both.
-constinit bool g_title_in_use[duetos::drivers::video::kMaxWindows] = {};
-
-// The HWND bias keeps "0 = failure" intact at the Win32 surface:
-// compositor handle 0 is a real, valid window, but Win32 callers
-// check `hwnd != NULL`. Bias +1 on the way out, -1 on the way in.
-// Matches the kOffReturnOne convention the legacy stubs page uses
-// for CreateWindowExA/W already.
-constexpr u64 kHwndBias = 1;
+// SYS_WIN_POST_MSG reserves bit 31 as an internal task-target tag. Public HWND
+// values always keep bits 24..31 clear, so the two forms cannot alias.
+constexpr u32 kThreadMessageTag = 0x80000000u;
+constexpr u32 kThreadMessageTidMask = 0x7FFFFFFFu;
 
 u32 HwndToCompositorHandle(u64 hwnd_win32)
 {
-    if (hwnd_win32 == 0)
-    {
-        return duetos::drivers::video::kWindowInvalid;
-    }
-    const u64 unbiased = hwnd_win32 - kHwndBias;
-    if (unbiased >= duetos::drivers::video::kMaxWindows)
-    {
-        return duetos::drivers::video::kWindowInvalid;
-    }
-    return static_cast<u32>(unbiased);
+    return duetos::drivers::video::WindowResolvePublicHandle(hwnd_win32);
 }
 
 // Bounded copy from user space into the caller-supplied kernel
@@ -132,6 +107,15 @@ void DoWinCreate(arch::TrapFrame* frame)
     const u32 w = static_cast<u32>(frame->rdx);
     const u32 h = static_cast<u32>(frame->r10);
     const u64 title_user = frame->r8;
+    char title[duetos::core::kWinTitleMax + 1]{};
+    if (!CopyUserString(title, sizeof(title), title_user))
+    {
+        const char fallback[] = "WINDOW";
+        for (u32 i = 0; i < sizeof(fallback); ++i)
+        {
+            title[i] = fallback[i];
+        }
+    }
 
     // Clamp degenerate geometry up to something paintable. Win32
     // callers sometimes pass CW_USEDEFAULT (0x80000000) which
@@ -165,44 +149,9 @@ void DoWinCreate(arch::TrapFrame* frame)
         ch = (fb_h > cy) ? (fb_h - cy) : 64;
     }
 
-    // Acquire the compositor lock for the full critical section:
-    // arena allocation, WindowRegister, and the follow-up
-    // DesktopCompose all touch UI state.
+    // User memory was copied before taking the compositor lock. Registration
+    // copies the local title into its generation-owned slot.
     CompositorLock();
-
-    // Pick the first free arena slot. Slots are 1:1 with the
-    // widget-layer registry but we don't know our prospective
-    // compositor index until after WindowRegister returns; instead
-    // we reserve a slot here and use its index as the array key.
-    u32 arena_slot = kMaxWindows;
-    for (u32 i = 0; i < kMaxWindows; ++i)
-    {
-        if (!g_title_in_use[i])
-        {
-            arena_slot = i;
-            break;
-        }
-    }
-    if (arena_slot == kMaxWindows)
-    {
-        CompositorUnlock();
-        duetos::arch::SerialWrite("[sys] win_create: no free title slot\n");
-        frame->rax = 0;
-        return;
-    }
-
-    char* title = &g_title_arena[arena_slot][0];
-    if (!CopyUserString(title, duetos::core::kWinTitleMax + 1, title_user))
-    {
-        // Null / faulting title is permitted — fall back to a
-        // visible generic label so the chrome still reads.
-        const char fallback[] = "WINDOW";
-        for (u32 i = 0; i < sizeof(fallback); ++i)
-        {
-            title[i] = fallback[i];
-        }
-    }
-    g_title_in_use[arena_slot] = true;
 
     const Theme& theme = ThemeCurrent();
     WindowChrome chrome = {};
@@ -222,18 +171,23 @@ void DoWinCreate(arch::TrapFrame* frame)
     const WindowHandle h_comp = WindowRegister(chrome, title);
     if (h_comp == kWindowInvalid)
     {
-        g_title_in_use[arena_slot] = false;
         CompositorUnlock();
         duetos::arch::SerialWrite("[sys] win_create: registry full\n");
         frame->rax = 0;
         return;
     }
 
-    // Record the owning pid so the process-exit reaper can close
-    // every ring-3 window in one walk when the Process refcount
-    // drops to 0. pid==0 (kernel-owned boot window) is reserved —
-    // ring-3 pids start at 1.
-    WindowSetOwnerPid(h_comp, proc->pid);
+    // Bind the window to the immutable creating task identity. The GUI queue
+    // stores only {pid, tid}; it never retains a scheduler Task pointer.
+    const u64 owner_tid = duetos::sched::CurrentTaskId();
+    if (!WindowSetOwner(h_comp, proc->pid, owner_tid))
+    {
+        WindowClose(h_comp);
+        CompositorUnlock();
+        duetos::arch::SerialWrite("[sys] win_create: task queue unavailable\n");
+        frame->rax = 0;
+        return;
+    }
 
     // Lifecycle messages. WM_CREATE (0x0001) + WM_SIZE (0x0005)
     // + WM_SHOWWINDOW (0x0018) + WM_ACTIVATE (0x0006) +
@@ -263,9 +217,9 @@ void DoWinCreate(arch::TrapFrame* frame)
 
     // [win] create sentinel is emitted by WindowRegister (widget.cpp)
     // for all window creates — no duplicate needed here.
-    const u64 hwnd_biased = static_cast<u64>(h_comp) + kHwndBias;
-    custom::OnHandleAlloc(proc, hwnd_biased, static_cast<u32>(duetos::core::SYS_WIN_CREATE), frame->rip);
-    frame->rax = hwnd_biased;
+    const u64 hwnd = WindowPublicHandle(h_comp);
+    custom::OnHandleAlloc(proc, hwnd, static_cast<u32>(duetos::core::SYS_WIN_CREATE), frame->rip);
+    frame->rax = hwnd;
 }
 
 void DoWinDestroy(arch::TrapFrame* frame)
@@ -281,26 +235,18 @@ void DoWinDestroy(arch::TrapFrame* frame)
         return;
     }
 
-    const u32 h_comp = HwndToCompositorHandle(frame->rdi);
-    if (h_comp == kWindowInvalid || !WindowIsAlive(h_comp))
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    if (h_comp == kWindowInvalid)
     {
+        CompositorUnlock();
         frame->rax = 0;
         return;
     }
-
-    CompositorLock();
-    // Post WM_DESTROY just before the close — any queue
-    // inspector between now and the next compose sees it.
-    // WM_NCDESTROY follows but nothing in v1 differentiates
-    // them, so one post covers both semantics.
-    constexpr u32 kWmDestroy = 0x0002;
-    WindowPostMessage(h_comp, kWmDestroy, 0, 0);
-    WindowTimerReap(proc->pid, h_comp);
     WindowClose(h_comp);
     const Theme& theme = ThemeCurrent();
     DesktopCompose(theme.desktop_bg, nullptr);
     CompositorUnlock();
-    WindowMsgWakeAll();
 
     // [win] destroy sentinel is emitted by WindowClose (widget.cpp)
     // for all window destroys — no duplicate needed here.
@@ -312,16 +258,22 @@ void DoWinShow(arch::TrapFrame* frame)
 {
     using namespace duetos::drivers::video;
 
-    const u32 h_comp = HwndToCompositorHandle(frame->rdi);
-    const u64 cmd = frame->rsi;
-
-    if (h_comp == kWindowInvalid)
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
     {
         frame->rax = 0;
         return;
     }
+    const u64 cmd = frame->rsi;
 
     CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    if (h_comp == kWindowInvalid)
+    {
+        CompositorUnlock();
+        frame->rax = 0;
+        return;
+    }
     // v1: previous visibility state reported back as the Win32
     // ShowWindow BOOL return value. FALSE if the window wasn't
     // visible before this call.
@@ -359,7 +311,6 @@ void DoWinShow(arch::TrapFrame* frame)
     const Theme& theme = ThemeCurrent();
     DesktopCompose(theme.desktop_bg, nullptr);
     CompositorUnlock();
-    WindowMsgWakeAll();
 
     frame->rax = was_visible ? 1 : 0;
 }
@@ -423,7 +374,7 @@ bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
         return false;
     }
     UserMsg out{};
-    out.hwnd = static_cast<u64>(m.hwnd_biased);
+    out.hwnd = static_cast<u64>(m.hwnd);
     out.message = m.message;
     out.wparam = m.wparam;
     out.lparam = m.lparam;
@@ -432,31 +383,43 @@ bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
 
 } // namespace
 
-// Resolve a user-supplied biased HWND to a compositor handle AND
+// Resolve a user-supplied opaque HWND to a compositor handle AND
 // verify it belongs to the calling process. Prevents a ring-3
 // PE from reading/writing another process's message queue. For
 // v0 this also refuses pid == 0 (kernel-owned boot windows) so
 // a PE can't PostMessage to the Calculator. Declared in
 // window_syscall.h so other subsystem modules (GDI object
 // handlers in gdi_objects.cpp) can share it.
-u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
+u32 HwndToCompositorHandleForCaller(u64 hwnd, u64 pid)
 {
     using namespace duetos::drivers::video;
-    const u32 h_comp = HwndToCompositorHandle(hwnd_biased);
+    const u32 h_comp = HwndToCompositorHandle(hwnd);
     if (h_comp == kWindowInvalid)
     {
         return kWindowInvalid;
     }
-    if (!WindowIsAlive(h_comp))
-    {
-        return kWindowInvalid;
-    }
-    if (WindowOwnerPid(h_comp) != pid)
+    if (!WindowOwnedByProcess(h_comp, pid))
     {
         return kWindowInvalid;
     }
     return h_comp;
 }
+
+namespace
+{
+
+u32 HwndToCompositorHandleForTask(u64 hwnd, u64 pid, u64 tid)
+{
+    using namespace duetos::drivers::video;
+    const u32 h_comp = HwndToCompositorHandleForCaller(hwnd, pid);
+    if (h_comp == kWindowInvalid || WindowOwnerTid(h_comp) != tid)
+    {
+        return kWindowInvalid;
+    }
+    return h_comp;
+}
+
+} // namespace
 
 void DoWinPeekMsg(arch::TrapFrame* frame)
 {
@@ -471,49 +434,53 @@ void DoWinPeekMsg(arch::TrapFrame* frame)
 
     const u64 filter_hwnd = frame->rsi;
     const bool remove = (frame->rdx != 0);
-
-    CompositorLock();
-    WindowMsg m{};
-    bool got = false;
-    if (filter_hwnd == 0)
+    const u64 tid = duetos::sched::CurrentTaskId();
+    if (!GuiMessageEnsureQueue(proc->pid, tid))
     {
-        // Any window owned by this pid. Peek-only path walks the
-        // first non-empty queue without mutating; remove path uses
-        // WindowPopMessageAny.
-        if (remove)
-        {
-            got = WindowPopMessageAny(proc->pid, &m);
-        }
-        else
-        {
-            got = WindowPeekMessageAny(proc->pid, &m);
-        }
+        frame->rax = 0;
+        return;
     }
-    else
+
+    u32 filter = 0;
+    if (filter_hwnd != 0)
     {
-        const u32 h_comp = HwndToCompositorHandleForCaller(filter_hwnd, proc->pid);
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForTask(filter_hwnd, proc->pid, tid);
         if (h_comp != kWindowInvalid)
         {
-            got = remove ? WindowPopMessage(h_comp, &m) : WindowPeekMessage(h_comp, &m);
+            filter = WindowPublicHandle(h_comp);
+        }
+        CompositorUnlock();
+        if (filter == 0)
+        {
+            frame->rax = 0;
+            return;
         }
     }
-    CompositorUnlock();
 
-    if (!got)
+    for (;;)
     {
-        frame->rax = 0;
-        return;
+        GuiMessageClaim claim{};
+        if (!GuiMessageSnapshot(proc->pid, tid, filter, &claim))
+        {
+            frame->rax = 0;
+            return;
+        }
+        // No queue or compositor lock is held across a faultable user copy.
+        // Failure abandons the claim, leaving the message untouched.
+        if (!CopyMsgToUser(claim.message, frame->rdi))
+        {
+            frame->rax = 0;
+            return;
+        }
+        if (GuiMessageCommit(claim, remove))
+        {
+            frame->rax = 1;
+            return;
+        }
+        // A peer consumer or teardown invalidated this snapshot. Re-snapshot
+        // and overwrite lpMsg with the exact message we actually commit.
     }
-    if (!CopyMsgToUser(m, frame->rdi))
-    {
-        // Copy failed; treat as "no message available" — the
-        // message is lost (peek-only case) or was already removed
-        // from the ring (remove case). Match Win32 behaviour of
-        // returning FALSE on invalid lpMsg.
-        frame->rax = 0;
-        return;
-    }
-    frame->rax = 1;
 }
 
 void DoWinGetMsg(arch::TrapFrame* frame)
@@ -531,60 +498,88 @@ void DoWinGetMsg(arch::TrapFrame* frame)
     }
 
     const u64 filter_hwnd = frame->rsi;
+    const u64 tid = duetos::sched::CurrentTaskId();
+    if (!GuiMessageEnsureQueue(proc->pid, tid))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
+    u32 filter = 0;
+    if (filter_hwnd != 0)
+    {
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForTask(filter_hwnd, proc->pid, tid);
+        if (h_comp != kWindowInvalid)
+        {
+            filter = WindowPublicHandle(h_comp);
+        }
+        CompositorUnlock();
+        if (filter == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+    }
 
     for (;;)
     {
-        // Under the compositor lock: try to dequeue. If nothing
-        // is pending, disable interrupts before we drop the
-        // compositor lock + enter the wait queue, so a wake that
-        // lands between those two steps can't be missed (same
-        // "lost wake" pattern the WaitQueueBlock contract warns
-        // about).
-        CompositorLock();
-        WindowMsg m{};
-        bool got = false;
-        if (filter_hwnd == 0)
+        // Snapshot before probing. A producer that mutates any task queue or
+        // invalidates a filtered HWND after this load publishes a new sequence
+        // before waking; the scheduler then either observes the mismatch or
+        // finds us fully enqueued under its own lock.
+        const u64 observed_message_sequence = WindowMsgSequenceSnapshot();
+        GuiMessageClaim claim{};
+        GuiMessageProbeToken ignored_probe_token{};
+        const GuiMessageProbeResult probe = GuiMessageProbeQueue(proc->pid, tid, filter, &claim, &ignored_probe_token);
+        if (probe == GuiMessageProbeResult::Message)
         {
-            got = WindowPopMessageAny(proc->pid, &m);
-        }
-        else
-        {
-            const u32 h_comp = HwndToCompositorHandleForCaller(filter_hwnd, proc->pid);
-            if (h_comp != kWindowInvalid)
-            {
-                got = WindowPopMessage(h_comp, &m);
-            }
-        }
-
-        if (got)
-        {
-            CompositorUnlock();
-            if (!CopyMsgToUser(m, frame->rdi))
+            if (!CopyMsgToUser(claim.message, frame->rdi))
             {
                 frame->rax = static_cast<u64>(-1);
                 return;
             }
-            // WM_QUIT breaks the caller's message loop. Standard
-            // Win32 behaviour: GetMessage returns FALSE, the
-            // message IS dequeued (the caller sees the exit code
-            // in wParam).
-            frame->rax = (m.message == kWmQuit) ? 0 : 1;
+            if (GuiMessageCommit(claim, true))
+            {
+                // WM_QUIT breaks the caller's message loop. Standard Win32
+                // behaviour: GetMessage returns FALSE after dequeuing it.
+                frame->rax = (claim.message.message == kWmQuit) ? 0 : 1;
+                return;
+            }
+            continue;
+        }
+        if (probe == GuiMessageProbeResult::Gone)
+        {
+            // Task teardown is terminal. Do not recreate the queue or spin on
+            // an Empty/Gone ambiguity after the owning identity was reaped.
+            frame->rax = static_cast<u64>(-1);
             return;
         }
 
-        // Nothing pending — block on the global message wait
-        // queue. `WindowMsgWakeAll` is broadcast, so we loop on
-        // return to re-check our per-window ring. The 1-tick
-        // (10 ms) timeout is the safety net against a lost wake
-        // landing in the narrow window between "check queue"
-        // and "enter wait queue" (the classic condvar race; a
-        // proper fix would hold the wait-queue lock while
-        // dropping the compositor lock, which needs a bigger
-        // refactor).
-        CompositorUnlock();
-        duetos::arch::Cli();
-        WindowMsgWaitBlockTimeout(1);
-        duetos::arch::Sti();
+        if (filter != 0)
+        {
+            CompositorLock();
+            const bool filter_alive = HwndToCompositorHandleForTask(filter, proc->pid, tid) != kWindowInvalid;
+            CompositorUnlock();
+            if (!filter_alive)
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+        }
+
+        // Nothing pending. The scheduler compares the pre-probe sequence and
+        // enqueues under one g_sched_lock hold, closing the final SMP lost-wake
+        // window without a 100 Hz polling timeout. Broadcasts are deliberately
+        // global, so Woken and SequenceChanged both loop and re-probe this
+        // task-owned queue. Cancellation unwinds to the outer syscall guard;
+        // the wait primitive itself never finalizes a live C++ frame.
+        const WindowMsgWaitResult wait_result = WindowMsgWaitIfSequenceUnchangedCancellable(observed_message_sequence);
+        if (wait_result == WindowMsgWaitResult::Cancelled)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
     }
 }
 
@@ -598,23 +593,28 @@ void DoWinPostMsg(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    // Cross-process PostMessage is allowed — Win32 lets any
-    // caller post to any HWND. GetMessage still filters by
-    // owner pid so the target is the only consumer.
-    CompositorLock();
-    const u32 h_comp = HwndToCompositorHandle(frame->rdi);
     bool ok = false;
-    if (h_comp != kWindowInvalid && WindowIsAlive(h_comp))
+    if ((frame->rdi >> 32) == 0 && (static_cast<u32>(frame->rdi) & kThreadMessageTag) != 0)
     {
-        ok = WindowPostMessage(h_comp, static_cast<u32>(frame->rsi), frame->rdx, frame->r10);
+        const u64 target_tid = static_cast<u32>(frame->rdi) & kThreadMessageTidMask;
+        if (target_tid != 0 && duetos::sched::SchedTaskBelongsToProcessByTid(target_tid, proc))
+        {
+            ok = WindowPostThreadMessage(proc->pid, target_tid, static_cast<u32>(frame->rsi), frame->rdx, frame->r10);
+        }
     }
-    CompositorUnlock();
-    if (ok)
+    else
     {
-        // Broadcast wake so any GetMessage blocker re-checks —
-        // the wake side runs OUTSIDE the compositor lock so a
-        // blocker waking up can immediately reacquire.
-        WindowMsgWakeAll();
+        // HWND posting is same-process only until a credential-aware GUI
+        // broker can filter cross-process messages. Resolve generation and
+        // ownership under the compositor lock so the check and enqueue are
+        // one transaction; foreign and stale HWNDs fail closed.
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            ok = WindowPostMessage(h_comp, static_cast<u32>(frame->rsi), frame->rdx, frame->r10);
+        }
+        CompositorUnlock();
     }
     frame->rax = ok ? 1 : 0;
 }
@@ -913,10 +913,6 @@ void DoWinMove(arch::TrapFrame* frame)
         ok = true;
     }
     CompositorUnlock();
-    if (ok && (did_move || did_size))
-    {
-        WindowMsgWakeAll();
-    }
     frame->rax = ok ? 1 : 0;
 }
 
@@ -1348,8 +1344,9 @@ void DoWinSetCapture(arch::TrapFrame* frame)
     CompositorLock();
     const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
     const WindowHandle prev = WindowSetCapture(h_comp);
+    const u64 prev_hwnd = WindowPublicHandle(prev);
     CompositorUnlock();
-    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+    frame->rax = prev_hwnd;
 }
 
 void DoWinReleaseCapture(arch::TrapFrame* frame)
@@ -1366,8 +1363,9 @@ void DoWinGetCapture(arch::TrapFrame* frame)
     using namespace duetos::drivers::video;
     CompositorLock();
     const WindowHandle h = WindowGetCapture();
+    const u64 hwnd = WindowPublicHandle(h);
     CompositorUnlock();
-    frame->rax = (h == kWindowInvalid) ? 0 : (static_cast<u64>(h) + 1);
+    frame->rax = hwnd;
 }
 
 // --- Clipboard ---------------------------------------------------
@@ -1421,11 +1419,14 @@ void DoWinGetLong(arch::TrapFrame* frame)
         return;
     }
     CompositorLock();
-    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    const u32 slot = static_cast<u32>(frame->rsi);
+    const u32 h_comp = (slot == 0)
+                           ? HwndToCompositorHandleForTask(frame->rdi, proc->pid, duetos::sched::CurrentTaskId())
+                           : HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
     u64 val = 0;
     if (h_comp != kWindowInvalid)
     {
-        val = WindowGetLong(h_comp, static_cast<u32>(frame->rsi));
+        val = WindowGetLong(h_comp, slot);
     }
     CompositorUnlock();
     frame->rax = val;
@@ -1441,11 +1442,14 @@ void DoWinSetLong(arch::TrapFrame* frame)
         return;
     }
     CompositorLock();
-    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    const u32 slot = static_cast<u32>(frame->rsi);
+    const u32 h_comp = (slot == 0)
+                           ? HwndToCompositorHandleForTask(frame->rdi, proc->pid, duetos::sched::CurrentTaskId())
+                           : HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
     u64 prev = 0;
     if (h_comp != kWindowInvalid)
     {
-        prev = WindowSetLong(h_comp, static_cast<u32>(frame->rsi), frame->rdx);
+        prev = WindowSetLong(h_comp, slot, frame->rdx);
     }
     CompositorUnlock();
     frame->rax = prev;
@@ -1879,8 +1883,9 @@ void DoWinGetActive(arch::TrapFrame* frame)
     using namespace duetos::drivers::video;
     CompositorLock();
     const WindowHandle h = WindowActive();
+    const u64 hwnd = WindowPublicHandle(h);
     CompositorUnlock();
-    frame->rax = (h == kWindowInvalid) ? 0 : (static_cast<u64>(h) + 1);
+    frame->rax = hwnd;
 }
 
 void DoWinSetActive(arch::TrapFrame* frame)
@@ -1901,8 +1906,9 @@ void DoWinSetActive(arch::TrapFrame* frame)
         const Theme& theme = ThemeCurrent();
         DesktopCompose(theme.desktop_bg, nullptr);
     }
+    const u64 prev_hwnd = WindowPublicHandle(prev);
     CompositorUnlock();
-    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+    frame->rax = prev_hwnd;
 }
 
 void DoWinGetMetric(arch::TrapFrame* frame)
@@ -1982,7 +1988,7 @@ void DoWinEnum(arch::TrapFrame* frame)
     {
         if (WindowIsAlive(i) && WindowIsVisible(i))
         {
-            buf[n++] = static_cast<u64>(i) + 1; // biased
+            buf[n++] = WindowPublicHandle(i);
         }
     }
     CompositorUnlock();
@@ -2038,7 +2044,7 @@ void DoWinFind(arch::TrapFrame* frame)
         const char* title = WindowTitle(i);
         if (title != nullptr && AsciiEqualIcase(title, target, duetos::core::kWinTitleMax))
         {
-            result = static_cast<u64>(i) + 1;
+            result = WindowPublicHandle(i);
             break;
         }
     }
@@ -2065,8 +2071,9 @@ void DoWinSetParent(arch::TrapFrame* frame)
     {
         WindowSetParent(child, parent);
     }
+    const u64 prev_hwnd = WindowPublicHandle(prev);
     CompositorUnlock();
-    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+    frame->rax = prev_hwnd;
 }
 
 void DoWinGetParent(arch::TrapFrame* frame)
@@ -2075,8 +2082,9 @@ void DoWinGetParent(arch::TrapFrame* frame)
     CompositorLock();
     const u32 h = HwndToCompositorHandle(frame->rdi);
     const WindowHandle p = (h != kWindowInvalid) ? WindowGetParent(h) : kWindowInvalid;
+    const u64 parent_hwnd = WindowPublicHandle(p);
     CompositorUnlock();
-    frame->rax = (p == kWindowInvalid) ? 0 : (static_cast<u64>(p) + 1);
+    frame->rax = parent_hwnd;
 }
 
 void DoWinGetRelated(arch::TrapFrame* frame)
@@ -2089,8 +2097,9 @@ void DoWinGetRelated(arch::TrapFrame* frame)
     {
         r = WindowGetRelated(h, static_cast<WindowRel>(frame->rsi));
     }
+    const u64 related_hwnd = WindowPublicHandle(r);
     CompositorUnlock();
-    frame->rax = (r == kWindowInvalid) ? 0 : (static_cast<u64>(r) + 1);
+    frame->rax = related_hwnd;
 }
 
 void DoWinSetFocus(arch::TrapFrame* frame)
@@ -2106,9 +2115,9 @@ void DoWinSetFocus(arch::TrapFrame* frame)
     const WindowHandle prev = WindowGetFocus();
     const u32 h = (frame->rdi == 0) ? kWindowInvalid : HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
     WindowSetFocus(h);
+    const u64 prev_hwnd = WindowPublicHandle(prev);
     CompositorUnlock();
-    WindowMsgWakeAll();
-    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+    frame->rax = prev_hwnd;
 }
 
 void DoWinGetFocus(arch::TrapFrame* frame)
@@ -2116,8 +2125,9 @@ void DoWinGetFocus(arch::TrapFrame* frame)
     using namespace duetos::drivers::video;
     CompositorLock();
     const WindowHandle h = WindowGetFocus();
+    const u64 hwnd = WindowPublicHandle(h);
     CompositorUnlock();
-    frame->rax = (h == kWindowInvalid) ? 0 : (static_cast<u64>(h) + 1);
+    frame->rax = hwnd;
 }
 
 void DoWinCaret(arch::TrapFrame* frame)
@@ -2336,6 +2346,19 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
         // Per-panel cap mirrors the menu primitive — anything longer
         // would get silently truncated inside MenuOpen, which is a
         // worse failure mode than a refused syscall.
+        frame->rax = 0;
+        return;
+    }
+
+    // Pin the request to an exact live generation at admission. We retain only
+    // the opaque value and resolve it again before posting WM_COMMAND, so a
+    // destroy/reuse while the popup is open cannot redirect the notification.
+    CompositorLock();
+    const u32 owner_window = HwndToCompositorHandleForCaller(req.hwnd_biased, proc->pid);
+    const u64 owner_hwnd = WindowPublicHandle(owner_window);
+    CompositorUnlock();
+    if (owner_hwnd == 0 || owner_hwnd != req.hwnd_biased)
+    {
         frame->rax = 0;
         return;
     }
@@ -2590,7 +2613,6 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
             WindowPostMessage(h_comp, kWmCommand, action, 0);
         }
         CompositorUnlock();
-        WindowMsgWakeAll();
     }
 
     frame->rax = action;

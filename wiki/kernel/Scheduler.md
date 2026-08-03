@@ -146,15 +146,51 @@ terminating task is stashed into the per-CPU
 which runs on the *next* task's stack, after `ContextSwitch` has
 committed the rsp swap and the dying task is provably off-CPU on every
 peer — promotes it to `g_zombies` and wakes the reaper.
-`SchedFinishTaskSwitch` is the **single** zombie-publish site; both
-termination paths funnel through the slot:
+`SchedFinishTaskSwitch` is the **single** zombie-publish site. Every
+termination path first reaches **`SchedExit`**, the only cooperative,
+`[[noreturn]]` transition to `Dead`, and then funnels through the per-CPU
+slot. Policy cancellation never makes a foreign task dead inside `Schedule`
+or a kill syscall: it atomically publishes one stable reason, detaches only a
+result-bearing cancellable wait, and lets the target unwind its own C++ frames
+at a syscall/trap/bootstrap boundary. Ordinary kernel waits stay queued until
+their natural wake, and every `process == nullptr` kernel task is protected
+from the public cancellation surface.
 
-- **`SchedExit`** — cooperative/`[[noreturn]]` exit.
-- **`Schedule()`'s `kill_requested` branch** — budget-/policy-kill
-  (`FlagCurrentForKill`: tick-budget, sandbox-denial, fs-write-rate,
-  fault-react, canary). This path historically pushed to `g_zombies`
-  inline (before its `ContextSwitch`) and was the residual UAF the
-  2026-05-22 SMP=8 fix missed; it now uses the same deferred slot.
+User tasks begin with a bootstrap deferral. Their entry function must consume
+and free any heap descriptor before the ring-3 entry stub calls
+`SchedUserBootstrapComplete`; only that hook may remove the initial deferral.
+Nested native/Linux dispatch guards add a depth, so retained references and
+RAII scopes unwind before pending cancellation reaches `SchedExit`. Internal
+`sched::Mutex` ownership also defers finalization until normal release;
+user-visible `KMutex` ownership instead carries a reaper ledger and publishes
+one `WAIT_ABANDONED` hand-off after the dead owner is off-CPU.
+
+Process lookups use the all-tasks registry as their lifetime anchor, including
+Blocked and Dead-but-unreaped tasks. `SchedFindProcessByKeyRetained` validates
+the immutable `{identity, pid}` key, matches both components under
+`g_sched_lock`, and takes the caller-owned Process reference before releasing
+that lock. It never falls back to PID-only matching; invalid, stale, and
+already-unlinked incarnations return `nullptr`.
+
+Job membership and process exit share one publication order. The scheduler
+lifetime lock is always the outer lock and the Job lock is lower: assignment,
+inherited first-Task publication, and termination enter Job state only while
+`g_sched_lock` keeps the exact `ProcessKey` incarnation stable. A child is
+prepared as a pending Job member before it becomes externally visible and is
+committed only after the external publication gate succeeds; that gate runs
+with no Job lock held. `TerminateJobObject` copies exact member keys into a
+pinned intent, then requests each process-wide kill with one atomic ticket
+that contains both `JobTermination` and the caller's exact `DWORD` exit code.
+
+The first process-wide close wins `Open -> Closed` under `g_sched_lock` and
+publishes its exit code once. At the exact last-Task unlink, the scheduler uses
+the last Task's ticket only as a fallback, transitions `Published -> Exiting`,
+and calls `JobOnProcessExit` before releasing the scheduler lock. Unlocked
+runtime teardown publishes lifecycle `Exited` afterward. Consequently class-0
+`NtQueryInformationProcess` reports `STILL_ACTIVE` until `Exited`, then the
+durable code, while a Job remains `Terminating` until every exact member exit
+has been observed. Closing the last Job handle marks retirement pending but
+does not remove live membership.
 
 Three permanent guards stand on the resume/reap path: a resume-context
 validator before every `ContextSwitch` (rejects a `next` that is `Dead`
@@ -313,11 +349,16 @@ invariants:
   expires.
 - `WaitQueue::Block` enqueues the current task on a queue and yields;
   `WaitQueue::WakeOne` / `WakeAll` move tasks back to the runqueue.
-- `Mutex` is implemented over `WaitQueue` — uncontended fast path is
-  a CAS, contended path blocks on the queue.
+- `Mutex` serializes ownership and waiter handoff under the scheduler lock;
+  contended callers block on its wait queue. User-visible `KMutex` ownership
+  is a separate abandonable object contract.
 - `WaitQueueBlockTimeout(deadline_ticks)` couples the two: woken
   whichever fires first (signal vs timeout). Used by driver
   command-completion paths.
+- Every relative sleep/wait duration is clamped to `INT64_MAX` ticks. The
+  scheduler's wrap-safe `TickReached` comparison uses a signed modular
+  difference, so a farther deadline would otherwise look already expired.
+  Absolute `SchedSleepUntil` callers must keep the same half-range contract.
 - **A wait queue woken by a device ISR must be blocked on with a
   timeout — never `WaitQueueBlock`.** The "re-check the condition
   under `arch::Cli`, then block" idiom closes the lost-wakeup race

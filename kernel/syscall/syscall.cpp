@@ -315,6 +315,7 @@ constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
 constexpr u64 kStatusNotImplemented = 0xC0000002ULL;
 constexpr u64 kStatusNoMemory = 0xC0000017ULL;
 constexpr u64 kStatusConflictingAddresses = 0xC0000018ULL;
+constexpr u64 kStatusProcessIsTerminating = 0xC000010AULL;
 
 // Layout the SYS_PROCESS_VM_QUERY caller buffer must conform to.
 // Byte-compatible with the prefix of MEMORY_BASIC_INFORMATION
@@ -388,19 +389,19 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
         // no Process (kernel bug — kernel threads shouldn't be
         // issuing SYS_WRITE via the syscall gate).
         const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        RecordSandboxDenial(kCapSerialConsole);
+        const u64 denial_index = RecordSandboxDenial(kCapSerialConsole);
         // Rate-limit the log line so a hostile burst doesn't
         // flood COM1. Denial is still counted every time — only
         // the visible print is gated — so the threshold kill
         // still fires at the right count.
-        if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+        if (proc != nullptr && ShouldLogDenial(denial_index))
         {
             arch::SerialWrite("[sys] denied syscall=SYS_WRITE pid=");
             arch::SerialWriteHex(pid);
             arch::SerialWrite(" cap=");
             arch::SerialWrite(CapName(kCapSerialConsole));
             arch::SerialWrite(" denial_idx=");
-            arch::SerialWriteHex(proc->sandbox_denials);
+            arch::SerialWriteHex(denial_index);
             arch::SerialWrite("\n");
         }
         return kSysErrnoEACCES;
@@ -443,6 +444,48 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
     return static_cast<i64>(to_copy);
 }
 
+// Move-only owner of one exact temporary Section operation pin acquired from
+// a process handle row. Mapping and user-copy paths have many early returns;
+// keeping the pin scoped prevents a stale close from freeing the pool entry
+// mid-operation or leaking the temporary retain on an error leg.
+class ScopedSectionRef final
+{
+  public:
+    explicit ScopedSectionRef(subsystems::win32::section::SectionKey key) : m_key(key) {}
+    ~ScopedSectionRef() { subsystems::win32::section::SectionRelease(m_key); }
+
+    ScopedSectionRef(const ScopedSectionRef&) = delete;
+    ScopedSectionRef& operator=(const ScopedSectionRef&) = delete;
+
+    [[nodiscard]] subsystems::win32::section::SectionKey Get() const { return m_key; }
+
+  private:
+    subsystems::win32::section::SectionKey m_key;
+};
+
+// Roll back a view that was published before a user-result copy faulted. The
+// row claim is the exclusive ownership token: exact unmap success consumes the
+// view reference and Finish clears the row; mismatch restores the row so exit
+// teardown still owns that reference and mapping.
+bool RollbackPublishedSectionView(Process* target, const Process::Win32SectionViewReservation& reservation,
+                                  subsystems::win32::section::SectionKey key, u64 base_va)
+{
+    Process::Win32SectionViewClaim claim{};
+    if (!ProcessClaimWin32SectionViewExact(target, reservation, key, base_va, &claim))
+        return false;
+
+    if (!subsystems::win32::section::SectionUnmapAndReleaseView(claim.key, target->as, claim.base_va))
+    {
+        const bool restored = ProcessRestoreWin32SectionView(target, claim);
+        KASSERT(restored, "syscall", "Section rollback failed to restore claimed view row");
+        return false;
+    }
+
+    const bool finished = ProcessFinishWin32SectionView(target, claim);
+    KASSERT(finished, "syscall", "Section rollback failed to finish consumed view row");
+    return true;
+}
+
 } // namespace
 
 void SyscallInit()
@@ -470,6 +513,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
         KLOG_ONCE_WARN("syscall", "SyscallDispatch called with null TrapFrame");
         return;
     }
+    // Construct first so it destructs last: every handler-local reference,
+    // VM transaction, and syscall-trail guard must unwind before a pending
+    // task exit can publish Dead and orphan this kernel stack.
+    sched::ScopedTaskCancellationDeferral cancellation_guard;
     const u64 num = frame->rax;
     // KPath: bump the per-syscall hit counter before any handler-
     // specific logic runs. Cheap (single bounds check + relaxed
@@ -563,16 +610,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 LogWithValue(LogLevel::Warn, "win32-32miss", "ret", ret32);
             }
         }
-        // Batch 59: if the exiting task owns a Win32 thread-handle
-        // slot in its Process, record the exit code there so
-        // GetExitCodeThread on that handle can return a real
-        // value instead of STILL_ACTIVE.
-        Process* proc = CurrentProcess();
-        sched::Task* self = sched::CurrentTask();
-        if (proc != nullptr && self != nullptr)
-        {
-            ProcessPublishWin32ThreadExit(proc, sched::TaskId(self), static_cast<u32>(code & 0xFFFFFFFFu));
-        }
+        // The scheduler binds this exact DWORD to the first cancellation
+        // reason in one atomic ticket. SchedExit publishes that winner to the
+        // Win32 thread row; the last Task also supplies the Process fallback
+        // only when no process-wide close selected a result first.
         // GAP: DLL_THREAD_DETACH not dispatched — revisit when DLL_PROCESS_ATTACH dispatch lands
         // (dll_loader.h notes ATTACH as "not in scope yet"; sending DETACH without ATTACH
         // would violate the DllMain sequencing contract and break correctly-written DLLs).
@@ -580,12 +621,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // that calls each DllMain(hModule, DLL_THREAD_DETACH, NULL), redirect the trap
         // frame through it, and have the trampoline re-issue SYS_EXIT on completion.
 
-        // SchedExit is [[noreturn]] — it marks the current task Dead,
-        // wakes the reaper, and Schedule()s away forever. The trap
-        // frame on this task's kernel stack becomes orphaned and
-        // will be KFree'd by the reaper along with the stack itself.
-        sched::SchedExit();
-        DEBUG_UNREACHABLE("syscall", "SYS_EXIT returned from SchedExit");
+        frame->rax = 0;
+        sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit, static_cast<u32>(code));
+        return;
     }
 
     case SYS_GETPID:
@@ -658,13 +696,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* caller = CurrentProcess();
         if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
-            RecordSandboxDenial(kCapDebug);
-            if (caller != nullptr && ShouldLogDenial(caller->sandbox_denials))
+            const u64 denial_index = RecordSandboxDenial(kCapDebug);
+            if (caller != nullptr && ShouldLogDenial(denial_index))
             {
                 arch::SerialWrite("[sys] denied syscall=SYS_PROCESS_OPEN pid=");
                 arch::SerialWriteHex(caller->pid);
                 arch::SerialWrite(" cap=Debug denial_idx=");
-                arch::SerialWriteHex(caller->sandbox_denials);
+                arch::SerialWriteHex(denial_index);
                 arch::SerialWrite("\n");
             }
             frame->rax = 0;
@@ -711,6 +749,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
             return;
         }
         const u64 target_va = frame->rsi;
@@ -762,6 +806,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
             return;
         }
         const u64 probe_va = frame->rsi;
@@ -1349,9 +1399,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_PROCESS_TERMINATE:
     {
         // rdi = ProcessHandle (NtCurrentProcess() = -1 for self),
-        // rsi = exit status. Self path bypasses the handle table
-        // and goes straight to SchedExit; foreign path requires
-        // kCapDebug.
+        // rsi = exit status. Self path bypasses the handle table and closes
+        // the whole Process through the cooperative scheduler path; foreign
+        // termination requires kCapDebug.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
@@ -1359,20 +1409,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 handle = frame->rdi;
+        const u32 exit_code = static_cast<u32>(frame->rsi);
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         if (handle == kCurrentProcess)
         {
             // Self-terminate. Whole-process semantics: kill every
             // sibling task in this Process before the calling
-            // task exits, so a multi-threaded PE that calls
+            // task requests exit, so a multi-threaded PE that calls
             // NtTerminateProcess(NtCurrentProcess()) actually
             // brings the whole task group down rather than just
             // the caller. The kill return value is intentionally
-            // dropped: we are about to SchedExit() ourselves, and
+            // dropped: the outer cancellation boundary exits this task, and
             // any error path through "failed to kill a sibling"
             // would have no caller left to receive it.
-            (void)sched::SchedKillByProcess(caller);
-            sched::SchedExit();
+            sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit, exit_code);
+            (void)sched::SchedKillByProcess(caller, exit_code);
+            frame->rax = kStatusSuccess;
+            return;
         }
         if (!ProcessHasCap(caller, kCapDebug))
         {
@@ -1387,7 +1440,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidHandle;
             return;
         }
-        const u64 killed = sched::SchedKillByProcess(target);
+        const u64 killed = sched::SchedKillByProcess(target, exit_code);
         frame->rax = killed; // count of tasks signalled
         return;
     }
@@ -1401,11 +1454,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 handle = frame->rdi;
+        const u32 exit_code = static_cast<u32>(frame->rsi);
         constexpr u64 kCurrentThread = static_cast<u64>(-2);
         if (handle == kCurrentThread)
         {
-            // Self-thread-exit. Same SchedExit path as SYS_EXIT.
-            sched::SchedExit();
+            // Self-thread-exit. Unwind through the same outer boundary as
+            // SYS_EXIT instead of abandoning this dispatcher's live guards.
+            frame->rax = kStatusSuccess;
+            sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit, exit_code);
+            return;
         }
         // LookupThreadHandleTid handles BOTH local thread handles
         // (caller->win32_threads[]) and foreign-process thread
@@ -1428,7 +1485,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidHandle;
             return;
         }
-        const sched::KillResult r = sched::SchedKillByPid(target_tid);
+        const sched::KillResult r = sched::SchedKillByPid(target_tid, exit_code);
         if (r == sched::KillResult::Signaled)
         {
             frame->rax = kStatusSuccess;
@@ -1572,7 +1629,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 u64 inherited_from_pid;
             };
             ProcessBasicInfo info{};
-            info.exit_status = 0; // STILL_ACTIVE (0x103) rounded to 0; running processes always 0
+            info.exit_status = core::ProcessWin32ExitCodeSnapshot(target);
             info.peb_base = target->user_gs_base;
             info.affinity_mask = 1; // single-CPU v0
             info.base_priority = 8; // NORMAL_PRIORITY_CLASS midpoint
@@ -1606,7 +1663,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             KernelUserTimes info{};
             info.create_time = 0;
             info.exit_time = 0;
-            info.kernel_time = static_cast<i64>(target->ticks_used * kHundredNsPerTick);
+            info.kernel_time = static_cast<i64>(ProcessTicksUsedSnapshot(target) * kHundredNsPerTick);
             info.user_time = 0;
             WriteInfo(&info, sizeof(info));
             return;
@@ -1633,6 +1690,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
         case kProcessHandleCount:
         {
+            ScopedProcessRuntimeAccess target_runtime(target);
+            if (!target_runtime)
+            {
+                frame->rax = kStatusProcessIsTerminating;
+                return;
+            }
             // A ULONG (4 bytes). Count of kernel-tracked handles open in this
             // process. We walk the three per-process handle surfaces:
             //   1. kobj_handles (unified KObject table: mutexes, events, sems).
@@ -1640,17 +1703,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
             //   3. Other per-type arrays counted when in-use.
             u32 count = 0;
             // Unified KObject table.
-            for (u32 i = 0; i < ::duetos::ipc::kHandleTableCapacity; ++i)
-            {
-                if (target->kobj_handles.slots[i].obj != nullptr)
-                    ++count;
-            }
-            // Win32 file handles.
-            for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-            {
-                if (target->win32_handles[i].kind != Process::FsBackingKind::None)
-                    ++count;
-            }
+            count += ::duetos::ipc::HandleTableLiveCount(target->kobj_handles);
+            // Published Win32 file handles (generation-valid, table-locked).
+            count += ProcessWin32FileHandleCount(target);
             // Win32 process handles (serialized with close/open).
             count += ProcessWin32ProcessHandleCount(target);
             // Win32 registry handles.
@@ -1665,12 +1720,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 if (target->win32_dirs[i].in_use)
                     ++count;
             }
-            // Win32 section handles.
-            for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
-            {
-                if (target->win32_section_handles[i].in_use)
-                    ++count;
-            }
+            // Published Win32 Section handles (generation-valid, table-locked).
+            count += ProcessWin32SectionHandleCount(target);
             // Local + foreign thread handles are counted under their
             // shared lifecycle lock.
             count += ProcessWin32ThreadHandleCount(target);
@@ -1826,12 +1877,24 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidParameter;
             return;
         }
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
+            return;
+        }
         const u64 page_size = mm::kPageSize;
         const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
         u64 base_va = hint_va;
         if (base_va == 0)
         {
-            base_va = target->linux_mmap_cursor;
+            // Claim before any mapping work. Failed mappings leave a gap, but
+            // concurrent VM/Section calls can never receive the same range.
+            if (!ProcessReserveMmapRange(target, aligned_size, &base_va))
+            {
+                frame->rax = kStatusNoMemory;
+                return;
+            }
         }
         else
         {
@@ -1847,36 +1910,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidParameter;
             return;
         }
-        // SEC-003: Reject any range that overlaps an already-mapped page
-        // BEFORE installing a single frame. AddressSpaceMapUserPage PanicAs
-        // on a present PTE (address_space.cpp), so without this probe a
-        // caller can drive a kernel halt by re-allocating over a live page
-        // — including a Win32 borrowed-section view whose present PTE is not
-        // in the regions ledger. Probe the ACTUAL PTE (AddressSpaceProbePte
-        // walks the page tables) rather than the ledger-only lookup so every
-        // page that would make MapUserPage panic is caught here.
-        for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
+        // Reserve the entire range before installing a frame. The AS-scoped,
+        // non-reused token excludes ordinary VM_FREE/remap and makes every
+        // failure rollback exact even if sibling tasks race this syscall.
+        mm::AddressSpaceReservationToken allocation_token{};
+        if (!mm::AddressSpaceReserveUserRange(target->as, base_va, base_va + aligned_size, &allocation_token))
         {
-            if (mm::AddressSpaceProbePte(target->as, va) != mm::kNullFrame)
-            {
-                frame->rax = kStatusConflictingAddresses;
-                return;
-            }
+            frame->rax = kStatusConflictingAddresses;
+            return;
         }
         for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
         {
             const mm::PhysAddr fp = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (fp == mm::kNullFrame)
             {
-                // SEC-003: Unwind the pages mapped so far. Without this the
-                // installed frames stay mapped at [base_va, va) AND the
-                // cursor below is not advanced, so the NEXT zero-hint alloc
-                // hands out the same base and AddressSpaceMapUserPage panics
-                // on "virt already mapped" — an unprivileged caller turns OOM
-                // into a kernel halt. Mirrors the Linux DoMmap unwind idiom
-                // (kernel/subsystems/linux/syscall_mm.cpp).
-                for (u64 j = base_va; j < va; j += page_size)
-                    (void)mm::AddressSpaceUnmapUserPage(target->as, j);
+                const bool released = mm::AddressSpaceReleaseUserReservation(target->as, allocation_token, base_va,
+                                                                             base_va + aligned_size);
+                KASSERT(released, "syscall", "VM allocation OOM lost exact reservation");
                 frame->rax = kStatusNoMemory;
                 return;
             }
@@ -1884,36 +1934,45 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u8* kva = static_cast<u8*>(mm::PhysToVirt(fp));
             for (u64 i = 0; i < page_size; ++i)
                 kva[i] = 0;
-            // GS-02 (CWE-401): MapUserPage returns false for recoverable
+            // GS-02 (CWE-401): MapReservedUserPage returns false for recoverable
             // budget/table/page-table resource refusal. The SEC-003
             // pre-screen proved this VA was absent; a failed result means
             // the frame remains caller-owned and the allocation must unwind.
-            if (!mm::AddressSpaceMapUserPage(target->as, va, fp, mm::kPagePresent | pte_flags))
+            if (!mm::AddressSpaceMapReservedUserPage(target->as, allocation_token, va, fp,
+                                                     mm::kPagePresent | pte_flags))
             {
                 mm::FreeFrame(fp);
-                for (u64 j = base_va; j < va; j += page_size)
-                    (void)mm::AddressSpaceUnmapUserPage(target->as, j);
+                const bool released = mm::AddressSpaceReleaseUserReservation(target->as, allocation_token, base_va,
+                                                                             base_va + aligned_size);
+                KASSERT(released, "syscall", "VM allocation map failure lost exact reservation");
                 frame->rax = kStatusNoMemory;
                 return;
             }
         }
-        if (hint_va == 0)
-            target->linux_mmap_cursor = base_va + aligned_size;
         if (user_out != 0)
         {
-            if (!mm::CopyToUser(reinterpret_cast<void*>(user_out), &base_va, sizeof(base_va)))
+            const UserAbiWordStatus copy_status =
+                ProcessCopyUserAbiWordTo(caller, reinterpret_cast<void*>(user_out), base_va);
+            if (copy_status != UserAbiWordStatus::Ok)
             {
-                // NtAllocateVirtualMemory contract: *BaseAddress is
-                // set on STATUS_SUCCESS. If the user output pointer
-                // faulted, the caller has no way to find or free the
-                // region we just allocated — that's a leak masquerading
-                // as success. Surface the fault so the caller at least
-                // knows something went wrong; the leak itself is
-                // accepted (the region will be reclaimed when the
-                // process exits).
-                frame->rax = kStatusAccessViolation;
+                const bool released = mm::AddressSpaceReleaseUserReservation(target->as, allocation_token, base_va,
+                                                                             base_va + aligned_size);
+                KASSERT(released, "syscall", "VM result delivery lost exact reservation");
+                // The ABI-sized result is part of the allocation transaction.
+                // If delivery fails, exact unmap above returns every mapped
+                // frame instead of stranding an undiscoverable live region.
+                frame->rax =
+                    copy_status == UserAbiWordStatus::ValueTooWide ? kStatusInvalidParameter : kStatusAccessViolation;
                 return;
             }
+        }
+        if (!mm::AddressSpaceCommitUserReservation(target->as, allocation_token, base_va, base_va + aligned_size))
+        {
+            const bool released =
+                mm::AddressSpaceReleaseUserReservation(target->as, allocation_token, base_va, base_va + aligned_size);
+            KASSERT(released, "syscall", "VM allocation commit lost exact reservation");
+            frame->rax = kStatusNoMemory;
+            return;
         }
         frame->rax = kStatusSuccess;
         return;
@@ -1969,6 +2028,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (aligned_base > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - aligned_base))
         {
             frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
             return;
         }
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
@@ -2049,6 +2114,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (aligned_base > kVmUserMax || aligned_size == 0 || (aligned_size - 1) > (kVmUserMax - aligned_base))
         {
             frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
             return;
         }
         u32 first_old_protect = 0x04; // best-effort: PAGE_READWRITE
@@ -2207,6 +2278,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
+        // Exclude every VM/Section transaction targeting this Process from
+        // the single-task check through new-image publication. A foreign
+        // kCapDebug caller can retain the Process while exec runs; without
+        // this outer lock it could leave an AS reservation live exactly when
+        // AddressSpaceClearUserMappings asserts that none exist.
+        ScopedProcessVmTransaction vm_transaction(caller);
+
         // Refuse exec in a multithreaded process, for EVERY ABI.
         //
         // AddressSpaceClearUserMappings below unmaps the whole user half of
@@ -2222,7 +2300,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Sibling teardown does not exist yet, so fail closed rather than
         // race. Checked before the point of no return, and the read buffer is
         // freed on this path.
-        if (sched::SchedCountTasksForProcess(caller) != 1)
+        if (!sched::SchedProcessReadyForExec(caller))
+        {
+            mm::KFree(buf);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Owned mappings can be replaced in-place, but borrowed Section and
+        // SysV SHM PTEs belong to independent lifetime ledgers. The generic AS
+        // clear intentionally leaves them mapped. Refuse before the commit
+        // point instead of launching a mixed old/new image or orphaning the
+        // owner's view/attach records.
+        if (ProcessHasBorrowedUserMappings(caller))
         {
             mm::KFree(buf);
             frame->rax = static_cast<u64>(-1);
@@ -2248,8 +2338,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         LinuxFdCloseOnExec(caller);
 
         // Tear down Task-owned stack authority before the generic AS
-        // clear. SchedCountTasksForProcess above proves this is the only
-        // Task that could own a reservation in the shared AS. The drop
+        // clear. SchedProcessReadyForExec above proves this is the only Task
+        // that could own a reservation in the shared AS. The drop
         // makes the descriptor unreachable under the scheduler lock, then
         // releases its exact token outside that spinlock. If ElfLoad fails,
         // SchedExit sees an ownership-free Task and cannot double-release.
@@ -2258,7 +2348,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         caller->stack = {};
 
         // Tear down the remaining AS user mappings, then ElfLoad into the
-        // same AS. Past this point any failure is fatal - the caller's
+        // same AS. Past this point any failure is fatal — the caller's
         // old address space and stack authority are already gone.
         mm::AddressSpaceClearUserMappings(caller->as);
         const core::ElfLoadResult r = core::ElfLoad(buf, e.size_bytes, caller->as);
@@ -2273,7 +2363,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // past with no ring-buffer record).
             KLOG_ERROR_V("syscall/execve", "ElfLoad failed past point of no return — terminating task (pid)",
                          caller->pid);
-            sched::SchedExit();
+            vm_transaction.Unlock();
+            frame->rax = static_cast<u64>(-1);
+            sched::SchedRequestCurrentExit(sched::KillReason::ProtocolViolation);
+            return;
         }
 
         // Reset the trap frame so iretq lands at the new entry.
@@ -2920,32 +3013,31 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         const u64 size_bytes = frame->rdi;
         const u32 page_protect = static_cast<u32>(frame->rsi);
-        const i32 pool_idx = subsystems::win32::section::SectionCreate(size_bytes, page_protect);
-        if (pool_idx < 0)
+        Process::Win32SectionHandleReservation reservation{};
+        if (!ProcessReserveWin32SectionHandle(caller, &reservation))
         {
             frame->rax = 0;
             return;
         }
-        u64 handle_idx = Process::kWin32SectionCap;
-        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+
+        subsystems::win32::section::SectionKey key{};
+        if (!subsystems::win32::section::SectionCreate(caller->resource_domain, size_bytes, page_protect, &key))
         {
-            if (!caller->win32_section_handles[i].in_use)
-            {
-                handle_idx = i;
-                break;
-            }
-        }
-        if (handle_idx == Process::kWin32SectionCap)
-        {
-            // Section allocated but no handle slot; release it
-            // so we don't leak the frames + pool entry.
-            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            ProcessAbortWin32SectionHandle(caller, reservation);
             frame->rax = 0;
             return;
         }
-        caller->win32_section_handles[handle_idx].in_use = true;
-        caller->win32_section_handles[handle_idx].pool_index = static_cast<u32>(pool_idx);
-        frame->rax = Process::kWin32SectionBase + handle_idx;
+
+        u64 handle = 0;
+        if (!ProcessPublishWin32SectionHandle(caller, reservation, key, &handle))
+        {
+            // Publish did not adopt the freshly-created reference.
+            subsystems::win32::section::SectionRelease(key);
+            ProcessAbortWin32SectionHandle(caller, reservation);
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = handle;
         return;
     }
 
@@ -2969,12 +3061,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 size_user_ptr = frame->r10;
         const u32 view_protect = static_cast<u32>(frame->r8);
 
-        const i32 pool_idx = subsystems::win32::section::LookupSectionHandle(caller, section_handle);
-        if (pool_idx < 0)
+        subsystems::win32::section::SectionKey section_key{};
+        if (!ProcessAcquireWin32SectionHandle(caller, section_handle, &section_key))
         {
             frame->rax = kStatusInvalidHandle;
             return;
         }
+        ScopedSectionRef section_ref(section_key);
 
         ScopedProcessRef target_ref;
         Process* target = caller;
@@ -2997,31 +3090,53 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
 
         u64 hint_va = 0;
-        if (base_user_ptr != 0 &&
-            !mm::CopyFromUser(&hint_va, reinterpret_cast<const void*>(base_user_ptr), sizeof(hint_va)))
+        if (base_user_ptr != 0 && ProcessCopyUserAbiWordFrom(caller, reinterpret_cast<const void*>(base_user_ptr),
+                                                             &hint_va) != UserAbiWordStatus::Ok)
         {
             frame->rax = kStatusAccessViolation;
             return;
         }
 
-        // Pick a base VA. v0: caller-supplied hint must be
-        // page-aligned and non-overlapping; if 0 (or hint
-        // collides), bump-allocate from the calling process's
-        // mmap arena. Cross-process maps with hint == 0 use
-        // the TARGET's mmap cursor.
-        u64 base_va = (hint_va & ~0xFFFULL);
-        if (base_va == 0)
+        if (hint_va != 0 && (hint_va & (mm::kPageSize - 1)) != 0)
         {
-            base_va = target->linux_mmap_cursor;
+            frame->rax = kStatusInvalidParameter;
+            return;
         }
 
-        // Reject out-of-range base_va before SectionMap drives
-        // AddressSpaceMapBorrowedPage past its kUserMax panic gate.
+        const u64 view_size_pre = subsystems::win32::section::SectionViewSize(section_ref.Get());
+        if (view_size_pre == 0 ||
+            !subsystems::win32::section::SectionViewProtectionIsCompatible(section_ref.Get(), view_protect))
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
+            return;
+        }
+
+        // A non-zero hint is exact. A zero hint atomically claims a disjoint
+        // range from the TARGET process before mapping; later refusal leaves
+        // a harmless gap instead of allowing another task to reuse the VA.
+        u64 base_va = hint_va;
+        if (base_va == 0)
+        {
+            if (!ProcessReserveMmapRange(target, view_size_pre, &base_va))
+            {
+                frame->rax = kStatusNoMemory;
+                return;
+            }
+        }
+
+        // Reject out-of-range base_va before SectionMapAndRetainView drives
+        // AddressSpaceMapBorrowedRange past its kUserMax panic gate.
         // Without this an unprivileged caller with a section handle
         // could DoS the kernel by passing a kernel-half hint.
-        const u64 view_size_pre = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
         constexpr u64 kSectionUserMax = 0x00007FFFFFFFFFFFULL;
-        if (view_size_pre == 0 || base_va > kSectionUserMax || (view_size_pre - 1) > (kSectionUserMax - base_va))
+        if (base_va > kSectionUserMax || (view_size_pre - 1) > (kSectionUserMax - base_va))
         {
             frame->rax = kStatusInvalidParameter;
             return;
@@ -3031,67 +3146,57 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Every retained view must be recorded in the TARGET
         // process, because the reference this map takes on the
         // section pool is dropped by exactly two things:
-        // SYS_SECTION_UNMAP, or ProcessRelease draining this table.
+        // SYS_SECTION_UNMAP, or Process runtime teardown draining this table.
         // An untracked view would strand the section's frames for
         // the rest of the boot — AS teardown cannot see them, since
         // section views are borrowed pages with no AS region entry.
         // Refusing the map is the honest failure: the alternative
         // is a silent, unreclaimable leak out of a global pool of
         // only 8 sections.
-        u64 view_idx = Process::kWin32SectionCap;
-        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
-        {
-            if (!target->win32_section_views[i].in_use)
-            {
-                view_idx = i;
-                break;
-            }
-        }
-        if (view_idx == Process::kWin32SectionCap)
+        Process::Win32SectionViewReservation view_reservation{};
+        if (!ProcessReserveWin32SectionView(target, &view_reservation))
         {
             KLOG_ONCE_WARN("syscall", "NtMapViewOfSection: target's section-view table full");
             frame->rax = kStatusNoMemory;
             return;
         }
 
-        if (!subsystems::win32::section::SectionMap(static_cast<u32>(pool_idx), target->as, base_va, view_protect))
+        if (!subsystems::win32::section::SectionMapAndRetainView(section_ref.Get(), target->as, base_va, view_protect))
         {
+            ProcessAbortWin32SectionView(target, view_reservation);
             frame->rax = kStatusConflictingAddresses;
             return;
         }
-        subsystems::win32::section::SectionRetain(static_cast<u32>(pool_idx));
-        target->win32_section_views[view_idx].in_use = true;
-        target->win32_section_views[view_idx].pool_index = static_cast<u32>(pool_idx);
-        target->win32_section_views[view_idx].base_va = base_va;
-
-        const u64 view_size = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
-        if (base_va == target->linux_mmap_cursor)
+        if (!ProcessPublishWin32SectionView(target, view_reservation, section_ref.Get(), base_va))
         {
-            target->linux_mmap_cursor += view_size;
+            // The retained target and private reservation make this
+            // unreachable unless the row state is corrupt. Roll back the
+            // exact mapping before returning; never release frames under PTEs.
+            const bool unmapped =
+                subsystems::win32::section::SectionUnmapAndReleaseView(section_ref.Get(), target->as, base_va);
+            KASSERT(unmapped, "syscall", "Section view publish failed and exact rollback mismatched");
+            ProcessAbortWin32SectionView(target, view_reservation);
+            frame->rax = kStatusNoMemory;
+            return;
         }
 
-        if (base_user_ptr != 0 && !mm::CopyToUser(reinterpret_cast<void*>(base_user_ptr), &base_va, sizeof(base_va)))
+        const u64 view_size = view_size_pre;
+
+        if (base_user_ptr != 0 &&
+            ProcessCopyUserAbiWordTo(caller, reinterpret_cast<void*>(base_user_ptr), base_va) != UserAbiWordStatus::Ok)
         {
             // Map installed but caller can't see the base —
             // tear it down so we don't leak the view. The view
             // record has to go with it, or the exit drain would
             // release a second, unmatched reference.
-            target->win32_section_views[view_idx].in_use = false;
-            target->win32_section_views[view_idx].pool_index = 0;
-            target->win32_section_views[view_idx].base_va = 0;
-            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
-            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            (void)RollbackPublishedSectionView(target, view_reservation, section_ref.Get(), base_va);
             frame->rax = kStatusAccessViolation;
             return;
         }
-        if (size_user_ptr != 0 &&
-            !mm::CopyToUser(reinterpret_cast<void*>(size_user_ptr), &view_size, sizeof(view_size)))
+        if (size_user_ptr != 0 && ProcessCopyUserAbiWordTo(caller, reinterpret_cast<void*>(size_user_ptr), view_size) !=
+                                      UserAbiWordStatus::Ok)
         {
-            target->win32_section_views[view_idx].in_use = false;
-            target->win32_section_views[view_idx].pool_index = 0;
-            target->win32_section_views[view_idx].base_va = 0;
-            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
-            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            (void)RollbackPublishedSectionView(target, view_reservation, section_ref.Get(), base_va);
             frame->rax = kStatusAccessViolation;
             return;
         }
@@ -3101,15 +3206,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_SECTION_UNMAP:
     {
-        // NtUnmapViewOfSection(ProcessHandle, BaseAddress).
-        // v0 unmaps every section view that starts exactly at
-        // `base_va` in the target's AS — we don't track which
-        // section a given VA belongs to, so the unmap walks
-        // every live section pool entry and asks each one to
-        // unmap (the borrowed-PTE clear is idempotent on
-        // already-unmapped pages, and SectionUnmap returns
-        // false if any page was missing → we accept the first
-        // one whose every page WAS mapped).
+        // NtUnmapViewOfSection(ProcessHandle, BaseAddress). The target's view
+        // row is authoritative: claim its exact SectionKey + base pair before
+        // touching the AS. No VA probing or global pool scan is permitted.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
@@ -3142,27 +3241,29 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 return;
             }
         }
-        const i32 hit = subsystems::win32::section::SectionUnmapAtVa(target->as, base_va);
-        if (hit < 0)
+        ScopedProcessRuntimeAccess target_runtime(target);
+        if (!target_runtime)
+        {
+            frame->rax = kStatusProcessIsTerminating;
+            return;
+        }
+        Process::Win32SectionViewClaim claim{};
+        if (!ProcessClaimWin32SectionView(target, base_va, &claim))
         {
             frame->rax = kStatusInvalidParameter;
             return;
         }
-        // Retire the target's view record for this (section, VA)
-        // pair so the exit drain in ProcessRelease doesn't release
-        // a second, unmatched reference on the same view.
-        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+
+        if (!subsystems::win32::section::SectionUnmapAndReleaseView(claim.key, target->as, claim.base_va))
         {
-            auto& view = target->win32_section_views[i];
-            if (view.in_use && view.pool_index == static_cast<u32>(hit) && view.base_va == base_va)
-            {
-                view.in_use = false;
-                view.pool_index = 0;
-                view.base_va = 0;
-                break;
-            }
+            const bool restored = ProcessRestoreWin32SectionView(target, claim);
+            KASSERT(restored, "syscall", "Section unmap failed to restore claimed view row");
+            frame->rax = kStatusInvalidParameter;
+            return;
         }
-        subsystems::win32::section::SectionRelease(static_cast<u32>(hit));
+
+        const bool finished = ProcessFinishWin32SectionView(target, claim);
+        KASSERT(finished, "syscall", "Section unmap failed to finish consumed view row");
         frame->rax = kStatusSuccess;
         return;
     }
@@ -3440,8 +3541,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (proc == nullptr || !ProcessHasCap(proc, kCapSerialConsole))
         {
             const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            RecordSandboxDenial(kCapSerialConsole);
-            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            const u64 denial_index = RecordSandboxDenial(kCapSerialConsole);
+            if (proc != nullptr && ShouldLogDenial(denial_index))
             {
                 arch::SerialWrite("[sys] denied syscall=SYS_DEBUG_PRINT pid=");
                 arch::SerialWriteHex(pid);
@@ -3690,52 +3791,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
     }
 
     case SYS_THREAD_WAIT:
-    {
-        const u64 handle = frame->rdi;
-        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
-        Process* proc = CurrentProcess();
-        if (proc == nullptr || handle < Process::kWin32ThreadBase ||
-            handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        // Spectre v1 nospec — see LookupThreadHandleTid for the rationale.
-        const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
-        // Use the explicit completion bit as the authoritative
-        // "thread is done" signal instead of dereferencing
-        // the Task pointer, which the reaper may have KFree'd already
-        // after the task died. The SYS_EXIT path writes the
-        // real exit code under win32_thread_lock before SchedExit
-        // runs. Each poll takes that same lock so an optimized SMP
-        // build cannot retain STILL_ACTIVE after a peer publishes.
-        constexpr u64 kInfinite = 0xFFFFFFFFu;
-        const u64 start = sched::SchedNowTicks();
-        const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : start + ((timeout_ms + 9) / 10);
-        for (;;)
-        {
-            bool exited = false;
-            if (!ReadLocalThreadState(proc, slot, nullptr, &exited))
-            {
-                frame->rax = static_cast<u64>(-1); // WAIT_FAILED / closed handle
-                return;
-            }
-            if (exited)
-            {
-                frame->rax = 0; // WAIT_OBJECT_0
-                return;
-            }
-            if (timeout_ms != kInfinite && sched::SchedNowTicks() >= deadline)
-            {
-                frame->rax = 0x102; // WAIT_TIMEOUT
-                return;
-            }
-            if (timeout_ms == kInfinite)
-                sched::SchedYield();
-            else
-                sched::SchedSleepTicks(1);
-        }
-    }
+        subsystems::win32::DoThreadWait(frame);
+        return;
 
     case SYS_WAIT_MULTI:
     {
@@ -3759,13 +3816,26 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
-        u64 handles[kSyscallWaitMultiMax];
-        for (u64 i = 0; i < kSyscallWaitMultiMax; ++i)
-            handles[i] = 0;
-        if (!mm::CopyFromUser(handles, reinterpret_cast<const void*>(user_handles_va), count * sizeof(u64)))
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
         {
             frame->rax = static_cast<u64>(-1);
             return;
+        }
+        u64 handles[kSyscallWaitMultiMax];
+        for (u64 i = 0; i < kSyscallWaitMultiMax; ++i)
+            handles[i] = 0;
+        const u64 user_handle_width = proc->user_is_pe32 ? sizeof(u32) : sizeof(u64);
+        for (u64 i = 0; i < count; ++i)
+        {
+            const u64 byte_offset = i * user_handle_width;
+            if (user_handles_va > ~0ULL - byte_offset ||
+                ProcessCopyUserAbiWordFrom(proc, reinterpret_cast<const void*>(user_handles_va + byte_offset),
+                                           &handles[i]) != UserAbiWordStatus::Ok)
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
         }
 
         // Poll-and-yield loop. Budget: kMaxIterations iterations of
@@ -3785,14 +3855,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             //   * Anything else: never signaled → contributes FALSE
             u64 signaled_count = 0;
             u64 first_signaled = u64(-1);
-            Process* proc = CurrentProcess();
             for (u64 i = 0; i < count; ++i)
             {
                 const u64 h = handles[i];
                 bool sig = false;
                 if (proc != nullptr)
                 {
-                    if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
+                    ipc::Handle ipc_h = ipc::kHandleInvalid;
+                    if (ipc::HandleDecodeTagged(h, Process::kWin32EventBase, &ipc_h))
                     {
                         // Look up the KEvent through the unified
                         // handle table and peek at signaled state.
@@ -3800,13 +3870,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
                         // going to wake (handled in the consume
                         // pass below, after the whole wait is known
                         // to be satisfied).
-                        const ipc::Handle ipc_h = static_cast<ipc::Handle>(h - Process::kWin32EventBase);
-                        ipc::KObject* obj = ipc::HandleTableLookup(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+                        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h,
+                                                                      ipc::KObjectType::Event, ipc::kHandleRightWait);
                         if (obj != nullptr)
                         {
                             auto* e = reinterpret_cast<ipc::KEvent*>(obj);
                             if (ipc::KEventIsSignaled(e))
                                 sig = true;
+                            ipc::KObjectRelease(obj);
                         }
                     }
                     else if (h >= Process::kWin32ThreadBase && h < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
@@ -3819,22 +3890,21 @@ void SyscallDispatch(arch::TrapFrame* frame)
                         if (ReadLocalThreadState(proc, slot, nullptr, &exited) && exited)
                             sig = true;
                     }
-                    else if (h >= Process::kWin32SemaphoreBase &&
-                             h < Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap)
+                    else if (ipc::HandleDecodeTagged(h, Process::kWin32SemaphoreBase, &ipc_h))
                     {
                         // Semaphores are signaled iff count > 0.
                         // Wait-all via poll doesn't consume the
                         // count — a fully race-free multi-wait is
                         // a future slice. Look up via the unified
                         // handle table.
-                        const ipc::Handle ipc_h = static_cast<ipc::Handle>(h - Process::kWin32SemaphoreBase);
-                        ipc::KObject* obj =
-                            ipc::HandleTableLookup(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
+                        ipc::KObject* obj = ipc::HandleTableLookupRef(
+                            proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore, ipc::kHandleRightWait);
                         if (obj != nullptr)
                         {
                             auto* s = reinterpret_cast<ipc::KSemaphore*>(obj);
                             if (ipc::KSemaphoreCount(s) > 0)
                                 sig = true;
+                            ipc::KObjectRelease(obj);
                         }
                     }
                     // Mutex handles: v0 doesn't try-acquire here —
@@ -3863,16 +3933,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     for (u64 i = 0; i < count; ++i)
                     {
                         const u64 h = handles[i];
-                        if (h < Process::kWin32EventBase || h >= Process::kWin32EventBase + Process::kWin32EventCap)
+                        ipc::Handle ipc_h = ipc::kHandleInvalid;
+                        if (!ipc::HandleDecodeTagged(h, Process::kWin32EventBase, &ipc_h))
                             continue;
                         if (wait_all == 0 && i != first_signaled)
                             continue;
-                        const ipc::Handle ipc_h = static_cast<ipc::Handle>(h - Process::kWin32EventBase);
-                        ipc::KObject* obj = ipc::HandleTableLookup(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
+                        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h,
+                                                                      ipc::KObjectType::Event, ipc::kHandleRightWait);
                         if (obj != nullptr)
                         {
                             auto* e = reinterpret_cast<ipc::KEvent*>(obj);
                             ipc::KEventClearAutoReset(e);
+                            ipc::KObjectRelease(obj);
                         }
                     }
                 }

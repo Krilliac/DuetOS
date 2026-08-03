@@ -22,14 +22,41 @@
 // caller plumbing for it.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use aes::cipher::{generic_array::GenericArray, KeyInit};
 use aes::Aes256;
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use xts_mode::Xts128;
 
 pub const XTS_KEY_BYTES: usize = 64; // 32 data + 32 tweak
 pub const SECTOR_BYTES: usize = 4096; // matches BLOCK_SIZE
+pub const ARGON2_MAX_PASSWORD_BYTES: usize = 1024;
+pub const ARGON2_MAX_SALT_BYTES: usize = 64;
+// The complete kernel heap is 64 MiB. Keep one admitted derivation at
+// or below one eighth of it so unrelated kernel work retains headroom.
+pub const ARGON2_MAX_MEMORY_KIB: u32 = 8 * 1024;
+pub const ARGON2_MAX_TIME_COST: u32 = 10;
+pub const ARGON2_MAX_PARALLELISM: u32 = 4;
+
+static ARGON2_KDF_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct Argon2Admission;
+
+impl Argon2Admission {
+    fn try_acquire() -> Option<Self> {
+        ARGON2_KDF_ACTIVE
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Argon2Admission {
+    fn drop(&mut self) {
+        ARGON2_KDF_ACTIVE.store(false, Ordering::Release);
+    }
+}
 
 /// Build an XTS context from a 64-byte key. The first 32 bytes are
 /// the data-cipher key; the last 32 are the tweak-cipher key.
@@ -76,19 +103,67 @@ pub fn argon2id_kdf(
     p_cost: u32,
     out_key: &mut [u8; XTS_KEY_BYTES],
 ) -> bool {
+    if password.is_empty()
+        || password.len() > ARGON2_MAX_PASSWORD_BYTES
+        || salt.is_empty()
+        || salt.len() > ARGON2_MAX_SALT_BYTES
+        || !argon2id_params_valid(m_cost_kib, t_cost, p_cost)
+    {
+        return false;
+    }
     let params = match Params::new(m_cost_kib, t_cost, p_cost, Some(XTS_KEY_BYTES)) {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    // The argon2 crate's hash_password_into requires a heap-backed
-    // workspace; the alloc feature provides that. For our memory
-    // budgets (4 MiB working set with default params) this is fine
-    // — the kernel heap accommodates it during the brief mount.
-    let mut buf = Vec::from([0u8; XTS_KEY_BYTES]);
-    if argon2.hash_password_into(password, salt, &mut buf).is_err() {
+    // Admission is non-blocking: a concurrent caller fails closed rather
+    // than spinning while another CPU performs an expensive derivation.
+    let Some(_admission) = Argon2Admission::try_acquire() else {
+        return false;
+    };
+
+    let block_count = params.block_count();
+    let mut workspace = Vec::<Block>::new();
+    if workspace.try_reserve_exact(block_count).is_err() {
         return false;
     }
-    out_key.copy_from_slice(&buf);
-    true
+    // Capacity is already reserved fallibly, so resize cannot request a
+    // second allocation and cannot enter the infallible OOM path.
+    workspace.resize(block_count, Block::default());
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    // The caller-owned workspace keeps allocation failure observable
+    // instead of invoking the global allocation-error path.
+    argon2
+        .hash_password_into_with_memory(password, salt, out_key, &mut workspace)
+        .is_ok()
+}
+
+/// Validate costs without allocating. Both the formatter and the KDF
+/// use this gate so hostile on-disk metadata cannot request unbounded
+/// kernel heap or CPU work and invalid costs are never persisted.
+pub fn argon2id_params_valid(m_cost_kib: u32, t_cost: u32, p_cost: u32) -> bool {
+    if m_cost_kib > ARGON2_MAX_MEMORY_KIB || t_cost > ARGON2_MAX_TIME_COST || p_cost > ARGON2_MAX_PARALLELISM {
+        return false;
+    }
+    Params::new(m_cost_kib, t_cost, p_cost, Some(XTS_KEY_BYTES)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argon2_policy_is_bounded_and_keeps_the_default() {
+        assert!(argon2id_params_valid(4096, 3, 1));
+        assert!(!argon2id_params_valid(ARGON2_MAX_MEMORY_KIB + 1, 3, 1));
+        assert!(!argon2id_params_valid(4096, ARGON2_MAX_TIME_COST + 1, 1));
+        assert!(!argon2id_params_valid(4096, 3, ARGON2_MAX_PARALLELISM + 1));
+    }
+
+    #[test]
+    fn argon2_admission_is_nonblocking_and_released() {
+        let first = Argon2Admission::try_acquire().expect("first derivation should be admitted");
+        assert!(Argon2Admission::try_acquire().is_none());
+        drop(first);
+        assert!(Argon2Admission::try_acquire().is_some());
+    }
 }

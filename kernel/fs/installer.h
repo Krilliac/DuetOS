@@ -7,7 +7,7 @@
  * DuetOS — disk installer orchestration, v0.
  *
  * Drives the destructive sequence that turns a blank block device
- * into a DuetOS-bootable layout:
+ * into a DuetOS install/staging layout:
  *
  *   1. Lay down a fresh GPT (PMBR + headers + entries)
  *   2. Format two FAT32 partitions (ESP + system)
@@ -21,6 +21,11 @@
  *      slot on the ESP with read-back validation, and persist the
  *      boot-slot state + generated grub.cfg (`PersistSlotState`)
  *   5. Mount ESP at /esp, system at /system
+ *
+ * This sequence does not install GRUB's BIOS/EFI boot images. The
+ * embedded BOOTX64.EFI is the experimental direct loader and halts
+ * after ELF-header validation. A supported bootable installation still
+ * needs GRUB boot images plus the generated Multiboot2 configuration.
  *
  * When the kernel-ELF embed is OFF, the slot staging is skipped
  * and the operator stages kernel bytes out-of-band (USB /

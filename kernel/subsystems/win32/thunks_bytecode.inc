@@ -982,8 +982,9 @@
     //
     // Win32 handle table lives on Process; SYS_FILE_OPEN /
     // SYS_FILE_READ / SYS_FILE_CLOSE / SYS_FILE_SEEK route in.
-    // Handles returned to user mode are 0x100..0x10F (so they
-    // never collide with INVALID_HANDLE_VALUE = -1).
+    // Handles returned to user mode are positive opaque values: low tag
+    // 0x100..0x10F plus a non-zero generation in bits 12..30, so stale
+    // recycled slots fail and PE32 preserves the complete identity.
 
     // --- CreateFileW (offset 0x2F7, 59 bytes) -----------------
     // Win32: HANDLE CreateFileW(LPCWSTR lpFileName=rcx, DWORD
@@ -1051,10 +1052,10 @@
     0xC3,             // 0x35F ret
 
     // --- CloseHandle (offset 0x360, 15 bytes) -----------------
-    // Win32: BOOL CloseHandle(HANDLE rcx). SYS_FILE_CLOSE
-    // tolerates non-file handles (no-op + return 0), so this
-    // also harmlessly handles the historical no-op CloseHandle
-    // call sites (e.g. CreateEventW pseudo-handles).
+    // Win32: BOOL CloseHandle(HANDLE rcx). SYS_FILE_CLOSE is the
+    // shared close dispatcher for files, generation-tagged KObjects,
+    // and the remaining legacy handle tables. Invalid/stale values
+    // are tolerated as a no-op by this compatibility thunk.
     0x57,                         // 0x360 push rdi
     0x48, 0x89, 0xCF,             // 0x361 mov rdi, rcx
     0xB8, 0x16, 0x00, 0x00, 0x00, // 0x364 mov eax, 22 ; SYS_FILE_CLOSE
@@ -1131,8 +1132,8 @@
     // Win32: HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES rcx,
     // BOOL bInitialOwner=rdx, LPCWSTR lpName=r8).
     // Ignores attrs + name; forwards bInitialOwner to
-    // SYS_MUTEX_CREATE which returns the kWin32MutexBase + slot
-    // pseudo-handle directly.
+    // SYS_MUTEX_CREATE, which returns a positive opaque handle with
+    // the mutex tag+slot in bits 0..11 and generation in bits 12..30.
     0x57,                         // 0x3C3 push rdi
     0x48, 0x89, 0xD7,             // 0x3C4 mov rdi, rdx ; bInitialOwner
     0xB8, 0x19, 0x00, 0x00, 0x00, // 0x3C7 mov eax, 25 ; SYS_MUTEX_CREATE
@@ -1140,7 +1141,9 @@
     0x5F,                         // 0x3CE pop rdi
     0xC3,                         // 0x3CF ret
 
-    // --- WaitForSingleObject (offset 0x3D0, 38 bytes) ---------
+    // --- WaitForSingleObject v1 (offset 0x3D0, 38 bytes) ------
+    // Retired fixed-layout predecessor. No import-table row targets
+    // this block; active kernel32/kernelbase imports use v4 below.
     // Win32: DWORD WaitForSingleObject(HANDLE rcx, DWORD timeout=rdx).
     //
     // Dispatches by handle range:
@@ -1859,6 +1862,8 @@
     0xC3,                         // 0x763 ret
 
     // --- WaitForSingleObject v2 (offset 0x764, 66 bytes) ------
+    // Retired fixed-layout predecessor. No import-table row targets
+    // this block; active kernel32/kernelbase imports use v4 below.
     // Upgraded version of 's WaitForSingleObject that
     // dispatches THREE ranges:
     // * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
@@ -2412,9 +2417,9 @@
     0xC3,                         // 0x9E8 ret
 
     // --- WaitForSingleObject v3 (offset 0x9E9, 94 bytes) ------
-    // v2 + semaphore range (0x500..0x507 → SYS_SEM_WAIT).
-    // Bumps the `kOffWaitForObj2` aliases over to v3 via the
-    // import table so every caller gets semaphore-aware wait.
+    // Retired fixed-layout predecessor. No import-table row targets
+    // this block; active kernel32/kernelbase imports use v4 below.
+    // v3 added semaphore range (0x500..0x507 → SYS_SEM_WAIT).
     0x57,                               // 0x9E9 push rdi
     0x56,                               // 0x9EA push rsi
     0x48, 0x89, 0xC8,                   // 0x9EB mov rax, rcx
@@ -2460,18 +2465,22 @@
     // === =============================================
 
     // --- WaitForSingleObject v4 (offset 0xA47, 122 bytes) -----
-    // v3 + a fourth range (0x400..0x407, thread handles) that
+    // v3 + a fourth type band (0x400, thread handles) that
     // dispatches to SYS_THREAD_WAIT. Now WaitForSingleObject on
     // a CreateThread handle actually blocks until the thread
     // exits rather than the v3 pseudo-signaled fast path.
     //
     // Dispatch order is still "cheapest first": mutex, event,
-    // thread, semaphore. Unknown handles fall through to the
+    // thread, semaphore. Migrated KObject handles carry a non-zero
+    // generation above bit 11; the legacy thread table remains
+    // slot-only. Dispatch isolates the low-12-bit ABI tag for both
+    // shapes while leaving the original full handle in rcx for the
+    // syscall's exact validation. Unknown tags fall through to the
     // pseudo-signaled path for backward compatibility.
     //
-    // Each type's range width is `cmp rax, 64` = kHandleTableCapacity
-    // (handle_table.h). It was 8 originally, which silently mis-routed
-    // any handle past the 8th of its type (e.g. mutex 0x208..0x23F) to
+    // Each type band's range width is `cmp rax, 64` =
+    // kHandleTableCapacity (handle_table.h). It was 8 originally,
+    // which silently mis-routed any handle past the 8th slot to
     // the .pseudo fast-success path: WaitForSingleObject returned
     // WAIT_OBJECT_0 WITHOUT acquiring, so every following ReleaseMutex
     // hit the kernel's non-owner reject — a debug-log flood that
@@ -2479,19 +2488,23 @@
     // landing at 0x205/0x207/0x209/0x20b). The static_assert in
     // thunks.cpp pins this width to the cap. Width (64) stays well below
     // the 0x100 base spacing, so the four ranges remain disjoint.
-    0x57,                               // 0xA47 push rdi
-    0x56,                               // 0xA48 push rsi
-    0x48, 0x89, 0xC8,                   // 0xA49 mov rax, rcx
-    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0xA4C sub rax, 0x200
+    0x57,                   // 0xA47 push rdi
+    0x56,                   // 0xA48 push rsi
+    0x0F, 0xB7, 0xC1,       // 0xA49 movzx eax, cx ; retain handle's low 16 bits
+    0x80, 0xE4, 0x0F,       // 0xA4C and ah, 0x0F ; isolate the low-12-bit ABI tag
+    0x80, 0xEC, 0x02,       // 0xA4F sub ah, 2 ; tag 0x200 -> slot
     0x48, 0x83, 0xF8, 0x40,             // 0xA52 cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x29,                         // 0xA56 jb .mutex (+41 -> 0xA81)
-    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA58 sub rax, 0x100 (H - 0x300)
+    0x80, 0xEC, 0x01,                   // 0xA58 sub ah, 1 ; tag 0x300 -> slot
+    0x90, 0x90, 0x90,                   // 0xA5B size-preserving padding
     0x48, 0x83, 0xF8, 0x40,             // 0xA5E cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x2D,                         // 0xA62 jb .event (+45 -> 0xA91)
-    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA64 sub rax, 0x100 (H - 0x400)
+    0x80, 0xEC, 0x01,                   // 0xA64 sub ah, 1 ; tag 0x400 -> slot
+    0x90, 0x90, 0x90,                   // 0xA67 size-preserving padding
     0x48, 0x83, 0xF8, 0x40,             // 0xA6A cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x31,                         // 0xA6E jb .thread (+49 -> 0xAA1)
-    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA70 sub rax, 0x100 (H - 0x500)
+    0x80, 0xEC, 0x01,                   // 0xA70 sub ah, 1 ; tag 0x500 -> slot
+    0x90, 0x90, 0x90,                   // 0xA73 size-preserving padding
     0x48, 0x83, 0xF8, 0x40,             // 0xA76 cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x35,                         // 0xA7A jb .sem (+53 -> 0xAB1)
     // .pseudo: unknown handle -> WAIT_OBJECT_0

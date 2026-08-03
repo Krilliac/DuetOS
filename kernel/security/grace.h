@@ -15,7 +15,7 @@
  * under that Process's cap lock.
  *
  * Every cache operation is serialized by one spinlock. When both
- * locks are needed, the order is grace lock -> Process::cap_lock;
+ * locks are needed, the order is grace lock -> AuthorizationContext lock;
  * Process capability helpers never call back into this cache.
  * Task context only; never IRQ context.
  */

@@ -39,13 +39,25 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
         }
         // Over-allocate so we can find an `align`-aligned address
         // inside the chunk and stash the original pointer before it.
-        let total = size + align + core::mem::size_of::<*mut u8>();
+        let Some(total) = size
+            .checked_add(align)
+            .and_then(|value| value.checked_add(core::mem::size_of::<*mut u8>()))
+        else {
+            return core::ptr::null_mut();
+        };
         let raw = unsafe { duetos_rust_alloc(total) };
         if raw.is_null() {
             return core::ptr::null_mut();
         }
         let raw_addr = raw as usize;
-        let payload_addr = (raw_addr + core::mem::size_of::<*mut u8>() + (align - 1)) & !(align - 1);
+        let Some(payload_addr) = raw_addr
+            .checked_add(core::mem::size_of::<*mut u8>())
+            .and_then(|value| value.checked_add(align - 1))
+            .map(|value| value & !(align - 1))
+        else {
+            unsafe { duetos_rust_free(raw) };
+            return core::ptr::null_mut();
+        };
         let payload = payload_addr as *mut u8;
         unsafe {
             // Stash the original chunk pointer in the 8 bytes preceding

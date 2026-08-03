@@ -9,7 +9,10 @@ additionally fails on FFI safety findings so existing debt stays visible.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import stat
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -19,9 +22,38 @@ from typing import Iterable
 
 
 AGGREGATE_MEMBER = Path("kernel/rust")
+SIGNATURE_CHECKER = Path("tools/test/check-rust-ffi-signatures.py")
+SIGNATURE_CHECK_TIMEOUT_SECONDS = 60
 MAX_WORKSPACE_MEMBERS = 128
 MAX_INVENTORY_FILES = 20_000
-ALLOWED_EXPORT_ABIS = frozenset({"C", "C-unwind", "system"})
+MAX_INPUT_FILE_BYTES = 8 * 1024 * 1024
+MAX_INVENTORY_BYTES = 64 * 1024 * 1024
+MAX_CMAKE_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_CMAKE_PATH_CHARS = 4_096
+MAX_FFI_RECORDS = 20_000
+MAX_ISSUE_RECORDS = 2_048
+MAX_DIAGNOSTIC_CHARS = 2_048
+WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x10
+WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+WINDOWS_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+ALLOWED_EXPORT_ABIS = frozenset({"C"})
+CANONICAL_CARGO_CONFIG = Path(".cargo/config.toml")
+CANONICAL_RUST_TOOLCHAIN = Path("rust-toolchain.toml")
+EXPECTED_CARGO_CONFIG = {
+    "build": {"target": "x86_64-unknown-none"},
+    "unstable": {
+        "build-std": ["core", "alloc"],
+        "build-std-features": ["compiler-builtins-mem"],
+    },
+}
+EXPECTED_RUST_TOOLCHAIN = {
+    "toolchain": {
+        "channel": "nightly-2026-01-15",
+        "components": ["rust-src"],
+        "targets": ["x86_64-unknown-none"],
+        "profile": "minimal",
+    }
+}
 
 # A safe exported Rust function is permitted only when its exact symbol is in
 # this set and its signature remains scalar-only.  Pointer-taking exports must
@@ -126,10 +158,13 @@ HEADER_DECL_RE = re.compile(
     r"\((?P<params>[^;{}]*)\)\s*;",
     re.DOTALL,
 )
-INCLUDE_MACRO_RE = re.compile(r"\binclude(?:_bytes|_str)?!\s*\(")
-INCLUDE_LITERAL_RE = re.compile(
-    r"\binclude(?:_bytes|_str)?!\s*\(\s*\"(?P<path>[^\"\r\n]+)\"\s*\)"
+INCLUDE_MACRO_RE = re.compile(
+    r"\b(?P<macro>include|include_bytes|include_str)\s*!\s*(?P<delimiter>[({[])"
 )
+INCLUDE_LITERAL_RE = re.compile(
+    r"\b(?P<macro>include|include_bytes|include_str)\s*!\s*\(\s*\"(?P<path>[^\"\r\n]+)\"\s*\)"
+)
+RUST_PATH_ATTRIBUTE_RE = re.compile(r"#\s*\[[^\]]*\bpath\s*=", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -174,6 +209,21 @@ class Inventory:
     issues: list[Issue]
 
 
+class InventoryBudgetExceeded(RuntimeError):
+    pass
+
+
+@dataclass
+class RecordBudget:
+    limit: int = MAX_FFI_RECORDS
+    used: int = 0
+
+    def count(self) -> None:
+        self.used += 1
+        if self.used > self.limit:
+            raise InventoryBudgetExceeded(f"FFI inventory exceeds {self.limit} export/header records")
+
+
 def repo_relative(root: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(root).as_posix()
@@ -190,16 +240,501 @@ def add_issue(
     message: str,
     line: int = 0,
 ) -> None:
-    issues.append(Issue(severity, code, repo_relative(root, path), line, message))
+    if len(issues) >= MAX_ISSUE_RECORDS:
+        raise InventoryBudgetExceeded(f"audit diagnostics exceed {MAX_ISSUE_RECORDS} records")
+    normalized = message.replace("\r", "\\r").replace("\n", "\\n")
+    if len(normalized) > MAX_DIAGNOSTIC_CHARS:
+        marker = (
+            "... signature diagnostics truncated"
+            if "signature diagnostics truncated" in normalized
+            else "... diagnostic truncated"
+        )
+        normalized = normalized[: MAX_DIAGNOSTIC_CHARS - len(marker)] + marker
+    rendered_path = repo_relative(root, path)
+    if len(rendered_path) > MAX_CMAKE_PATH_CHARS:
+        rendered_path = rendered_path[:MAX_CMAKE_PATH_CHARS] + "... path truncated"
+    issues.append(Issue(severity, code, rendered_path, line, normalized))
+
+
+def read_utf8_bounded(path: Path) -> str:
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_INPUT_FILE_BYTES + 1)
+    if len(raw) > MAX_INPUT_FILE_BYTES:
+        raise ValueError(f"input exceeds {MAX_INPUT_FILE_BYTES} bytes")
+    return raw.decode("utf-8", errors="strict")
+
+
+def windows_reparse_is_unsafe(attributes: int, tag: int | None) -> bool:
+    if not attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    if tag is None or tag == 0:
+        return True
+    return bool(tag & WINDOWS_REPARSE_TAG_NAME_SURROGATE)
+
+
+def path_is_link_or_reparse(path: Path) -> bool:
+    metadata = path.lstat()
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    tag = getattr(metadata, "st_reparse_tag", None)
+    return stat.S_ISLNK(metadata.st_mode) or windows_reparse_is_unsafe(attributes, tag)
+
+
+def first_link_component(root: Path, path: Path) -> Path | None:
+    """Return the first existing link/reparse component below root."""
+    absolute = path.absolute()
+    try:
+        relative = absolute.relative_to(root)
+    except ValueError:
+        return absolute
+    current = root
+    for part in relative.parts:
+        current /= part
+        try:
+            if path_is_link_or_reparse(current):
+                return current
+        except FileNotFoundError:
+            return None
+    return None
+
+
+def collect_member_files(
+    root: Path,
+    directory: Path,
+    issues: list[Issue],
+    visited_entries: list[int],
+    visited_bytes: list[int],
+) -> tuple[list[Path], bool]:
+    """Stream one member tree with a global hard entry bound and no links."""
+    files: list[Path] = []
+    pending = [directory]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError as error:
+            add_issue(issues, "error", "BUILD029", root, current, f"cannot scan workspace member: {error}")
+            return files, False
+        with entries:
+            try:
+                for entry in entries:
+                    visited_entries[0] += 1
+                    if visited_entries[0] > MAX_INVENTORY_FILES:
+                        add_issue(
+                            issues,
+                            "error",
+                            "BUILD023",
+                            root,
+                            directory,
+                            f"workspace traversal exceeds {MAX_INVENTORY_FILES} entries",
+                        )
+                        return files, True
+
+                    path = Path(entry.path)
+                    try:
+                        metadata = entry.stat(follow_symlinks=False)
+                        attributes = getattr(metadata, "st_file_attributes", 0)
+                        is_directory = entry.is_dir(follow_symlinks=False) or bool(
+                            attributes & WINDOWS_FILE_ATTRIBUTE_DIRECTORY
+                        )
+                        is_link = entry.is_symlink() or windows_reparse_is_unsafe(
+                            attributes, getattr(metadata, "st_reparse_tag", None)
+                        )
+                        if is_link:
+                            add_issue(
+                                issues,
+                                "error",
+                                "BUILD027",
+                                root,
+                                path,
+                                "workspace build inputs may not contain symlinks or name-surrogate reparse points",
+                            )
+                            continue
+                        if is_directory:
+                            if current != directory or entry.name not in SKIP_DIRS:
+                                pending.append(path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            add_issue(
+                                issues,
+                                "error",
+                                "BUILD029",
+                                root,
+                                path,
+                                "unsupported non-file workspace entry",
+                            )
+                            continue
+                        if metadata.st_size < 0 or metadata.st_size > MAX_INPUT_FILE_BYTES:
+                            add_issue(
+                                issues,
+                                "error",
+                                "BUILD030",
+                                root,
+                                path,
+                                f"workspace file exceeds {MAX_INPUT_FILE_BYTES} bytes",
+                            )
+                            continue
+                        visited_bytes[0] += metadata.st_size
+                        if visited_bytes[0] > MAX_INVENTORY_BYTES:
+                            add_issue(
+                                issues,
+                                "error",
+                                "BUILD031",
+                                root,
+                                directory,
+                                f"workspace inputs exceed {MAX_INVENTORY_BYTES} bytes",
+                            )
+                            return files, True
+                        resolved = path.resolve(strict=True)
+                        resolved.relative_to(root)
+                        files.append(resolved)
+                    except (OSError, ValueError) as error:
+                        add_issue(
+                            issues,
+                            "error",
+                            "BUILD028",
+                            root,
+                            path,
+                            f"workspace entry cannot be retained safely: {error}",
+                        )
+            except OSError as error:
+                add_issue(issues, "error", "BUILD029", root, current, f"workspace scan failed: {error}")
+                return files, False
+    return files, False
+
+
+def check_signature_parity(
+    root: Path,
+    checker: Path,
+    issues: list[Issue],
+    timeout_seconds: float = SIGNATURE_CHECK_TIMEOUT_SECONDS,
+) -> None:
+    """Run the independently tested canonical C/Rust signature gate."""
+    try:
+        with tempfile.TemporaryFile() as diagnostic_stream:
+            result = subprocess.run(
+                [sys.executable, str(checker), "--repo-root", str(root)],
+                cwd=root,
+                stdout=diagnostic_stream,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            if result.returncode != 0:
+                diagnostic_stream.seek(0)
+                diagnostic_bytes = diagnostic_stream.read(16_385)
+    except (OSError, subprocess.SubprocessError) as error:
+        add_issue(
+            issues,
+            "error",
+            "FFI013",
+            root,
+            checker,
+            f"cannot execute canonical signature parity gate: {error}",
+        )
+        return
+
+    if result.returncode == 0:
+        return
+
+    diagnostic = diagnostic_bytes[:16_384].decode("utf-8", errors="replace").strip()
+    if len(diagnostic_bytes) > 16_384:
+        diagnostic += "\n... signature diagnostics truncated"
+    if not diagnostic:
+        diagnostic = "no diagnostic output"
+    add_issue(
+        issues,
+        "error",
+        "FFI013",
+        root,
+        checker,
+        f"canonical signature parity gate exited {result.returncode}:\n{diagnostic}",
+    )
 
 
 def read_toml(root: Path, path: Path, issues: list[Issue]) -> dict:
     try:
-        with path.open("rb") as stream:
-            return tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+        return tomllib.loads(read_utf8_bounded(path))
+    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as error:
         add_issue(issues, "error", "BUILD001", root, path, f"cannot parse manifest: {error}")
         return {}
+
+
+def manifest_dependency_tables(data: dict) -> list[tuple[str, dict]]:
+    tables: list[tuple[str, dict]] = []
+    for name in ("dependencies", "dev-dependencies", "build-dependencies"):
+        table = data.get(name)
+        if isinstance(table, dict):
+            tables.append((name, table))
+    targets = data.get("target")
+    if isinstance(targets, dict):
+        for target_name, target in targets.items():
+            if not isinstance(target, dict):
+                continue
+            for name in ("dependencies", "dev-dependencies", "build-dependencies"):
+                table = target.get(name)
+                if isinstance(table, dict):
+                    tables.append((f"target.{target_name}.{name}", table))
+    return tables
+
+
+def validate_local_dependency_table(
+    root: Path,
+    manifest: Path,
+    owner_directory: Path,
+    label: str,
+    table: dict,
+    crates_by_directory: dict[Path, Crate],
+    issues: list[Issue],
+) -> None:
+    for alias, specification in table.items():
+        if not isinstance(specification, dict) or "path" not in specification:
+            continue
+        raw_path = specification.get("path")
+        if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
+            add_issue(
+                issues,
+                "error",
+                "BUILD033",
+                root,
+                manifest,
+                f"[{label}] dependency {alias} has an invalid local path",
+            )
+            continue
+        unresolved = owner_directory / raw_path
+        try:
+            unresolved.absolute().relative_to(root)
+            linked_component = first_link_component(root, unresolved)
+            if linked_component is not None:
+                raise ValueError(f"path traverses {linked_component}")
+            resolved = unresolved.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as error:
+            add_issue(
+                issues,
+                "error",
+                "BUILD033",
+                root,
+                manifest,
+                f"[{label}] dependency {alias} escapes the audited workspace: {error}",
+            )
+            continue
+        target = crates_by_directory.get(resolved)
+        if target is None:
+            add_issue(
+                issues,
+                "error",
+                "BUILD033",
+                root,
+                manifest,
+                f"[{label}] dependency {alias} is not an explicit audited workspace member",
+            )
+            continue
+        expected_package = specification.get("package", alias)
+        if expected_package != target.package:
+            add_issue(
+                issues,
+                "error",
+                "BUILD033",
+                root,
+                manifest,
+                f"[{label}] dependency {alias} names {expected_package!r}, member package is {target.package!r}",
+            )
+
+
+def validate_manifest_compilation_graph(
+    root: Path,
+    crate: Crate,
+    data: dict,
+    crates_by_directory: dict[Path, Crate],
+    issues: list[Issue],
+) -> None:
+    package = data.get("package")
+    if isinstance(package, dict) and package.get("build") not in (None, False):
+        add_issue(
+            issues,
+            "error",
+            "BUILD032",
+            root,
+            crate.manifest,
+            "custom package.build targets are outside the audited compilation graph",
+        )
+    if (crate.directory / "build.rs").is_file():
+        add_issue(
+            issues,
+            "error",
+            "BUILD032",
+            root,
+            crate.manifest,
+            "build.rs is not permitted in the kernel Rust workspace",
+        )
+
+    for table_name in ("lib", "bin", "example", "test", "bench"):
+        target = data.get(table_name)
+        targets = target if isinstance(target, list) else [target]
+        for entry in targets:
+            if isinstance(entry, dict) and "path" in entry:
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD032",
+                    root,
+                    crate.manifest,
+                    f"custom [{table_name}] path is outside the conventional audited source graph",
+                )
+
+    if data.get("patch") or data.get("replace"):
+        add_issue(
+            issues,
+            "error",
+            "BUILD034",
+            root,
+            crate.manifest,
+            "manifest patch/replace tables are not permitted in the kernel Rust workspace",
+        )
+    for label, table in manifest_dependency_tables(data):
+        validate_local_dependency_table(
+            root, crate.manifest, crate.directory, label, table, crates_by_directory, issues
+        )
+
+
+def ancestor_file_candidates(root: Path, working_directory: Path, names: tuple[str, ...]) -> list[Path]:
+    candidates: list[Path] = []
+    current = working_directory.resolve()
+    while True:
+        current.relative_to(root)
+        candidates.extend(current / name for name in names)
+        if current == root:
+            break
+        current = current.parent
+    return candidates
+
+
+def cargo_config_candidates(root: Path, working_directory: Path) -> list[Path]:
+    return ancestor_file_candidates(root, working_directory, (".cargo/config", ".cargo/config.toml"))
+
+
+def rustup_toolchain_candidates(root: Path, working_directory: Path) -> list[Path]:
+    return ancestor_file_candidates(root, working_directory, ("rust-toolchain", "rust-toolchain.toml"))
+
+
+def validate_cargo_execution_environment(
+    root: Path,
+    cargo_working_directory: Path,
+    cargo_home: Path,
+    issues: list[Issue],
+) -> None:
+    try:
+        working_directory = cargo_working_directory.resolve(strict=True)
+        home = cargo_home.resolve(strict=True)
+    except OSError as error:
+        add_issue(
+            issues,
+            "error",
+            "BUILD041",
+            root,
+            cargo_working_directory,
+            f"controlled Cargo execution directory is unavailable: {error}",
+        )
+        return
+    if not working_directory.is_dir() or not home.is_dir():
+        add_issue(
+            issues,
+            "error",
+            "BUILD041",
+            root,
+            cargo_working_directory,
+            "controlled Cargo working directory and Cargo home must be directories",
+        )
+        return
+    try:
+        working_directory.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        add_issue(
+            issues,
+            "error",
+            "BUILD041",
+            root,
+            working_directory,
+            "controlled Cargo working directory must be outside the repository configuration ancestry",
+        )
+
+    candidates: list[Path] = []
+    current = working_directory
+    while True:
+        candidates.extend((current / ".cargo" / "config", current / ".cargo" / "config.toml"))
+        if current.parent == current:
+            break
+        current = current.parent
+    candidates.extend((home / "config", home / "config.toml"))
+    for candidate in candidates:
+        if candidate.exists():
+            add_issue(
+                issues,
+                "error",
+                "BUILD041",
+                root,
+                candidate,
+                "ambient Cargo config is forbidden on the controlled execution search path",
+            )
+
+
+def validate_canonical_cargo_config(root: Path, path: Path, issues: list[Issue]) -> None:
+    data = read_toml(root, path, issues)
+    if data != EXPECTED_CARGO_CONFIG:
+        add_issue(
+            issues,
+            "error",
+            "BUILD039",
+            root,
+            path,
+            "repository Cargo config must contain only the canonical target and build-std policy",
+        )
+
+
+def validate_canonical_rust_toolchain(root: Path, path: Path, issues: list[Issue]) -> None:
+    data = read_toml(root, path, issues)
+    if data != EXPECTED_RUST_TOOLCHAIN:
+        add_issue(
+            issues,
+            "error",
+            "BUILD040",
+            root,
+            path,
+            "repository Rust toolchain must contain only the canonical dated channel, component, target, and profile",
+        )
+
+
+def validate_retained_input_budget(root: Path, inputs: Iterable[Path], issues: list[Issue]) -> None:
+    total_bytes = 0
+    for path in sorted(set(inputs), key=lambda item: item.as_posix()):
+        try:
+            size = path.stat().st_size
+        except OSError as error:
+            add_issue(issues, "error", "BUILD029", root, path, f"cannot stat retained build input: {error}")
+            continue
+        if size < 0 or size > MAX_INPUT_FILE_BYTES:
+            add_issue(
+                issues,
+                "error",
+                "BUILD030",
+                root,
+                path,
+                f"workspace file exceeds {MAX_INPUT_FILE_BYTES} bytes",
+            )
+            continue
+        total_bytes += size
+        if total_bytes > MAX_INVENTORY_BYTES:
+            add_issue(
+                issues,
+                "error",
+                "BUILD031",
+                root,
+                path,
+                f"retained workspace inputs exceed {MAX_INVENTORY_BYTES} bytes",
+            )
+            return
 
 
 def strip_comments(text: str) -> str:
@@ -316,10 +851,16 @@ def is_scalar_signature(parameters: str, return_text: str) -> bool:
     return return_type == "()" or return_type == "!" or return_type in SCALAR_TYPES
 
 
-def parse_exports(root: Path, crate: Crate, rust_path: Path, issues: list[Issue]) -> list[Export]:
+def parse_exports(
+    root: Path,
+    crate: Crate,
+    rust_path: Path,
+    issues: list[Issue],
+    record_budget: RecordBudget | None = None,
+) -> list[Export]:
     try:
-        original = rust_path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError) as error:
+        original = read_utf8_bounded(rust_path)
+    except (OSError, UnicodeError, ValueError) as error:
         add_issue(issues, "error", "BUILD002", root, rust_path, f"cannot read Rust source: {error}")
         return []
     code = strip_comments(original)
@@ -343,6 +884,8 @@ def parse_exports(root: Path, crate: Crate, rust_path: Path, issues: list[Issue]
         name = export_name.group(1) if export_name else match.group("name")
         has_raw_pointer = bool(re.search(r"\*\s*(?:const|mut)\b", parameters + " " + return_text))
         covered_attribute_ranges.append((match.start("attrs"), match.end()))
+        if record_budget is not None:
+            record_budget.count()
         exports.append(
             Export(
                 crate=crate,
@@ -365,6 +908,8 @@ def parse_exports(root: Path, crate: Crate, rust_path: Path, issues: list[Issue]
         name = export_name.group(1) if export_name else match.group("name")
         static_type = canonical_type(match.group("type"))
         covered_attribute_ranges.append((match.start("attrs"), match.end()))
+        if record_budget is not None:
+            record_budget.count()
         exports.append(
             Export(
                 crate=crate,
@@ -396,8 +941,8 @@ def parse_exports(root: Path, crate: Crate, rust_path: Path, issues: list[Issue]
 
 def find_unconstrained_lifetimes(root: Path, rust_path: Path, issues: list[Issue]) -> None:
     try:
-        original = rust_path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError):
+        original = read_utf8_bounded(rust_path)
+    except (OSError, UnicodeError, ValueError):
         return
     code = strip_comments(original)
     for match in FUNCTION_START_RE.finditer(code):
@@ -431,10 +976,15 @@ def find_unconstrained_lifetimes(root: Path, rust_path: Path, issues: list[Issue
             )
 
 
-def parse_header_names(root: Path, header: Path, issues: list[Issue]) -> set[str]:
+def parse_header_names(
+    root: Path,
+    header: Path,
+    issues: list[Issue],
+    record_budget: RecordBudget | None = None,
+) -> set[str]:
     try:
-        original = header.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError) as error:
+        original = read_utf8_bounded(header)
+    except (OSError, UnicodeError, ValueError) as error:
         add_issue(issues, "error", "BUILD003", root, header, f"cannot read FFI header: {error}")
         return set()
     code = strip_comments(original)
@@ -451,12 +1001,14 @@ def parse_header_names(root: Path, header: Path, issues: list[Issue]) -> set[str
         declaration = code[declaration_start : match.end()]
         if re.search(r"\b(?:typedef|static\s+inline)\b", declaration):
             continue
+        if record_budget is not None:
+            record_budget.count()
         names.add(match.group("name"))
     return names
 
 
 def relevant_input(path: Path) -> bool:
-    if any(part in SKIP_DIRS for part in path.parts):
+    if path.parts and path.parts[0] in SKIP_DIRS:
         return False
     if path.name in {"Cargo.toml", "build.rs"}:
         return True
@@ -465,12 +1017,35 @@ def relevant_input(path: Path) -> bool:
     return path.suffix in BUILD_SUFFIXES
 
 
-def resolve_include_literals(root: Path, rust_path: Path, issues: list[Issue]) -> set[Path]:
+def cmake_path_protocol_error(path: Path) -> str | None:
+    rendered = path.as_posix()
+    if len(rendered) > MAX_CMAKE_PATH_CHARS:
+        return f"path exceeds {MAX_CMAKE_PATH_CHARS} characters"
+    if ";" in rendered:
+        return "path contains a CMake list separator"
+    if "\r" in rendered or "\n" in rendered:
+        return "path contains a line separator"
+    if rendered != rendered.strip() or any(part != part.strip() for part in path.parts):
+        return "path has leading or trailing whitespace"
+    return None
+
+
+def resolve_include_literals(root: Path, member_root: Path, rust_path: Path, issues: list[Issue]) -> set[Path]:
     try:
-        original = rust_path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError):
+        original = read_utf8_bounded(rust_path)
+    except (OSError, UnicodeError, ValueError):
         return set()
     code = strip_comments(original)
+    for match in RUST_PATH_ATTRIBUTE_RE.finditer(code):
+        add_issue(
+            issues,
+            "error",
+            "BUILD032",
+            root,
+            rust_path,
+            "#[path] and cfg_attr(path=...) are outside the conventional audited source graph",
+            original.count("\n", 0, match.start()) + 1,
+        )
     literal_starts = {match.start() for match in INCLUDE_LITERAL_RE.finditer(code)}
     for match in INCLUDE_MACRO_RE.finditer(code):
         if match.start() not in literal_starts:
@@ -480,18 +1055,39 @@ def resolve_include_literals(root: Path, rust_path: Path, issues: list[Issue]) -
                 "BUILD004",
                 root,
                 rust_path,
-                "include!/include_bytes!/include_str! must use a literal path so CMake can track it",
+                "include!/include_bytes!/include_str! must use a parenthesized literal path so CMake can track it",
                 original.count("\n", 0, match.start()) + 1,
             )
     includes: set[Path] = set()
     for match in INCLUDE_LITERAL_RE.finditer(code):
-        candidate = (rust_path.parent / match.group("path")).resolve()
+        unresolved = rust_path.parent / match.group("path")
         try:
+            unresolved.absolute().relative_to(root)
+        except ValueError:
+            add_issue(issues, "error", "BUILD005", root, rust_path, "include macro escapes the repository")
+            continue
+        try:
+            linked_component = first_link_component(root, unresolved)
+        except OSError as error:
+            add_issue(issues, "error", "BUILD029", root, rust_path, f"cannot inspect include path: {error}")
+            continue
+        if linked_component is not None:
+            add_issue(
+                issues,
+                "error",
+                "BUILD027",
+                root,
+                linked_component,
+                "include path may not contain symlinks or reparse points",
+            )
+            continue
+        try:
+            candidate = unresolved.resolve(strict=True)
             candidate.relative_to(root)
         except ValueError:
             add_issue(issues, "error", "BUILD005", root, rust_path, "include macro escapes the repository")
             continue
-        if not candidate.is_file():
+        except OSError:
             add_issue(
                 issues,
                 "error",
@@ -501,14 +1097,70 @@ def resolve_include_literals(root: Path, rust_path: Path, issues: list[Issue]) -
                 f"included file does not exist: {match.group('path')}",
             )
             continue
+        if not candidate.is_file():
+            add_issue(
+                issues,
+                "error",
+                "BUILD006",
+                root,
+                rust_path,
+                f"included path is not a regular file: {match.group('path')}",
+            )
+            continue
+        if match.group("macro") == "include":
+            try:
+                candidate.relative_to(member_root)
+            except ValueError:
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD032",
+                    root,
+                    rust_path,
+                    "include! code must remain inside its owning workspace member",
+                    original.count("\n", 0, match.start()) + 1,
+                )
+                continue
+            if candidate.suffix != ".rs":
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD032",
+                    root,
+                    rust_path,
+                    "include! code must name an in-member .rs source",
+                    original.count("\n", 0, match.start()) + 1,
+                )
+                continue
         includes.add(candidate)
     return includes
 
 
-def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
+def build_inventory(
+    root: Path,
+    aggregate_manifest: Path,
+    cargo_working_directory: Path | None = None,
+    cargo_home: Path | None = None,
+) -> Inventory:
     issues: list[Issue] = []
     root_manifest = root / "Cargo.toml"
-    root_data = read_toml(root, root_manifest, issues)
+    try:
+        root_manifest_link = first_link_component(root, root_manifest)
+    except OSError as error:
+        add_issue(issues, "error", "BUILD029", root, root_manifest, f"cannot inspect root manifest path: {error}")
+        root_manifest_link = root_manifest
+    if root_manifest_link is not None:
+        add_issue(
+            issues,
+            "error",
+            "BUILD027",
+            root,
+            root_manifest_link,
+            "workspace manifest path may not contain symlinks or reparse points",
+        )
+        root_data: dict = {}
+    else:
+        root_data = read_toml(root, root_manifest, issues)
     workspace = root_data.get("workspace")
     raw_members = workspace.get("members") if isinstance(workspace, dict) else None
     if not isinstance(raw_members, list) or not all(isinstance(member, str) for member in raw_members):
@@ -541,6 +1193,8 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
             member_path.is_absolute()
             or ".." in member_path.parts
             or any(token in raw_member for token in ("*", "?", "[", "]", ";", "\r", "\n"))
+            or raw_member != raw_member.strip()
+            or any(part != part.strip() for part in member_path.parts)
         ):
             add_issue(
                 issues,
@@ -551,7 +1205,34 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
                 f"workspace member must be an exact safe path: {raw_member!r}",
             )
             continue
-        directory = (root / raw_member).resolve()
+        unresolved_directory = root / member_path
+        try:
+            linked_component = first_link_component(root, unresolved_directory)
+        except OSError as error:
+            add_issue(
+                issues,
+                "error",
+                "BUILD029",
+                root,
+                unresolved_directory,
+                f"cannot inspect workspace member path: {error}",
+            )
+            continue
+        if linked_component is not None:
+            add_issue(
+                issues,
+                "error",
+                "BUILD027",
+                root,
+                linked_component,
+                f"workspace member path may not contain symlinks or reparse points: {raw_member}",
+            )
+            continue
+        try:
+            directory = unresolved_directory.resolve(strict=True)
+        except OSError as error:
+            add_issue(issues, "error", "BUILD010", root, unresolved_directory, f"workspace member is missing: {error}")
+            continue
         try:
             directory.relative_to(root)
         except ValueError:
@@ -565,6 +1246,21 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
             )
             continue
         manifest = directory / "Cargo.toml"
+        try:
+            manifest_link = first_link_component(root, manifest)
+        except OSError as error:
+            add_issue(issues, "error", "BUILD029", root, manifest, f"cannot inspect member manifest path: {error}")
+            continue
+        if manifest_link is not None:
+            add_issue(
+                issues,
+                "error",
+                "BUILD027",
+                root,
+                manifest_link,
+                "member manifest path may not contain symlinks or reparse points",
+            )
+            continue
         data = read_toml(root, manifest, issues)
         package_table = data.get("package")
         package = package_table.get("name") if isinstance(package_table, dict) else None
@@ -577,6 +1273,32 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
         seen_directories.add(directory)
         seen_packages.add(package)
         crates.append(Crate(raw_member.replace("\\", "/").rstrip("/"), directory, manifest, package))
+
+    crates_by_directory = {crate.directory: crate for crate in crates}
+    if root_data.get("patch") or root_data.get("replace"):
+        add_issue(
+            issues,
+            "error",
+            "BUILD034",
+            root,
+            root_manifest,
+            "workspace patch/replace tables are not permitted in the kernel Rust workspace",
+        )
+    workspace_dependencies = workspace.get("dependencies") if isinstance(workspace, dict) else None
+    if isinstance(workspace_dependencies, dict):
+        validate_local_dependency_table(
+            root,
+            root_manifest,
+            root,
+            "workspace.dependencies",
+            workspace_dependencies,
+            crates_by_directory,
+            issues,
+        )
+    for crate in crates:
+        validate_manifest_compilation_graph(
+            root, crate, read_toml(root, crate.manifest, issues), crates_by_directory, issues
+        )
 
     aggregate_path = aggregate_manifest.resolve().parent
     aggregate = next((crate for crate in crates if crate.directory == aggregate_path), None)
@@ -664,8 +1386,8 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
 
         aggregate_source = aggregate.directory / "src" / "lib.rs"
         try:
-            aggregate_text = strip_comments(aggregate_source.read_text(encoding="utf-8", errors="strict"))
-        except (OSError, UnicodeError) as error:
+            aggregate_text = strip_comments(read_utf8_bounded(aggregate_source))
+        except (OSError, UnicodeError, ValueError) as error:
             add_issue(issues, "error", "BUILD020", root, aggregate_source, f"cannot read aggregate source: {error}")
             aggregate_text = ""
         for dependency_path, alias in sorted(dependency_paths.items(), key=lambda item: item[1]):
@@ -686,62 +1408,152 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
         root / "Cargo.lock",
         root / ".cargo" / "config.toml",
         root / "rust-toolchain.toml",
+        root / SIGNATURE_CHECKER,
     ]
     inputs: set[Path] = set()
     for required in required_root_inputs:
-        if not required.is_file():
+        try:
+            linked_component = first_link_component(root, required)
+        except OSError as error:
+            add_issue(issues, "error", "BUILD029", root, required, f"cannot inspect required input path: {error}")
+            continue
+        if linked_component is not None:
+            add_issue(
+                issues,
+                "error",
+                "BUILD027",
+                root,
+                linked_component,
+                "workspace build input path may not contain symlinks or reparse points",
+            )
+        elif not required.is_file():
             add_issue(issues, "error", "BUILD022", root, required, "required workspace build input is missing")
-        elif required.is_symlink():
-            add_issue(issues, "error", "BUILD027", root, required, "workspace build inputs may not be symlinks")
         else:
-            inputs.add(required.resolve())
+            try:
+                resolved = required.resolve(strict=True)
+                resolved.relative_to(root)
+                inputs.add(resolved)
+            except (OSError, ValueError) as error:
+                add_issue(issues, "error", "BUILD028", root, required, f"required input escapes repository: {error}")
+
+    if aggregate is not None:
+        config_candidates = cargo_config_candidates(root, aggregate.directory)
+        canonical_config = root / CANONICAL_CARGO_CONFIG
+        for index in range(0, len(config_candidates), 2):
+            extensionless = config_candidates[index]
+            toml_config = config_candidates[index + 1]
+            if extensionless.exists() and toml_config.exists():
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD035",
+                    root,
+                    extensionless.parent,
+                    "Cargo config and config.toml both exist at one search level",
+                )
+        for candidate in config_candidates:
+            if not candidate.exists():
+                continue
+            if candidate != canonical_config:
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD039",
+                    root,
+                    candidate,
+                    "only the repository-root .cargo/config.toml is permitted",
+                )
+                continue
+            try:
+                linked_component = first_link_component(root, candidate)
+                if linked_component is not None:
+                    raise ValueError(f"path traverses {linked_component}")
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+                if not resolved.is_file():
+                    raise ValueError("Cargo config input is not a regular file")
+                inputs.add(resolved)
+            except (OSError, ValueError) as error:
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD028",
+                    root,
+                    candidate,
+                    f"Cargo config input cannot be retained safely: {error}",
+                )
+        if canonical_config.is_file():
+            validate_canonical_cargo_config(root, canonical_config, issues)
+
+        canonical_toolchain = root / CANONICAL_RUST_TOOLCHAIN
+        for candidate in rustup_toolchain_candidates(root, aggregate.directory):
+            if candidate.exists() and candidate != canonical_toolchain:
+                add_issue(
+                    issues,
+                    "error",
+                    "BUILD037",
+                    root,
+                    candidate,
+                    "only the repository-root rust-toolchain.toml override is permitted",
+                )
+        if canonical_toolchain.is_file():
+            validate_canonical_rust_toolchain(root, canonical_toolchain, issues)
+
+    if (cargo_working_directory is None) != (cargo_home is None):
+        add_issue(
+            issues,
+            "error",
+            "BUILD041",
+            root,
+            root,
+            "controlled Cargo working directory and Cargo home must be supplied together",
+        )
+    elif cargo_working_directory is not None and cargo_home is not None:
+        validate_cargo_execution_environment(root, cargo_working_directory, cargo_home, issues)
 
     rust_sources: dict[str, list[Path]] = {}
     header_names: dict[str, set[str]] = {}
     exports: list[Export] = []
+    record_budget = RecordBudget()
+    visited_entries = [0]
+    visited_bytes = [0]
+    traversal_exhausted = False
     for crate in crates:
         crate_inputs: list[Path] = []
         headers: list[Path] = []
         sources: list[Path] = []
-        for path in crate.directory.rglob("*"):
-            if len(inputs) + len(crate_inputs) > MAX_INVENTORY_FILES:
-                add_issue(
-                    issues,
-                    "error",
-                    "BUILD023",
-                    root,
-                    crate.directory,
-                    f"inventory exceeds {MAX_INVENTORY_FILES} files",
-                )
-                break
-            if not path.is_file() or not relevant_input(path.relative_to(crate.directory)):
+        member_files, traversal_exhausted = collect_member_files(
+            root, crate.directory, issues, visited_entries, visited_bytes
+        )
+        for path in member_files:
+            if not relevant_input(path.relative_to(crate.directory)):
                 continue
-            if path.is_symlink():
-                add_issue(issues, "error", "BUILD027", root, path, "workspace build inputs may not be symlinks")
-                continue
-            resolved = path.resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                add_issue(issues, "error", "BUILD028", root, path, "workspace build input escapes repository")
-                continue
-            crate_inputs.append(resolved)
+            crate_inputs.append(path)
             if path.suffix == ".rs":
-                sources.append(resolved)
+                sources.append(path)
             if path.suffix in {".h", ".hh", ".hpp", ".hxx"}:
-                headers.append(resolved)
+                headers.append(path)
+        if traversal_exhausted:
+            break
         if not sources:
             add_issue(issues, "error", "BUILD024", root, crate.manifest, "workspace member has no Rust source")
         rust_sources[crate.member] = sorted(sources, key=lambda path: path.as_posix())
         inputs.update(crate_inputs)
         declared: set[str] = set()
         for header in sorted(headers, key=lambda path: path.as_posix()):
-            declared.update(parse_header_names(root, header, issues))
+            declared.update(parse_header_names(root, header, issues, record_budget))
         header_names[crate.member] = declared
         for source in rust_sources[crate.member]:
-            exports.extend(parse_exports(root, crate, source, issues))
+            exports.extend(parse_exports(root, crate, source, issues, record_budget))
             find_unconstrained_lifetimes(root, source, issues)
-            inputs.update(resolve_include_literals(root, source, issues))
+            inputs.update(resolve_include_literals(root, crate.directory, source, issues))
+
+    validate_retained_input_budget(root, inputs, issues)
+
+    if traversal_exhausted:
+        for crate in crates:
+            rust_sources.setdefault(crate.member, [])
+            header_names.setdefault(crate.member, set())
 
     exports_by_crate: dict[str, set[str]] = {}
     export_locations: dict[str, Export] = {}
@@ -879,14 +1691,17 @@ def build_inventory(root: Path, aggregate_manifest: Path) -> Inventory:
                     f"C header declaration {name} has no Rust export in this crate",
                 )
 
-    add_issue(
-        issues,
-        "finding",
-        "FFI013",
-        root,
-        root / "tools" / "test" / "check-rust-ffi.py",
-        "canonical C/Rust arity, type, and pointer-constness parity is not implemented; symbol names only",
-    )
+    signature_checker = root / SIGNATURE_CHECKER
+    try:
+        signature_checker_link = first_link_component(root, signature_checker)
+    except OSError:
+        signature_checker_link = signature_checker
+    if (
+        not any(issue.severity == "error" for issue in issues)
+        and signature_checker_link is None
+        and signature_checker.is_file()
+    ):
+        check_signature_parity(root, signature_checker, issues)
 
     return Inventory(
         root=root,
@@ -912,6 +1727,8 @@ def print_issues(issues: Iterable[Issue], limit: int) -> int:
 
 
 def run_self_tests() -> int:
+    global MAX_INPUT_FILE_BYTES, MAX_INVENTORY_BYTES, MAX_INVENTORY_FILES
+
     fixture = r'''
 #[no_mangle]
 extern "C" fn private_raw(ptr: *const u8) -> bool { !ptr.is_null() }
@@ -963,6 +1780,8 @@ fn tied_lifetime<'a>(borrowed: &'a [u8], _ptr: *const u8) -> &'a [u8] { borrowed
             assert exports["renamed_private"].is_unsafe
             assert exports["private_system"].abi == "system"
             assert exports["private_unwind"].abi == "C-unwind"
+            assert exports["private_system"].abi not in ALLOWED_EXPORT_ABIS
+            assert exports["private_unwind"].abi not in ALLOWED_EXPORT_ABIS
             assert exports["private_unknown"].abi not in ALLOWED_EXPORT_ABIS
             assert exports["PRIVATE_SCALAR"].kind == "static"
             assert any(issue.code == "FFI015" for issue in issues)
@@ -971,6 +1790,224 @@ fn tied_lifetime<'a>(borrowed: &'a [u8], _ptr: *const u8) -> &'a [u8] { borrowed
             lifetime_messages = [issue.message for issue in issues if issue.code == "FFI003"]
             assert any(message.startswith("raw_static ") for message in lifetime_messages)
             assert not any(message.startswith("tied_lifetime ") for message in lifetime_messages)
+
+            passing_checker = root / "passing-signature-checker.py"
+            passing_checker.write_text("raise SystemExit(0)\n", encoding="utf-8", newline="\n")
+            parity_issues: list[Issue] = []
+            check_signature_parity(root, passing_checker, parity_issues)
+            assert parity_issues == []
+
+            failing_checker = root / "failing-signature-checker.py"
+            failing_checker.write_text(
+                'print("RFS006 include/demo.h:7: parameter mismatch")\nraise SystemExit(1)\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            check_signature_parity(root, failing_checker, parity_issues)
+            assert len(parity_issues) == 1
+            assert parity_issues[0].severity == "error"
+            assert parity_issues[0].code == "FFI013"
+            assert "RFS006 include/demo.h:7" in parity_issues[0].message
+
+            timeout_checker = root / "timeout-signature-checker.py"
+            timeout_checker.write_text("import time\ntime.sleep(2)\n", encoding="utf-8", newline="\n")
+            timeout_issues: list[Issue] = []
+            check_signature_parity(root, timeout_checker, timeout_issues, timeout_seconds=0.05)
+            assert len(timeout_issues) == 1
+            assert timeout_issues[0].severity == "error"
+            assert timeout_issues[0].code == "FFI013"
+
+            noisy_checker = root / "noisy-signature-checker.py"
+            noisy_checker.write_text(
+                'print("X" * 20000)\nraise SystemExit(1)\n', encoding="utf-8", newline="\n"
+            )
+            noisy_issues: list[Issue] = []
+            check_signature_parity(root, noisy_checker, noisy_issues)
+            assert len(noisy_issues) == 1
+            assert "signature diagnostics truncated" in noisy_issues[0].message
+            assert len(noisy_issues[0].message) < 16_500
+
+            assert cmake_path_protocol_error(Path("safe/member/lib.rs")) is None
+            assert cmake_path_protocol_error(Path("bad;member/lib.rs")) is not None
+            assert cmake_path_protocol_error(Path("bad\nmember/lib.rs")) is not None
+            assert cmake_path_protocol_error(Path("member/trailing ")) is not None
+            assert not windows_reparse_is_unsafe(0, None)
+            assert windows_reparse_is_unsafe(WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT, None)
+            assert windows_reparse_is_unsafe(WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT, 0xA000000C)
+            assert not windows_reparse_is_unsafe(WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT, 0x9000001A)
+
+            bounded_records = RecordBudget(limit=1)
+            bounded_issues: list[Issue] = []
+            try:
+                parse_exports(root, crate, source, bounded_issues, bounded_records)
+            except InventoryBudgetExceeded:
+                pass
+            else:
+                raise AssertionError("FFI record budget did not fail closed")
+
+            graph_member = root / "graph-member"
+            graph_member.mkdir()
+            graph_source = graph_member / "lib.rs"
+            graph_source.write_text('#[path = "alternate.rs"]\nmod alternate;\n', encoding="utf-8", newline="\n")
+            graph_issues: list[Issue] = []
+            resolve_include_literals(root, graph_member, graph_source, graph_issues)
+            assert any(issue.code == "BUILD032" for issue in graph_issues)
+
+            hostile_include = graph_member / "hostile-include.rs"
+            hostile_include.write_text(
+                'const BYTES: &[u8] = include_bytes /* gap */ ! { "../outside.bin" };\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            include_issues: list[Issue] = []
+            assert resolve_include_literals(root, graph_member, hostile_include, include_issues) == set()
+            assert any(issue.code == "BUILD004" for issue in include_issues)
+
+            expected_toolchain_candidates = {
+                graph_member / "rust-toolchain",
+                graph_member / "rust-toolchain.toml",
+                root / "rust-toolchain",
+                root / "rust-toolchain.toml",
+            }
+            assert set(rustup_toolchain_candidates(root, graph_member)) == expected_toolchain_candidates
+
+            canonical_config = root / CANONICAL_CARGO_CONFIG
+            canonical_config.parent.mkdir()
+            canonical_config.write_text(
+                '[build]\ntarget="x86_64-unknown-none"\n'
+                '[unstable]\nbuild-std=["core","alloc"]\n'
+                'build-std-features=["compiler-builtins-mem"]\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            config_issues: list[Issue] = []
+            validate_canonical_cargo_config(root, canonical_config, config_issues)
+            assert config_issues == []
+            canonical_config.write_text('[build]\nrustc-wrapper="outside"\n', encoding="utf-8", newline="\n")
+            validate_canonical_cargo_config(root, canonical_config, config_issues)
+            assert any(issue.code == "BUILD039" for issue in config_issues)
+
+            canonical_toolchain = root / CANONICAL_RUST_TOOLCHAIN
+            canonical_toolchain.write_text(
+                '[toolchain]\nchannel="nightly-2026-01-15"\ncomponents=["rust-src"]\n'
+                'targets=["x86_64-unknown-none"]\nprofile="minimal"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            toolchain_issues: list[Issue] = []
+            validate_canonical_rust_toolchain(root, canonical_toolchain, toolchain_issues)
+            assert toolchain_issues == []
+            canonical_toolchain.write_text(
+                '[toolchain]\nchannel="nightly"\ncomponents=["rust-src"]\n'
+                'targets=["x86_64-unknown-none"]\nprofile="minimal"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            validate_canonical_rust_toolchain(root, canonical_toolchain, toolchain_issues)
+            assert any(issue.code == "BUILD040" for issue in toolchain_issues)
+
+            with tempfile.TemporaryDirectory(prefix="duetos-cargo-sandbox-") as cargo_scratch:
+                cargo_root = Path(cargo_scratch).resolve()
+                cargo_work = cargo_root / "work"
+                cargo_home = cargo_root / "home"
+                cargo_work.mkdir()
+                cargo_home.mkdir()
+                cargo_issues: list[Issue] = []
+                validate_cargo_execution_environment(root, cargo_work, cargo_home, cargo_issues)
+                assert cargo_issues == []
+                (cargo_work / ".cargo").mkdir()
+                (cargo_work / ".cargo" / "config.toml").write_text(
+                    '[build]\nrustc-wrapper="outside"\n', encoding="utf-8", newline="\n"
+                )
+                validate_cargo_execution_environment(root, cargo_work, cargo_home, cargo_issues)
+                assert any(issue.code == "BUILD041" for issue in cargo_issues)
+
+            retained_one = root / "retained-one"
+            retained_two = root / "retained-two"
+            retained_one.write_bytes(b"123")
+            retained_two.write_bytes(b"456")
+            original_total_limit = MAX_INVENTORY_BYTES
+            try:
+                MAX_INVENTORY_BYTES = 5
+                retained_issues: list[Issue] = []
+                validate_retained_input_budget(root, {retained_one, retained_two}, retained_issues)
+                assert any(issue.code == "BUILD031" for issue in retained_issues)
+            finally:
+                MAX_INVENTORY_BYTES = original_total_limit
+
+            walk_root = root / "walk"
+            walk_root.mkdir()
+            (walk_root / "kept.rs").write_text("pub fn kept() {}\n", encoding="utf-8", newline="\n")
+            (walk_root / "target").mkdir()
+            (walk_root / "target" / "ignored.rs").write_text(
+                "compile_error!(\"must stay pruned\");\n", encoding="utf-8", newline="\n"
+            )
+            nested_target = walk_root / "src" / "target"
+            nested_target.mkdir(parents=True)
+            (nested_target / "mod.rs").write_text("pub fn audited() {}\n", encoding="utf-8", newline="\n")
+            walk_issues: list[Issue] = []
+            walked, exhausted = collect_member_files(root, walk_root, walk_issues, [0], [0])
+            assert not exhausted
+            assert {path.relative_to(walk_root).as_posix() for path in walked} == {
+                "kept.rs",
+                "src/target/mod.rs",
+            }
+            assert walk_issues == []
+
+            link_target = root / "link-target"
+            link_target.mkdir()
+            linked_directory = walk_root / "linked-directory"
+            try:
+                linked_directory.symlink_to(link_target, target_is_directory=True)
+            except OSError:
+                pass  # Windows without Developer Mode cannot create this fixture.
+            else:
+                walk_issues = []
+                walked, exhausted = collect_member_files(root, walk_root, walk_issues, [0], [0])
+                assert not exhausted
+                assert all(path.name != "linked-directory" for path in walked)
+                assert any(issue.code == "BUILD027" for issue in walk_issues)
+
+            capped_root = root / "capped"
+            capped_root.mkdir()
+            for index in range(5):
+                (capped_root / f"entry-{index}.rs").write_text("", encoding="utf-8")
+            original_limit = MAX_INVENTORY_FILES
+            try:
+                MAX_INVENTORY_FILES = 3
+                cap_issues: list[Issue] = []
+                _, exhausted = collect_member_files(root, capped_root, cap_issues, [0], [0])
+                assert exhausted
+                assert any(issue.code == "BUILD023" for issue in cap_issues)
+            finally:
+                MAX_INVENTORY_FILES = original_limit
+
+            oversized_root = root / "oversized"
+            oversized_root.mkdir()
+            (oversized_root / "large.rs").write_text("12345", encoding="utf-8")
+            original_file_limit = MAX_INPUT_FILE_BYTES
+            try:
+                MAX_INPUT_FILE_BYTES = 4
+                size_issues: list[Issue] = []
+                _, exhausted = collect_member_files(root, oversized_root, size_issues, [0], [0])
+                assert not exhausted
+                assert any(issue.code == "BUILD030" for issue in size_issues)
+            finally:
+                MAX_INPUT_FILE_BYTES = original_file_limit
+
+            total_root = root / "total-bytes"
+            total_root.mkdir()
+            (total_root / "one.rs").write_text("123", encoding="utf-8")
+            (total_root / "two.rs").write_text("456", encoding="utf-8")
+            original_total_limit = MAX_INVENTORY_BYTES
+            try:
+                MAX_INVENTORY_BYTES = 5
+                total_issues: list[Issue] = []
+                _, exhausted = collect_member_files(root, total_root, total_issues, [0], [0])
+                assert exhausted
+                assert any(issue.code == "BUILD031" for issue in total_issues)
+            finally:
+                MAX_INVENTORY_BYTES = original_total_limit
     except (AssertionError, OSError) as error:
         print(f"check-rust-ffi self-test: FAIL: {error}", file=sys.stderr)
         return 1
@@ -982,6 +2019,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--aggregate-manifest", type=Path)
+    parser.add_argument("--cargo-working-directory", type=Path)
+    parser.add_argument("--cargo-home", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--emit-cmake-deps", action="store_true", help="print normalized build-input paths")
     mode.add_argument(
@@ -1000,21 +2039,45 @@ def main() -> int:
         return run_self_tests()
     root = args.repo_root.resolve()
     aggregate_manifest = (args.aggregate_manifest or root / AGGREGATE_MEMBER / "Cargo.toml").resolve()
-    inventory = build_inventory(root, aggregate_manifest)
+    try:
+        inventory = build_inventory(
+            root,
+            aggregate_manifest,
+            args.cargo_working_directory,
+            args.cargo_home,
+        )
+    except InventoryBudgetExceeded as error:
+        print(f"BUILD038 bounded inventory exhausted: {error}", file=sys.stderr)
+        return 2
     build_errors = [issue for issue in inventory.issues if issue.severity == "error"]
 
     if args.emit_cmake_deps or args.emit_cmake_member_dirs:
         if build_errors:
-            for issue in build_errors:
+            diagnostic_limit = min(len(build_errors), 200)
+            for issue in build_errors[:diagnostic_limit]:
                 location = issue.path + (f":{issue.line}" if issue.line else "")
                 print(f"{issue.code} {location}: {issue.message}", file=sys.stderr)
+            if len(build_errors) > diagnostic_limit:
+                print(f"... {len(build_errors) - diagnostic_limit} additional build error(s) omitted", file=sys.stderr)
             return 1
         paths = inventory.inputs if args.emit_cmake_deps else [crate.directory for crate in inventory.crates]
+        rendered_paths: list[str] = []
+        output_bytes = 0
         for path in paths:
-            if ";" in path.as_posix():
-                print(f"BUILD025 path cannot be represented in a CMake list: {path}", file=sys.stderr)
+            protocol_error = cmake_path_protocol_error(path)
+            if protocol_error is not None:
+                print(f"BUILD025 path cannot be represented safely ({protocol_error}): {path}", file=sys.stderr)
                 return 1
-            print(path.as_posix())
+            rendered = path.as_posix()
+            output_bytes += len(rendered.encode("utf-8")) + 1
+            if output_bytes > MAX_CMAKE_OUTPUT_BYTES:
+                print(
+                    f"BUILD036 CMake dependency output exceeds {MAX_CMAKE_OUTPUT_BYTES} bytes",
+                    file=sys.stderr,
+                )
+                return 1
+            rendered_paths.append(rendered)
+        print("\n".join(rendered_paths))
         return 0
 
     subsystem_count = len(inventory.crates) - (1 if inventory.aggregate is not None else 0)

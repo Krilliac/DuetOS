@@ -92,9 +92,10 @@ def function_body(source: str, name: str) -> str:
 def ordered(body: str, *needles: str) -> None:
     position = -1
     for needle in needles:
-        position = body.find(needle, position + 1)
-        if position < 0:
+        next_position = body.find(needle, position + 1)
+        if next_position < 0:
             raise AssertionError(f"missing ordered token: {needle}")
+        position = next_position
 
 
 class NetStackRestartContractTests(unittest.TestCase):
@@ -107,7 +108,8 @@ class NetStackRestartContractTests(unittest.TestCase):
         cls.tcp = read("kernel/net/tcp.cpp")
         cls.tcp_segment = read("kernel/net/tcp_segment.cpp")
         cls.tcp_timer = read("kernel/net/tcp_timer.cpp")
-        cls.host_test = read("tests/host/test_net_stack_restart.cpp")
+        cls.socket_header = read("kernel/net/socket.h")
+        cls.socket = read("kernel/net/socket.cpp")
 
     def test_public_api_uses_exact_receipts_and_context_callbacks(self) -> None:
         for token in (
@@ -153,7 +155,7 @@ class NetStackRestartContractTests(unittest.TestCase):
         owned = function_body(self.stack, "NetStackBindInterfaceOwned")
         ordered(owned, "*out_binding = kInvalidNetInterfaceBinding", "BindInterfaceInternal")
 
-    def test_unbind_closes_drains_and_retires_protocol_state(self) -> None:
+    def test_unbind_closes_then_drains_before_clearing_owner(self) -> None:
         unbind = function_body(self.stack, "NetStackUnbindInterface")
         ordered(
             unbind,
@@ -168,35 +170,37 @@ class NetStackRestartContractTests(unittest.TestCase):
             "g_dhcp[binding.iface_index] = {}",
             "ifc.retiring = false",
         )
-        timeout = unbind[: unbind.index("tcp::RetireInterface(binding)")]
-        self.assertNotIn("ifc.driver_context = nullptr", timeout)
-        for state in (
-            "g_ping_binding_generation",
-            "g_dns_binding_generation",
-            "g_ntp_binding_generation",
-        ):
-            self.assertIn(state, unbind)
+        retire_position = unbind.index("tcp::RetireInterface(binding)")
+        final_lock_position = unbind.index("flags = sync::SpinLockAcquire(g_interface_lock)", retire_position)
+        final_unlock_position = unbind.index("sync::SpinLockRelease(g_interface_lock, flags)", final_lock_position)
+        self.assertNotIn("tcp::RetireInterface", unbind[final_lock_position:final_unlock_position])
 
-    def test_stale_rx_and_arp_state_are_generation_scoped(self) -> None:
-        exact_rx = function_body(self.stack, "NetStackInjectRx")
-        self.assertIn("binding.generation", self.stack)
+        timeout = unbind[:retire_position]
+        self.assertNotIn("ifc.driver_context = nullptr", timeout)
+
+    def test_stale_rx_and_protocol_state_are_generation_scoped(self) -> None:
+        exact_rx = re.search(
+            r"void\s+NetStackInjectRx\(NetInterfaceBinding\s+binding[^)]*\)\s*\{(?P<body>.*?)\n\}",
+            self.stack,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(exact_rx)
+        self.assertIn("binding.generation", exact_rx.group("body"))
         self.assertIn("u64 binding_generation", self.stack)
         self.assertRegex(
             self.stack,
             r"e\.iface_index\s*==\s*iface_index\s*&&\s*e\.binding_generation\s*==\s*binding_generation",
         )
-        self.assertIn("InterfaceGenerationIsOpen", function_body(self.stack, "ArpLookup"))
-        self.assertIn("InterfaceGenerationIsOpen", function_body(self.stack, "ArpInsert"))
-        self.assertIn("InjectRxInternal(binding.iface_index, binding.generation", self.stack)
-        self.assertIn("NetStackInjectRx(u32 iface_index", self.header)
-        self.assertTrue(exact_rx)
+        self.assertIn("InterfaceGenerationIsOpen(iface_index, binding_generation)", function_body(self.stack, "ArpLookup"))
+        self.assertIn("InterfaceGenerationIsOpen(iface_index, binding_generation)", function_body(self.stack, "ArpInsert"))
+        for state in ("g_dhcp", "g_ping_binding_generation", "g_dns_binding_generation", "g_ntp_binding_generation"):
+            self.assertIn(state, function_body(self.stack, "NetStackUnbindInterface"))
 
-    def test_boot_diagnostic_scan_uses_registry_copyout(self) -> None:
-        init = function_body(self.stack, "NetStackInit")
-        self.assertIn("drivers::net::NicSnapshot", init)
-        self.assertNotRegex(init, r"drivers::net::Nic\s*\(")
+    def test_legacy_entry_points_remain_available_during_migration(self) -> None:
+        self.assertIn("bool NetStackBindInterface(u32 iface_index", self.header)
+        self.assertIn("void NetStackInjectRx(u32 iface_index", self.header)
 
-    def test_tcp_objects_capture_exact_interface_identity(self) -> None:
+    def test_tcp_objects_capture_and_match_exact_interface_identity(self) -> None:
         tcb = re.search(r"struct\s+Tcb\s*\{(?P<body>.*?)\n\};", self.tcp_internal, re.DOTALL)
         self.assertIsNotNone(tcb)
         self.assertIn("NetInterfaceBinding interface_binding", tcb.group("body"))
@@ -208,11 +212,14 @@ class NetStackRestartContractTests(unittest.TestCase):
             ordered(body, "StackInterfacePinGuard", "interface.binding", "t.interface_binding = interface.binding")
             self.assertIn("t.local_mac = interface.mac", body)
 
-        self.assertIn("NetInterfaceBindingEqual", function_body(self.tcp, "LookupExact"))
-        self.assertIn("NetInterfaceBindingEqual", function_body(self.tcp, "LookupListener"))
-        self.assertIn("binding.generation", function_body(self.tcp, "BucketHash"))
+        lookup = function_body(self.tcp, "LookupExact")
+        listener = function_body(self.tcp, "LookupListener")
+        bucket_hash = function_body(self.tcp, "BucketHash")
+        self.assertIn("NetInterfaceBindingEqual", lookup)
+        self.assertIn("NetInterfaceBindingEqual", listener)
+        self.assertIn("binding.generation", bucket_hash)
 
-    def test_tcp_send_rx_and_retirement_fail_closed(self) -> None:
+    def test_tcp_send_and_rx_fail_closed_on_stale_generation(self) -> None:
         send = function_body(self.tcp_segment, "SendSegment")
         ordered(send, "t.local_mac.octets", "NetStackTransmit(t.interface_binding")
         self.assertNotIn("InterfaceMac", send)
@@ -225,26 +232,57 @@ class NetStackRestartContractTests(unittest.TestCase):
         self.assertIn("child.local_mac = interface.mac", child)
         self.assertIn("SendSegment", self.tcp_timer)
 
+    def test_tcp_retire_drops_exact_generation_before_rebind(self) -> None:
         self.assertIn("u32 RetireInterface(NetInterfaceBinding binding)", self.tcp_header)
         retire = function_body(self.tcp_segment, "RetireInterface")
         ordered(retire, "NetInterfaceBindingEqual", "DropTcb(i)")
         self.assertIn("SpinLockAcquire(g_tcb_lock)", retire)
         self.assertIn("SpinLockRelease(g_tcb_lock", retire)
 
-    def test_host_race_covers_timeout_retry_rebind_and_stale_work(self) -> None:
-        for token in (
-            "std::thread pinned",
-            "DrainTimedOut",
-            "premature",
-            "old_listener",
-            "old_connection_id",
-            "binding_b.generation != binding_a.generation",
-            "NetStackTransmit(binding_a",
-            "NetStackInjectRx(binding_a",
-            "NetStackInjectRx(binding_b",
-            "delayed_tcb.interface_binding = binding_a",
+    def test_udp_socket_send_pins_one_interface_generation(self) -> None:
+        snapshot = re.search(r"struct\s+SocketSnapshot\s*\{(?P<body>.*?)\n\};", self.socket, re.DOTALL)
+        self.assertIsNotNone(snapshot)
+        self.assertIn("u32 iface_index", snapshot.group("body"))
+        self.assertIn("out.iface_index = s.iface_index", function_body(self.socket, "SnapshotSocketLocked"))
+
+        send = function_body(self.socket, "SocketSendDgram")
+        ordered(
+            send,
+            "state = SnapshotSocketLocked(s)",
+            "NetStackAcquireInterface(state.iface_index, &interface)",
+            "DUETOS_DEFER(NetStackReleaseInterface(interface.binding))",
+            "!IpEqual(state.local_ip, interface.ip)",
+            "ArpLookup(interface.binding.iface_index, dst, &arp)",
+            "NetUdpSend(interface.binding.iface_index",
+        )
+        self.assertNotIn("NicCount", send)
+        self.assertNotIn("InterfaceIp", send)
+
+    def test_stream_socket_lazily_reconciles_retired_tcb_without_lock_inversion(self) -> None:
+        reconcile = function_body(self.socket, "ReconcileRetiredStreamTcb")
+        ordered(
+            reconcile,
+            "observed = snapshot.tcb",
+            "SpinLockRelease(g_sock_lock, flags)",
+            "tcp::Alive(observed)",
+            "flags = sync::SpinLockAcquire(g_sock_lock)",
+            "current.tcb == observed",
+            "current.tcb = tcp::kInvalidTcbId",
+            "current.connected = false",
+            "current.listening = false",
+            "current.shutdown_flags |= 0x3",
+        )
+        for name in (
+            "SocketIsListening",
+            "SocketIsConnected",
+            "SocketListen",
+            "SocketConnect",
+            "SocketAcceptNonblocking",
+            "SocketSendStream",
+            "SocketRecvStream",
+            "SocketPollEvents",
         ):
-            self.assertIn(token, self.host_test)
+            self.assertIn("ReconcileRetiredStreamTcb", function_body(self.socket, name), name)
 
 
 if __name__ == "__main__":

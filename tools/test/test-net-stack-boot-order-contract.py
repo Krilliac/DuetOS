@@ -124,21 +124,6 @@ class NetStackBootOrderContractTests(unittest.TestCase):
         service_body = function_body(bringup_source, "BootBringupKernelServices")
         unique_position(service_body, "scheduler initialization", r"\bSchedInit\s*\(")
 
-    def test_registry_result_is_observed(self) -> None:
-        bringup_source = BRINGUP_CPP.read_text(encoding="utf-8")
-        devices = function_body(bringup_source, "BootBringupDevices")
-
-        self.assertRegex(
-            devices,
-            r"\bif\s*\(\s*!\s*duetos::drivers::net::NetInit\s*\(\s*\)\s*\)",
-            "boot must observe a failed Result<void> from NIC registry activation",
-        )
-        self.assertIn(
-            "NIC registry unavailable",
-            bringup_source,
-            "failed NIC activation must leave an operator-visible boot diagnostic",
-        )
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -58,9 +58,11 @@ void PrintShortcutHelp();
 // Dispatch a menu action_id to the side-effect that backs it.
 // `action` is the action_id from the menu's `MenuItem` table; 0
 // is reserved for "no item" and never reaches here. `ctx` is the
-// ambient `MenuContext()` at fire time — for window menus it's
-// the target `WindowHandle`; the system menu and Files row menu
-// both pass ctx through too.
-void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx);
+// ambient generic MenuContext() value at fire time.
+// Files menus keep their row index in `ctx`. Window menus additionally pass
+// MenuWindowIdentity() in `window_identity`; window actions fail closed when
+// that exact public HWND generation no longer resolves. Generic menus leave
+// it at zero.
+void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx, duetos::u32 window_identity = 0);
 
 } // namespace duetos::core

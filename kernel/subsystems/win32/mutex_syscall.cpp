@@ -35,22 +35,18 @@ namespace
 {
 constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
 constexpr u64 kWaitObject0 = 0;
+constexpr u64 kWaitAbandoned0 = 0x80;
 constexpr u64 kWaitTimeout = 0x102;
 constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
 
-// Map a Win32 mutex handle to a kobj_handles slot id, or
-// `ipc::kHandleInvalid` if the value is out of range. The
-// translation is a flat subtraction of the per-type base so a
-// PE that DuplicateHandle'd from another DuetOS process sees the
-// same opaque value.
+// Validate and decode the generation-preserving Win32 type tag.
+// The internal token still carries both slot and generation.
 ipc::Handle Win32HandleToIpc(u64 handle)
 {
-    if (handle < core::Process::kWin32MutexBase ||
-        handle >= core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
-    {
-        return ipc::kHandleInvalid;
-    }
-    return static_cast<ipc::Handle>(handle - core::Process::kWin32MutexBase);
+    ipc::Handle decoded = ipc::kHandleInvalid;
+    return ipc::HandleDecodeTagged(handle, static_cast<u32>(core::Process::kWin32MutexBase), &decoded)
+               ? decoded
+               : ipc::kHandleInvalid;
 }
 } // namespace
 
@@ -79,16 +75,26 @@ void DoMutexCreate(arch::TrapFrame* frame)
     // refcount accounting stays balanced if the table-insert
     // below fails.
     const bool initial_owner = (frame->rdi != 0);
+    bool initial_owner_acquired = false;
     if (initial_owner)
     {
-        ipc::KMutexAcquire(m);
+        const ipc::KMutexWaitResult wait_result = ipc::KMutexAcquire(m);
+        initial_owner_acquired =
+            wait_result == ipc::KMutexWaitResult::Acquired || wait_result == ipc::KMutexWaitResult::Abandoned;
+        if (!initial_owner_acquired)
+        {
+            ipc::KObjectRelease(&m->base);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
     }
 
-    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &m->base);
+    const u64 rights = ipc::HandleRightsForProcess(ipc::KObjectType::Mutex, core::ProcessCapsSnapshot(proc));
+    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &m->base, rights);
     if (!insert_r.has_value())
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex", "create: kobj_handles full in pid", proc->pid);
-        if (initial_owner)
+        if (initial_owner_acquired)
         {
             ipc::KMutexRelease(m);
         }
@@ -98,12 +104,22 @@ void DoMutexCreate(arch::TrapFrame* frame)
         return;
     }
     const ipc::Handle ipc_h = insert_r.value();
-    const u64 handle = core::Process::kWin32MutexBase + ipc_h;
+    u64 handle = 0;
+    if (!ipc::HandleEncodeTagged(ipc_h, static_cast<u32>(core::Process::kWin32MutexBase), &handle))
+    {
+        // Keep the impossible-today encoding rollback ownership-complete:
+        // initial ownership carries a holder ref independent of the table ref.
+        if (initial_owner_acquired)
+            ipc::KMutexRelease(m);
+        (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
     KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtCreateMutant OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_MUTEX_CREATE), frame->rip);
-    if (initial_owner)
+    if (initial_owner_acquired)
     {
-        custom::OnMutexAcquire(proc, static_cast<u32>(ipc_h));
+        custom::OnMutexAcquire(proc, ipc::HandleSlotIndex(ipc_h));
     }
     frame->rax = handle;
 }
@@ -134,21 +150,14 @@ void DoMutexWait(arch::TrapFrame* frame)
     // the narrower per-handle floor. A handle minted with reduced
     // rights cannot waive its way back up by re-entering the
     // syscall. Mutex acquire == Wait.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
-                     "NtWaitForSingleObject: handle lacks Wait right; handle", handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-
     // Pin the kernel object across the wait — closing every
     // handle in parallel cannot free the storage while we hold
     // this reference. KMutexAcquire/AcquireTimed also take
     // their own wait-ref defensively, but acquiring the lookup
     // ref here ensures the type-checked KObject* stays valid
     // through the call regardless.
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex, ipc::kHandleRightWait);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
@@ -159,47 +168,57 @@ void DoMutexWait(arch::TrapFrame* frame)
     auto* m = reinterpret_cast<ipc::KMutex*>(obj);
 
     const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
-    sched::Task* me = sched::CurrentTask();
+    const u64 me_tid = sched::CurrentTaskId();
 
     // Re-entrant + uncontended fast paths inside KMutexAcquire
     // already short-circuit; we still drive deadlock-detect /
     // contention bookkeeping by sampling the holder edge BEFORE
     // the call. Owner-sample is racy under SMP — that's acceptable
     // for a diagnostic edge.
-    sched::Task* current_owner = ipc::KMutexOwner(m);
-    const bool will_block = (current_owner != nullptr) && (current_owner != me);
-    const u64 holder_tid = (current_owner != nullptr) ? sched::TaskId(current_owner) : 0;
+    const bool currently_held = ipc::KMutexHeld(m);
+    const u64 holder_tid = ipc::KMutexOwnerTid(m);
+    const bool will_block = currently_held && holder_tid != me_tid;
     if (will_block)
     {
-        custom::OnMutexWaitStart(proc, static_cast<u32>(ipc_h), handle, holder_tid, proc->pid);
+        custom::OnMutexWaitStart(proc, ipc::HandleSlotIndex(ipc_h), handle, holder_tid, proc->pid);
     }
     const u64 wait_start = ::duetos::time::TickCount();
 
-    bool got;
+    ipc::KMutexWaitResult wait_result;
     if (timeout_ms == kInfiniteMs)
     {
-        ipc::KMutexAcquire(m);
-        got = true;
+        wait_result = ipc::KMutexAcquire(m);
     }
     else
     {
         const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
-        got = ipc::KMutexAcquireTimed(m, ticks);
+        wait_result = ipc::KMutexAcquireTimed(m, ticks);
     }
 
     const u64 wait_end = ::duetos::time::TickCount();
     if (will_block)
     {
-        custom::OnMutexWaitEnd(proc, static_cast<u32>(ipc_h), wait_end - wait_start);
+        custom::OnMutexWaitEnd(proc, ipc::HandleSlotIndex(ipc_h), wait_end - wait_start);
     }
-    if (got)
+    if (wait_result == ipc::KMutexWaitResult::Acquired)
     {
-        custom::OnMutexAcquire(proc, static_cast<u32>(ipc_h));
+        custom::OnMutexAcquire(proc, ipc::HandleSlotIndex(ipc_h));
         frame->rax = kWaitObject0;
+    }
+    else if (wait_result == ipc::KMutexWaitResult::Abandoned)
+    {
+        custom::OnMutexAcquire(proc, ipc::HandleSlotIndex(ipc_h));
+        frame->rax = kWaitAbandoned0;
+    }
+    else if (wait_result == ipc::KMutexWaitResult::TimedOut)
+    {
+        frame->rax = kWaitTimeout;
     }
     else
     {
-        frame->rax = kWaitTimeout;
+        // Cancelled returns only so the dispatcher can unwind its references;
+        // the outer cancellation boundary exits the task before user mode.
+        frame->rax = static_cast<u64>(-1);
     }
     ipc::KObjectRelease(obj); // drop the lookup ref taken above
 }
@@ -223,14 +242,8 @@ void DoMutexRelease(arch::TrapFrame* frame)
     }
     // Per-handle rights gate — release is the signalling side of
     // a mutex (hands off ownership), so kHandleRightSignal gates it.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
-                     "NtReleaseMutant: handle lacks Signal right; handle", handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex, ipc::kHandleRightSignal);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant: bad/closed handle; handle",
@@ -239,7 +252,7 @@ void DoMutexRelease(arch::TrapFrame* frame)
         return;
     }
     auto* m = reinterpret_cast<ipc::KMutex*>(obj);
-    if (ipc::KMutexOwner(m) != sched::CurrentTask())
+    if (!ipc::KMutexRelease(m))
     {
         // Not-owner release is a legitimate API failure mode — the
         // caller is expected to handle the -1 return. Real Windows
@@ -251,7 +264,6 @@ void DoMutexRelease(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    ipc::KMutexRelease(m);
     ipc::KObjectRelease(obj); // drop the lookup ref
     frame->rax = 0;
 }

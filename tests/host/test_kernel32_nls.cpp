@@ -22,9 +22,24 @@
 
 #include "host_test_helper.h"
 
+#include <cstdarg>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+// The freestanding DLL core names the Clang/GCC varargs builtins directly.
+// Map those spellings to the equivalent standard MSVC macros only while the
+// production header is parsed; the behavior and ABI remain va_list-based.
+#define __builtin_va_list va_list
+#define __builtin_va_arg(ap, type) va_arg(ap, type)
+#endif
+
 #include "../../userland/libs/kernel32/kernel32_nls_format.h"
 #include "../../userland/libs/shlwapi/shlwapi_parse.h"
 #include "../../userland/libs/user32/user32_wsprintf_core.h"
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#undef __builtin_va_arg
+#undef __builtin_va_list
+#endif
 
 using namespace duetos_host_test;
 
@@ -71,18 +86,18 @@ const char* cur(const char* num, unsigned int negOrder, unsigned int posOrder, c
 int tfmt_a(char* out, int cap, const char* fmt, ...)
 {
     duetos_valist ap;
-    __builtin_va_start(ap, fmt);
+    va_start(ap, fmt);
     int r = duetos_wvsnprintf_a(out, cap, fmt, ap);
-    __builtin_va_end(ap);
+    va_end(ap);
     return r;
 }
 
 int tfmt_w(unsigned short* out, int cap, const unsigned short* fmt, ...)
 {
     duetos_valist ap;
-    __builtin_va_start(ap, fmt);
+    va_start(ap, fmt);
     int r = duetos_wvsnprintf_w(out, cap, fmt, ap);
-    __builtin_va_end(ap);
+    va_end(ap);
     return r;
 }
 

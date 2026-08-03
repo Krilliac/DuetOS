@@ -441,34 +441,14 @@ void RestoreBootSector()
 
 // ---- ransomware FS write-rate flood ----
 //
-// The runtime cap is per-process (`kFsWriteWindowByteCap` =
-// 16 MiB / s), enforced at every successful file-write syscall
-// site. Validating the threshold logic from kernel context can't
-// drive the real syscall path — that would route through the
-// CALLING task (kernel main thread) and FlagCurrentForKill would
-// terminate the suite mid-flight. Instead we build a synthetic
-// Process struct and exercise the bookkeeping API directly,
-// then bump the global health counter through the documented
-// note hook so this attack matches the standard
-// "expect counter to increment" pattern.
-//
-// The synthetic Process lives in a static buffer to keep KMalloc
-// out of the test (the freestanding kernel has no heap-failure
-// recovery story for an attack that's supposed to be safe).
-alignas(8) constinit u8 g_ransom_proc_storage[sizeof(::duetos::core::Process)] = {};
-
-// Re-zero the synthetic Process buffer. Each ransom-rate-tier
-// attack starts from a fresh window so its threshold-cross
-// numbers are deterministic.
-void ResetRansomProc(::duetos::core::Process** out_p)
+// Runtime enforcement is owned by each Process's AuthorizationContext.
+// Kernel-context attack simulation cannot drive the real syscall adapter
+// without targeting the suite's own task, so these probes create an isolated
+// sandbox AuthorizationContext and exercise the same accounting primitive.
+bool CreateRansomAuthorization(::duetos::core::AuthorizationContextKey* key_out)
 {
-    using ::duetos::core::Process;
-    for (u64 i = 0; i < sizeof(g_ransom_proc_storage); ++i)
-        g_ransom_proc_storage[i] = 0;
-    auto* p = reinterpret_cast<Process*>(g_ransom_proc_storage);
-    p->pid = 0xFADE'C0DEull; // synthetic; never enters the scheduler
-    p->name = "ransom-sim";
-    *out_p = p;
+    return ::duetos::core::AuthorizationCreateSandbox(::duetos::core::CapSetEmpty(), ::duetos::core::CapSetEmpty(),
+                                                      ::duetos::core::kTickBudgetTrusted, key_out);
 }
 
 void AttackRansomwareWriteRate()
@@ -478,18 +458,23 @@ void AttackRansomwareWriteRate()
     // RecordFsWriteCheckLevel returns 0 (burst tier) when the
     // 1-second cap is the first one breached.
     using ::duetos::core::kFsWriteWindowByteCapByLevel;
-    ::duetos::core::Process* p = nullptr;
-    ResetRansomProc(&p);
+    ::duetos::core::AuthorizationContextKey authorization = ::duetos::core::kInvalidAuthorizationContextKey;
+    if (!CreateRansomAuthorization(&authorization))
+        return;
 
     constexpr u64 kChunk = 4096;
     const u64 kCalls = (kFsWriteWindowByteCapByLevel[0] / kChunk) + 1;
     i32 lvl = -1;
     for (u64 i = 0; i < kCalls; ++i)
     {
-        lvl = ::duetos::core::RecordFsWriteCheckLevel(p, kChunk);
-        if (lvl >= 0)
+        const auto result = ::duetos::core::AuthorizationRecordFsWrite(authorization, 1, kChunk);
+        lvl = result.fs_write_window == ::duetos::core::kAuthorizationNoFsWriteWindow
+                  ? -1
+                  : static_cast<i32>(result.fs_write_window);
+        if (result.action == ::duetos::core::AuthorizationAction::FsWriteRateExceeded)
             break;
     }
+    (void)::duetos::core::AuthorizationRelease(&authorization);
     if (lvl != 0)
     {
         arch::SerialWrite("[attacksim]   ransom-burst: tier mismatch (got lvl=");
@@ -503,8 +488,7 @@ void AttackRansomwareWriteRate()
 
 void RestoreRansomwareWriteRate()
 {
-    // Synthetic Process struct — nothing to restore. Reset
-    // happens at the start of every Attack* call below.
+    // Each attack releases its isolated AuthorizationContext.
 }
 
 // Low-and-slow tier (sustained, 5-minute window). Models the
@@ -514,22 +498,16 @@ void RestoreRansomwareWriteRate()
 // this strategy: 14 MiB × tens-of-iterations exhausts the
 // budget long before 5 minutes pass.
 //
-// Implementation: write 16 chunks of 16 MiB each. Each
-// individual chunk is right at the burst cap (so RecordFsWrite-
-// CheckLevel returns 0 on it), but together they exceed the
-// sustained cap on a later iteration. We don't actually wait
-// 1 second between chunks because the test runs in microseconds
-// — instead we manually advance the burst window's start_tick
-// after each chunk, simulating "1 s passed". The sustained
-// window still accumulates because its tick budget is 30 000 ×
-// the burst's, so only one start_tick advance per chunk fits.
+// Implementation: write 16 MiB chunks at simulated monotonic times just past
+// each burst-window boundary. The burst window rolls normally while the
+// sustained window accumulates and eventually exceeds its own cap.
 void AttackRansomwareLowAndSlow()
 {
     using ::duetos::core::kFsWriteWindowByteCapByLevel;
     using ::duetos::core::kFsWriteWindowTicksByLevel;
-    using ::duetos::core::Process;
-    Process* p = nullptr;
-    ResetRansomProc(&p);
+    ::duetos::core::AuthorizationContextKey authorization = ::duetos::core::kInvalidAuthorizationContextKey;
+    if (!CreateRansomAuthorization(&authorization))
+        return;
 
     // Each iteration: write right up to the burst cap, then
     // advance the burst-window start so the next iteration sees
@@ -543,7 +521,11 @@ void AttackRansomwareLowAndSlow()
     i32 final_lvl = -1;
     for (u64 i = 0; i < kIters; ++i)
     {
-        const i32 lvl = ::duetos::core::RecordFsWriteCheckLevel(p, chunk);
+        const u64 simulated_tick = 1 + i * (kFsWriteWindowTicksByLevel[0] + 1);
+        const auto result = ::duetos::core::AuthorizationRecordFsWrite(authorization, simulated_tick, chunk);
+        const i32 lvl = result.fs_write_window == ::duetos::core::kAuthorizationNoFsWriteWindow
+                            ? -1
+                            : static_cast<i32>(result.fs_write_window);
         if (lvl >= 0)
         {
             final_lvl = lvl;
@@ -560,8 +542,8 @@ void AttackRansomwareLowAndSlow()
         // actual SchedSleepTicks(100) call from kernel main —
         // the test is exercising the bookkeeping, not the
         // scheduler.
-        p->fs_write_window_start_tick[0] -= kFsWriteWindowTicksByLevel[0] + 1;
     }
+    (void)::duetos::core::AuthorizationRelease(&authorization);
     if (final_lvl != 1)
     {
         arch::SerialWrite("[attacksim]   ransom-slow: tier mismatch (expected 1, got lvl=");

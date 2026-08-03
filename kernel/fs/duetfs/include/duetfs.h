@@ -7,6 +7,24 @@
 // handle backends. Construct a Device, hand it to a duetfs_* call,
 // drop it. The Rust crate never retains the descriptor or the
 // callbacks across calls.
+//
+// Safety contract for every call:
+//   * Input regions are initialized and readable for the full call.
+//     Initialized in/out regions (the XTS block buffers) are exclusively
+//     writable for the full call. Pure output regions may be uninitialized
+//     on entry; DuetFS initializes byte outputs before constructing Rust
+//     references and writes structured outputs with raw pointer writes.
+//   * Every non-null output region is naturally aligned and disjoint from
+//     the descriptor, every input region, and every other output region.
+//   * Storage reachable through `Device::cookie` that a callback may read
+//     or write is stable and disjoint from the descriptor and every explicit
+//     FFI input/output region for the full call. No other thread may mutate
+//     input or callback-reachable storage, or access an output/in-out region,
+//     until the call returns.
+//   * Callbacks obey their prototypes, access callback buffer arguments only
+//     for that invocation, and never retain those pointers.
+// Native lengths are checked against the operation's documented work cap
+// before Rust constructs a slice.
 
 #pragma once
 
@@ -14,6 +32,8 @@
 
 namespace duetos::fs::duetfs
 {
+
+static_assert(sizeof(usize) == sizeof(u64), "DuetFS C ABI requires a 64-bit kernel size type");
 
 // ----------------------------------------------------------------
 // Constants — kept in lockstep with kernel/fs/duetfs/src/format.rs
@@ -34,6 +54,8 @@ inline constexpr u64 kMagic = 0x3130534674657544ull;
 inline constexpr u32 kVersion = 8; // v8 (xattrs / ACLs)
 inline constexpr u32 kXattrNameMax = 255;
 inline constexpr u32 kXattrValueMax = 1024;
+inline constexpr u32 kPathMax = 4096;
+inline constexpr u32 kMaxIoBytes = 1024 * kBlockSize;
 inline constexpr u32 kJournalLba = 7;
 inline constexpr u32 kJournalBlocks = 8;
 inline constexpr u32 kSnapshotLba = 15;
@@ -41,6 +63,12 @@ inline constexpr u32 kSnapshotBlocks = 7;
 inline constexpr u32 kDataLba = 22;
 inline constexpr u32 kSaltBytes = 16;
 inline constexpr u32 kXtsKeyBytes = 64;
+inline constexpr u32 kArgon2MaxPasswordBytes = 1024;
+inline constexpr u32 kArgon2MaxSaltBytes = 64;
+inline constexpr u32 kArgon2MaxMemoryKiB = 8 * 1024;
+inline constexpr u32 kArgon2MaxTimeCost = 10;
+inline constexpr u32 kArgon2MaxParallelism = 4;
+inline constexpr u32 kLz4MaxInputBytes = 64 * 1024 * 1024;
 inline constexpr u32 kEncryptedNo = 0;
 inline constexpr u32 kEncryptedAesXts256 = 1;
 inline constexpr u32 kMaxInlineExtents = 8;
@@ -70,8 +98,11 @@ inline constexpr u32 kStatusSymlinkLoop = 16;
 // ----------------------------------------------------------------
 // Device descriptor
 // ----------------------------------------------------------------
-using BlockReadFn = i32 (*)(void* cookie, u32 lba, u8* dst);
-using BlockWriteFn = i32 (*)(void* cookie, u32 lba, const u8* src);
+extern "C"
+{
+    using BlockReadFn = i32 (*)(void* cookie, u32 lba, u8* dst);
+    using BlockWriteFn = i32 (*)(void* cookie, u32 lba, const u8* src);
+}
 
 struct Device
 {
@@ -81,6 +112,8 @@ struct Device
     BlockReadFn read;
     BlockWriteFn write;
 };
+static_assert(sizeof(Device) == 32);
+static_assert(alignof(Device) == 8);
 
 // ----------------------------------------------------------------
 // Lookup result
@@ -92,6 +125,8 @@ struct LookupResult
     u32 size_bytes;
     u32 child_count;
 };
+static_assert(sizeof(LookupResult) == 16);
+static_assert(alignof(LookupResult) == 4);
 inline constexpr u32 kKindMiss = 0xFFFFFFFFu;
 
 // ----------------------------------------------------------------
@@ -107,6 +142,8 @@ struct DirEntry
     u32 name_len;
     u8 name[kNameMax];
 };
+static_assert(sizeof(DirEntry) == 80);
+static_assert(alignof(DirEntry) == 4);
 
 /// fsck output. `repaired = 1` iff the on-disk bitmap was
 /// rewritten. `sb_crc_mismatch = 1` if the superblock's stored
@@ -124,6 +161,8 @@ struct FsckReport
     u32 block_crc_mismatch;
     u32 link_count_mismatch;
 };
+static_assert(sizeof(FsckReport) == 32);
+static_assert(alignof(FsckReport) == 4);
 
 // ----------------------------------------------------------------
 // FFI surface
@@ -245,8 +284,9 @@ extern "C"
 
     /// Argon2id KDF. Derives a 64-byte key (kXtsKeyBytes) into
     /// `out_key` from `password` + `salt` and the (m, t, p) costs.
-    /// kStatusInvalid for null pointers / empty inputs / out-of-
-    /// range params. Default v6 params: m=4096 KiB, t=3, p=1.
+    /// kStatusInvalid for null pointers / empty inputs / overlapping
+    /// input-output storage, or params above the kArgon2Max* resource
+    /// ceilings. Default v6 params: m=4096 KiB, t=3, p=1.
     u32 duetfs_kdf_argon2id(const u8* password, usize password_len, const u8* salt, usize salt_len, u32 m_cost_kib,
                             u32 t_cost, u32 p_cost, u8* out_key);
 
@@ -276,13 +316,18 @@ extern "C"
     u32 duetfs_read_encryption_meta(const Device* dev, u32* out_encrypted, u32* out_m_cost, u32* out_t_cost,
                                     u32* out_p_cost, u8* out_salt, usize salt_buf_len);
 
-    /// LZ4 compress `src_len` bytes from `src` into `dst`. Output is
+    /// LZ4 compress non-empty `src_len` bytes from `src` into `dst`.
+    /// `src_len` is capped at kLz4MaxInputBytes and the source,
+    /// destination, and optional out-length storage must not overlap.
+    /// Output is
     /// a size-prefixed LZ4 frame (u32-le uncompressed length header +
     /// LZ4 bytes). Caller sizes `dst_max` via `duetfs_lz4_compress_bound`.
     u32 duetfs_lz4_compress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
 
     /// LZ4 decompress a size-prefixed frame from `src` into `dst`.
-    /// `dst_max` MUST be >= the original uncompressed length.
+    /// `dst_max` MUST be >= the original uncompressed length. The
+    /// untrusted size prefix is checked against kLz4MaxInputBytes and
+    /// `dst_max` before decompression; this call never allocates.
     u32 duetfs_lz4_decompress(const u8* src, usize src_len, u8* dst, usize dst_max, usize* out_len);
 
     /// Worst-case output size for duetfs_lz4_compress on an input of

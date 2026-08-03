@@ -58,6 +58,10 @@ const char* KObjectTypeName(KObjectType type)
         return "file";
     case KObjectType::Iocp:
         return "iocp";
+    case KObjectType::MessagePort:
+        return "message-port";
+    case KObjectType::ServiceEndpoint:
+        return "service-endpoint";
     case KObjectType::Test:
         return "test";
     default:
@@ -88,22 +92,24 @@ void KObjectInit(KObject* obj, KObjectType type, KObjectDestroyFn destroy)
     obj->destroy = destroy;
 }
 
-void KObjectAcquire(KObject* obj)
+bool KObjectAcquire(KObject* obj)
 {
     if (obj == nullptr)
     {
-        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire on null");
-        return;
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/kobject", "KObjectAcquire refused null object");
+        return false;
     }
-    sync::SpinLockGuard guard(g_kobject_lock);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_kobject_lock);
     if (obj->refcount == 0)
     {
         // Use-after-free shape: object is on its way out, caller
         // raced. Release: refuse the bump rather than resurrect a
-        // destroyed object. The guard's destructor unwinds the
-        // spinlock on early return.
-        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire on dead object (refcount already 0)");
-        return;
+        // destroyed object. Unlock before logging so failure does
+        // not add a logger edge to the global refcount lock.
+        sync::SpinLockRelease(g_kobject_lock, flags);
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/kobject",
+                    "KObjectAcquire refused dead object (refcount already 0)");
+        return false;
     }
     // Saturating increment — the spinlock makes the read+write
     // atomic, but a future "shareable handle" surface could let
@@ -113,9 +119,12 @@ void KObjectAcquire(KObject* obj)
     // class O.
     if (!util::RefcountIncSaturating(&obj->refcount))
     {
-        core::DebugPanicOrWarn("ipc/kobject", "KObjectAcquire refcount saturated");
-        return;
+        sync::SpinLockRelease(g_kobject_lock, flags);
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/kobject", "KObjectAcquire refused saturated refcount");
+        return false;
     }
+    sync::SpinLockRelease(g_kobject_lock, flags);
+    return true;
 }
 
 void KObjectRelease(KObject* obj)
@@ -151,13 +160,13 @@ void KObjectRelease(KObject* obj)
         // but every member access reads / writes the wrong layout.
         // Catching the corrupted tag here turns a UAF amplifier
         // into a clean panic with the corrupted value in hex. The
-        // valid range is {Mutex..Iocp} ∪ {Test=0xFFFE}; Invalid=0
+        // valid range is {Mutex..ServiceEndpoint} ∪ {Test=0xFFFE}; Invalid=0
         // means "never initialised" which is also a corruption
         // signal at destroy time.
         const u32 type_tag = static_cast<u32>(obj->type);
-        const bool valid_tag =
-            (type_tag >= static_cast<u32>(KObjectType::Mutex) && type_tag <= static_cast<u32>(KObjectType::Iocp)) ||
-            type_tag == static_cast<u32>(KObjectType::Test);
+        const bool valid_tag = (type_tag >= static_cast<u32>(KObjectType::Mutex) &&
+                                type_tag <= static_cast<u32>(KObjectType::ServiceEndpoint)) ||
+                               type_tag == static_cast<u32>(KObjectType::Test);
         KASSERT_WITH_VALUE(valid_tag, "ipc/kobject", "destroy: type tag corrupted", static_cast<u64>(type_tag));
         // Run destroy outside the lock — destroy may itself touch
         // other objects (Release them) and re-entering the global
@@ -215,8 +224,10 @@ void KObjectSelfTest()
         PanicKObj("Refcount accessor disagrees with init");
     }
 
-    KObjectAcquire(&t.base);
-    KObjectAcquire(&t.base);
+    if (!KObjectAcquire(&t.base) || !KObjectAcquire(&t.base))
+    {
+        PanicKObj("Acquire unexpectedly failed on live object");
+    }
     if (KObjectRefcount(&t.base) != 3)
     {
         PanicKObj("Acquire count != 3 after Init + 2 Acquire");
@@ -248,7 +259,29 @@ void KObjectSelfTest()
     // nullptr Release is a no-op (matches KFree).
     KObjectRelease(nullptr);
 
-    arch::SerialWrite("[ipc] kobject self-test OK (Init/Acquire/Release/destroy verified).\n");
+    // Checked-retain negative paths are load-bearing for every
+    // publisher: a failed retain must be observable so callers do
+    // not install an unbacked reference. SelfTestDestroy leaves the
+    // stack object readable after refcount reaches zero, which lets
+    // us exercise the dead-object refusal without a UAF.
+    if (KObjectAcquire(&t.base))
+    {
+        PanicKObj("Acquire resurrected dead object");
+    }
+
+    SelfTestObject saturated{};
+    KObjectInit(&saturated.base, KObjectType::Test, nullptr);
+    saturated.base.refcount = static_cast<u32>(-1);
+    if (KObjectAcquire(&saturated.base))
+    {
+        PanicKObj("Acquire wrapped saturated refcount");
+    }
+    if (saturated.base.refcount != static_cast<u32>(-1))
+    {
+        PanicKObj("failed saturated Acquire mutated refcount");
+    }
+
+    arch::SerialWrite("[ipc] kobject self-test OK (checked retain + release/destroy verified).\n");
 }
 
 } // namespace duetos::ipc

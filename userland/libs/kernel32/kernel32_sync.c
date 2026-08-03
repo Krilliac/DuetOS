@@ -1,5 +1,14 @@
 #include "kernel32_internal.h"
 
+typedef unsigned long NTSTATUS;
+
+#define STATUS_SUCCESS 0x00000000UL
+#define ERROR_INVALID_PARAMETER 87UL
+
+extern NTSTATUS NtQueryInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass, void* ProcessInformation,
+                                          ULONG ProcessInformationLength, ULONG* ReturnLength);
+extern ULONG RtlNtStatusToDosError(NTSTATUS Status);
+
 /* ------------------------------------------------------------------
  * Time queries
  *
@@ -738,41 +747,48 @@ __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* l
 }
 
 /* ------------------------------------------------------------------
- * WaitForSingleObject — dispatch by handle range
+ * WaitForSingleObject — dispatch by opaque handle type tag
  *
- * Mutex (0x200..0x23F)    -> SYS_MUTEX_WAIT (26)
- * Event (0x300..0x33F)    -> SYS_EVENT_WAIT (33)
- * Semaphore (0x500..0x53F) -> SYS_SEM_WAIT (53)
+ * Mutex low tag (0x201..0x23F)     -> SYS_MUTEX_WAIT (26)
+ * Event low tag (0x301..0x33F)     -> SYS_EVENT_WAIT (33)
+ * Semaphore low tag (0x501..0x53F) -> SYS_SEM_WAIT (53)
  * Thread (0x400..0x43F)   -> SYS_THREAD_WAIT (54)
  * Anything else            -> WAIT_OBJECT_0 (0) — pseudo-signal
  *                             (matches the flat-stub fallback)
  *
- * The per-type span is WIN32_HANDLE_CAP_PER_TYPE = the kernel's
- * kHandleTableCapacity (64). It was 8, which silently routed any
- * handle past the 8th of its type to the pseudo-signal else-branch:
- * WaitForSingleObject returned WAIT_OBJECT_0 without acquiring, so a
- * later ReleaseMutex hit the kernel's non-owner reject. The
- * hello-winapi stress loop creates 4 mutexes that land at
- * 0x205/0x207/0x209/0x20b, and 0x209/0x20b tripped this. The span
- * stays below the 0x100 base spacing so the four ranges are disjoint.
- * Freestanding DLL — can't include the kernel header, so the value is
- * mirrored here; keep it in sync with ipc::kHandleTableCapacity.
+ * The low 12 bits carry the per-type band plus slot while bits 12..30
+ * carry a non-zero generation. The per-type span mirrors the kernel's
+ * kHandleTableCapacity (64); the DLL is freestanding, so keep this
+ * value synchronized with ipc::kHandleTableCapacity.
  * ------------------------------------------------------------------ */
 
 #define WAIT_OBJECT_0 0u
 #define WAIT_TIMEOUT 0x102u
 #define WIN32_HANDLE_CAP_PER_TYPE 0x40u /* = kernel kHandleTableCapacity (64) */
+#define DUET_KOBJECT_TAG_MASK 0xFFFu
+#define DUET_KOBJECT_POSITIVE_MAX 0x7FFFFFFFu
+
+static int duet_is_kobject_handle(unsigned long long handle, unsigned tag_base)
+{
+    unsigned low_tag;
+    unsigned generation;
+    if (handle == 0 || handle > DUET_KOBJECT_POSITIVE_MAX)
+        return 0;
+    low_tag = (unsigned)handle & DUET_KOBJECT_TAG_MASK;
+    generation = (unsigned)handle >> 12;
+    return generation != 0 && low_tag > tag_base && low_tag < tag_base + WIN32_HANDLE_CAP_PER_TYPE;
+}
 
 __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
 {
     unsigned long long handle = (unsigned long long)h;
     long long rv;
     long long syscall_num;
-    if (handle >= 0x200 && handle < 0x200 + WIN32_HANDLE_CAP_PER_TYPE)
+    if (duet_is_kobject_handle(handle, 0x200u))
         syscall_num = 26; /* SYS_MUTEX_WAIT */
-    else if (handle >= 0x300 && handle < 0x300 + WIN32_HANDLE_CAP_PER_TYPE)
+    else if (duet_is_kobject_handle(handle, 0x300u))
         syscall_num = 33; /* SYS_EVENT_WAIT */
-    else if (handle >= 0x500 && handle < 0x500 + WIN32_HANDLE_CAP_PER_TYPE)
+    else if (duet_is_kobject_handle(handle, 0x500u))
         syscall_num = 53; /* SYS_SEM_WAIT */
     else if (handle >= 0x400 && handle < 0x400 + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 54; /* SYS_THREAD_WAIT */
@@ -1746,11 +1762,35 @@ __declspec(dllexport) WIN32_NORETURN void FreeLibraryAndExitThread(void* hModule
 
 __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode)
 {
-    /* No cross-process query in v0 — pretend the queried
-     * process is still running. Matches the flat stub's
-     * STILL_ACTIVE behaviour. */
-    (void)hProcess;
-    if (lpExitCode != (DWORD*)0)
-        *lpExitCode = 0x103; /* STILL_ACTIVE */
+    /* PROCESS_BASIC_INFORMATION, class 0. The kernel's stable x64
+     * facade writes the six pointer-sized fields below directly; the
+     * low DWORD of ExitStatus is the Win32 process exit code. Query
+     * into local storage first so an invalid handle never mutates the
+     * caller's output slot. */
+    struct DuetProcessBasicInformation
+    {
+        unsigned long long exit_status;
+        unsigned long long peb_base;
+        unsigned long long affinity_mask;
+        unsigned long long base_priority;
+        unsigned long long unique_pid;
+        unsigned long long inherited_from_pid;
+    } info;
+    ULONG return_length = 0;
+
+    if (lpExitCode == (DWORD*)0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    const NTSTATUS status = NtQueryInformationProcess(hProcess, 0, &info, (ULONG)sizeof(info), &return_length);
+    if (status != STATUS_SUCCESS)
+    {
+        SetLastError((DWORD)RtlNtStatusToDosError(status));
+        return 0;
+    }
+
+    *lpExitCode = (DWORD)info.exit_status;
     return 1;
 }

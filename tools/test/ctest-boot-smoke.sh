@@ -17,9 +17,10 @@
 #        Crashes are NEVER retried — a kernel that crashed once on
 #        a clean boot path has a real bug, even if the next attempt
 #        happens to land all the signatures.
-#    2 — environment skip: QEMU not installed (CI installs it; on
-#        a dev box without QEMU we report a skip rather than a
-#        failure).
+#    2 — local environment skip: a prerequisite is unavailable or a
+#        bounded emulator run cannot complete. Required release CI sets
+#        DUETOS_BOOT_SMOKE_REQUIRED=1, which converts every such condition
+#        to exit 1 so a skip can never authorize publication.
 #
 # The signature list mirrors .github/workflows/build.yml's
 # qemu-smoke job so local `ctest` and CI stay in lockstep.
@@ -29,9 +30,34 @@
 
 set -eo pipefail
 
+REQUIRED_GATE=0
+case "${DUETOS_BOOT_SMOKE_REQUIRED:-0}" in
+    1|true|TRUE|yes|YES)
+        REQUIRED_GATE=1
+        ;;
+    0|false|FALSE|no|NO|"")
+        ;;
+    *)
+        echo "FAIL: invalid DUETOS_BOOT_SMOKE_REQUIRED='${DUETOS_BOOT_SMOKE_REQUIRED}' (expected 0 or 1)" >&2
+        exit 1
+        ;;
+esac
+
+skip_or_fail()
+{
+    local reason="$1"
+    if [[ ${REQUIRED_GATE} -eq 1 ]]; then
+        echo "FAIL: ${reason}" >&2
+        echo "      Required GRUB+Multiboot2 release smoke gates may not skip." >&2
+        exit 1
+    fi
+    echo "SKIP: ${reason}"
+    exit 2
+}
+
 if [[ $# -ne 1 ]]; then
     echo "usage: $0 <cmake-binary-dir>" >&2
-    exit 2
+    exit 1
 fi
 
 BIN_DIR="$1"
@@ -39,14 +65,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_SCRIPT="${REPO_ROOT}/tools/qemu/run.sh"
 
 if [[ ! -x "${RUN_SCRIPT}" ]]; then
-    echo "SKIP: ${RUN_SCRIPT} not found"
-    exit 2
+    skip_or_fail "${RUN_SCRIPT} not found"
 fi
 if ! command -v qemu-system-x86_64 > /dev/null 2>&1; then
-    echo "SKIP: qemu-system-x86_64 not installed"
     echo "      Install via CLAUDE.md's live-test runtime tooling line:"
     echo "      sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools ovmf"
-    exit 2
+    skip_or_fail "qemu-system-x86_64 not installed"
 fi
 # duetos.iso is built only when grub-mkrescue + xorriso are present
 # at configure time. Without them, the iso target is disabled and
@@ -55,12 +79,11 @@ fi
 # above. The cmake configure line that emits "duetos-iso target
 # disabled" is the matching message on the build side.
 if [[ ! -f "${BIN_DIR}/duetos.iso" ]]; then
-    echo "SKIP: ${BIN_DIR}/duetos.iso not built"
     echo "      The iso target is disabled when grub-mkrescue / xorriso are"
     echo "      missing at configure time. Install via CLAUDE.md's live-test"
     echo "      runtime tooling line:"
     echo "      sudo apt-get install -y grub-common grub-pc-bin xorriso mtools"
-    exit 2
+    skip_or_fail "${BIN_DIR}/duetos.iso not built"
 fi
 # run.sh defaults DUETOS_PRESET=x86_64-debug. ctest may have invoked
 # us with a different preset's binary dir (the cmake --preset value
@@ -81,10 +104,9 @@ export DUETOS_PRESET="$(basename "${BIN_DIR}")"
 # a red signal for a known log-level mismatch.
 case "${DUETOS_PRESET}" in
     *release*|*lto*)
-        echo "SKIP: boot-smoke expects Info-level signatures; ${DUETOS_PRESET} runs at Warn"
         echo "      (CI runs this test on the debug build — see"
         echo "      .github/workflows/build.yml qemu-smoke job.)"
-        exit 2
+        skip_or_fail "boot-smoke expects Info-level signatures; ${DUETOS_PRESET} runs at Warn"
         ;;
 esac
 
@@ -102,9 +124,24 @@ rm -f "${SERIAL_LOG}"
 # untouched.
 SMOKE_ISO_STAGE="${BIN_DIR}/ctest-boot-smoke-iso-stage"
 SMOKE_ISO="${BIN_DIR}/ctest-boot-smoke.iso"
+GRUB_LOG="${BIN_DIR}/ctest-boot-smoke-grub.log"
+KERNEL_ELF="${BIN_DIR}/kernel/iso-stage/boot/duetos-kernel.elf"
+if [[ ! -f "${KERNEL_ELF}" && -f "${BIN_DIR}/kernel/duetos-kernel.elf" ]]; then
+    KERNEL_ELF="${BIN_DIR}/kernel/duetos-kernel.elf"
+fi
+if [[ ! -f "${KERNEL_ELF}" ]]; then
+    skip_or_fail "kernel ELF not found under ${BIN_DIR}/kernel"
+fi
+if ! command -v grub-mkrescue > /dev/null 2>&1; then
+    skip_or_fail "grub-mkrescue not installed"
+fi
+if ! command -v xorriso > /dev/null 2>&1; then
+    skip_or_fail "xorriso not installed"
+fi
 rm -rf "${SMOKE_ISO_STAGE}"
+rm -f "${SMOKE_ISO}" "${GRUB_LOG}"
 mkdir -p "${SMOKE_ISO_STAGE}/boot/grub"
-cp "${BIN_DIR}/kernel/iso-stage/boot/duetos-kernel.elf" "${SMOKE_ISO_STAGE}/boot/duetos-kernel.elf"
+cp "${KERNEL_ELF}" "${SMOKE_ISO_STAGE}/boot/duetos-kernel.elf"
 cat > "${SMOKE_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
 set timeout=0
 set default=0
@@ -113,8 +150,14 @@ menuentry "DuetOS — boot smoke (pe-smokes opt-in)" {
     boot
 }
 EOF
-if command -v grub-mkrescue > /dev/null 2>&1; then
-    grub-mkrescue --compress=xz -o "${SMOKE_ISO}" "${SMOKE_ISO_STAGE}" > /dev/null 2>&1 || true
+if ! grub-mkrescue --compress=xz -o "${SMOKE_ISO}" "${SMOKE_ISO_STAGE}" > "${GRUB_LOG}" 2>&1; then
+    echo "FAIL: grub-mkrescue could not build the required Multiboot2 smoke ISO" >&2
+    tail -40 "${GRUB_LOG}" >&2 || true
+    exit 1
+fi
+if [[ ! -s "${SMOKE_ISO}" ]]; then
+    echo "FAIL: grub-mkrescue returned success without producing ${SMOKE_ISO}" >&2
+    exit 1
 fi
 
 # Boot. `|| true` so a non-zero exit from QEMU (e.g. timeout —
@@ -164,6 +207,7 @@ fi
 # Expected signatures — every ring3 smoke probe prints its own
 # line. See kernel/proc/ring3_smoke.cpp.
 expected=(
+    "package staged and runtime open; activation disabled, compatibility manager retained"
     "[hello-pe] Hello from a PE executable!"
     "[hello-winapi] printed via kernel32.WriteFile!"
     "[vcruntime140] memset+memcpy+memmove OK"
@@ -259,6 +303,11 @@ expected=(
     '[hello-native] portable native ELF spawned'
     '[nat-calc] all eval cases passed'
     '[nat-sysinfo] report complete'
+    # netd and netd_probe intentionally create their first stream sockets
+    # back-to-back. Requiring the positive round-trip verdict makes this a
+    # runtime regression gate for transactional socket-slot allocation;
+    # merely forbidding FAIL would let a silently unstarted probe pass.
+    '[netd-probe] PASS (banner + echo round-trip)'
     # PE-compat smoke battery completion sentinel. ring3_smoke.cpp
     # emits this once every surface-coverage PE has been spawned —
     # its absence means the battery's queueing path regressed
@@ -356,7 +405,7 @@ if [[ -z "${banner}" ]] && ! grep -aqF '[boot]' "${SERIAL_LOG}"; then
         echo "  Check that QEMU started at all (see the tail below)." >&2
     fi
     tail -20 "${SERIAL_LOG}" >&2 || true
-    exit 2
+    skip_or_fail "no kernel boot output captured in ${SERIAL_LOG}"
 fi
 
 # Signatures emitted only when DUETOS_BOOT_SELFTESTS is on
@@ -432,13 +481,12 @@ if [[ $fail -ne 0 ]]; then
     # DUETOS CRASH / health ESCALATE), which keeps forbidden_hit
     # set and forces the exit-1 regression path below.
     if [[ ${timed_out} -eq 1 && ${forbidden_hit} -eq 0 && -n "${banner}" ]]; then
-        echo "SKIP: boot-smoke timed out under TCG with no forbidden signature."
         echo "      Kernel booted healthily (banner seen) but the software"
         echo "      emulator could not reach every signature within the"
         echo "      ${DUETOS_TIMEOUT:-${DEFAULT_INNER_TIMEOUT}} s budget. This is an environmental limit"
         echo "      (no /dev/kvm), not a regression. Run on a KVM-capable"
         echo "      host for the full gate."
-        exit 2
+        skip_or_fail "boot-smoke timed out before every required signature"
     fi
 
     # Any forbidden signature OR missing expected signature is a

@@ -110,7 +110,8 @@ KObject* NamedKObjectFind(KObjectType type, const char* name)
     {
         // Bump refcount under the table lock so the entry can't be
         // evicted by a concurrent Register before we add our ref.
-        KObjectAcquire(hit);
+        if (!KObjectAcquire(hit))
+            hit = nullptr;
     }
     ::duetos::sync::SpinLockRelease(g_table_lock, flags);
     return hit;
@@ -162,13 +163,18 @@ bool NamedKObjectRegister(KObjectType type, const char* name, KObject* obj)
     const bool victim_is_same_obj = (g_table[slot].valid && g_table[slot].obj == obj);
     if (g_table[slot].valid && !victim_is_same_obj)
         evicted = g_table[slot].obj;
+    if (!victim_is_same_obj && !KObjectAcquire(obj))
+    {
+        // Do not publish an entry unless the registry's ownership
+        // reference was actually acquired.
+        ::duetos::sync::SpinLockRelease(g_table_lock, flags);
+        return false;
+    }
     StoreName(g_table[slot], name);
     g_table[slot].type = type;
     g_table[slot].obj = obj;
     g_table[slot].valid = true;
     g_table[slot].last_used_tick = ++g_next_tick;
-    if (!victim_is_same_obj)
-        KObjectAcquire(obj); // table-owned reference
     ::duetos::sync::SpinLockRelease(g_table_lock, flags);
 
     if (evicted != nullptr)

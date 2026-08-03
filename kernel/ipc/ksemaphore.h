@@ -28,14 +28,17 @@
  *   only from SYS_SEM_*. KSemaphore gives every ABI front-end the
  *   same refcounted, handle-tabled, type-tagged primitive.
  *
- * WHAT THIS COMMIT IS NOT
- *   v0 lands the type + Acquire/Release + a self-test. The
- *   `SYS_SEM_*` syscalls keep using the legacy Win32 array.
+ * ABI ROUTING
+ *   `SYS_SEM_*` resolves a generation-tagged handle through the
+ *   process HandleTable and calls this object directly. The ABI
+ *   adapter translates the explicit wait result without owning a
+ *   second semaphore state machine.
  *
  * COUNT SEMANTICS
  *   - `count` starts at `initial_count` (caller chooses).
  *   - `Acquire` blocks until count > 0, then decrements by 1.
- *   - `Release(n)` increments count by n, wakes up to n waiters.
+ *   - `Release(n)` increments count by n, then broadcasts once. Waiters
+ *     recheck `count` under the mutex, so at most n acquire permits.
  *     Posting more than `max_count - count` is a hard panic in v0
  *     — overflowing the count silently is the kind of bug we want
  *     to fail loud at the moment of violation.
@@ -47,6 +50,14 @@
 
 namespace duetos::ipc
 {
+
+enum class KSemaphoreWaitResult : u8
+{
+    Acquired,
+    TimedOut,
+    Cancelled,
+    Failed,
+};
 
 struct KSemaphore
 {
@@ -66,33 +77,34 @@ struct KSemaphore
 /// `Err{ErrorCode::OutOfMemory}` on heap exhaustion.
 ::duetos::core::Result<KSemaphore*> KSemaphoreCreate(u32 initial_count, u32 max_count);
 
-/// Block until count > 0, then decrement by 1.
-void KSemaphoreAcquire(KSemaphore* s);
+/// Block until count > 0, then decrement by 1. Cooperative task
+/// cancellation returns `Cancelled` without consuming a permit and
+/// only after the operation's object pin has been dropped.
+KSemaphoreWaitResult KSemaphoreAcquire(KSemaphore* s);
 
 /// Timed acquire. Identical to `KSemaphoreAcquire` on the fast
-/// path (count > 0 — decrement and return true immediately).
-/// Otherwise blocks at most `ticks` timer ticks for a permit;
-/// returns true if a permit was consumed, false on timeout. The
-/// deadline is computed once at entry; spurious wakeups and
-/// races against other acquirers don't re-arm the budget.
-/// `ticks == 0` is "test only" — returns true iff a permit was
-/// available at call time.
+/// path (count > 0 — decrement and return `Acquired` immediately).
+/// Otherwise blocks at most `ticks` timer ticks for a permit. The
+/// result distinguishes acquisition, timeout, cooperative cancellation,
+/// and invalid/lifetime failure. The deadline is computed once at entry;
+/// spurious wakeups and races against other acquirers don't re-arm the
+/// budget. `ticks == 0` is "test only" — returns `Acquired` iff a
+/// permit was available at call time, otherwise `TimedOut`.
 ///
 /// Backs the timed-wait variant of WaitForSingleObject on a
-/// semaphore handle; the SYS_SEM_WAIT migration in the roadmap
-/// routes through here.
-bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks);
+/// semaphore handle through `SYS_SEM_WAIT`.
+KSemaphoreWaitResult KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks);
 
-/// Release `n` permits. Increments count by n and wakes up to n
-/// waiters (each will resume their `Acquire` and consume one
-/// permit). Panics if `count + n > max_count` — count overflow
-/// is a kernel bug.
+/// Release `n` permits. Increments count by n and performs one bounded
+/// broadcast; resumed waiters recheck the count and at most n consume a
+/// permit. Panics if `n > max_count - count` — count overflow is a
+/// kernel bug.
 void KSemaphoreRelease(KSemaphore* s, u32 n);
 
 /// Best-effort release: increments count by n only if count+n
 /// would not exceed max_count. On success, writes the pre-release
-/// count to `*prev_out` (caller may pass nullptr) and wakes up to
-/// n waiters. On overflow, leaves count unchanged and returns
+/// count to `*prev_out` (caller may pass nullptr) and broadcasts to
+/// waiters once. On overflow, leaves count unchanged and returns
 /// false — `*prev_out` is not written. Used by ABI surfaces that
 /// must surface ERROR_TOO_MANY_POSTS to userland rather than
 /// panic the kernel.

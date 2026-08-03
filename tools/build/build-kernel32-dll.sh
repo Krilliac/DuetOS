@@ -257,6 +257,8 @@ set +e
     /export:CreateJobObjectW \
     /export:AssignProcessToJobObject \
     /export:IsProcessInJob \
+    /export:TerminateJobObject \
+    /export:QueryInformationJobObject \
     /export:CreateIoCompletionPort \
     /export:PostQueuedCompletionStatus \
     /export:GetQueuedCompletionStatus \

@@ -45,20 +45,22 @@ From CI, the boot dispatcher launches the smoke that matches the
 profile selected by the `smoke=` cmdline:
 
 ```
-qemu -kernel … -append "smoke=PeHello"           # spawns hello_pe.exe
-qemu -kernel … -append "smoke=PeWinapi"          # spawns hello_winapi.exe
-qemu -kernel … -append "smoke=PeWinkill"         # spawns windows_kill.exe
-qemu -kernel … -append "smoke=Linux"             # spawns the Linux smoke
+qemu -kernel … -append "smoke=pe-hello"           # spawns hello_pe.exe
+qemu -kernel … -append "smoke=pe-winapi"          # spawns hello_winapi.exe
+qemu -kernel … -append "smoke=pe-winkill"         # spawns windows_kill.exe
+qemu -kernel … -append "smoke=linux"              # spawns the Linux smoke
 qemu -kernel … -append "smoke=browser"           # spawns browser_pe.exe + mini_browser.exe
-qemu -kernel … -append "smoke=Bringup"           # boots to desktop, runs nothing
+qemu -kernel … -append "smoke=cancellation-smp"  # runs the four SMP cancellation races
+qemu -kernel … -append "smoke=bringup"           # boots to desktop, runs nothing
 ```
 
-`smoke=browser` is the emulator-friendly path for the two browser
-PEs (they otherwise only run on bare metal via the `!emulator`
-zoo). The qemu SLIRP NIC has a DHCP lease by bringup, so the
-WinInet (`browser_pe.exe`) and raw-WinSock (`mini_browser.exe`)
-fetches are live: real `200` / `404` from google.com + example.com.
-Invoke locally with `DUETOS_SMOKE_PROFILE=browser tools/qemu/run.sh`.
+`smoke=browser` is the emulator-friendly path for the two browser PEs (they
+otherwise only run on bare metal via the `!emulator` zoo). The focused CI gate
+requires both PE launches and both completion markers, proving the WinInet and
+raw-WinSock API/ABI path. Those applications deliberately treat DNS or egress
+failure as environmental, so this profile does not prove Internet reachability
+or a particular public site's status code. Invoke it locally with
+`DUETOS_SMOKE_PROFILE=browser tools/qemu/run.sh`.
 
 The CI greps the boot log for `[smoke] profile=… complete` (success)
 or `[E]` / `FAIL` (failure).

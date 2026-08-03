@@ -37,12 +37,10 @@ constexpr u64 kMsPerTick = 10; // scheduler runs at 100 Hz
 
 ipc::Handle Win32HandleToIpc(u64 handle)
 {
-    if (handle < core::Process::kWin32SemaphoreBase ||
-        handle >= core::Process::kWin32SemaphoreBase + core::Process::kWin32SemaphoreCap)
-    {
-        return ipc::kHandleInvalid;
-    }
-    return static_cast<ipc::Handle>(handle - core::Process::kWin32SemaphoreBase);
+    ipc::Handle decoded = ipc::kHandleInvalid;
+    return ipc::HandleDecodeTagged(handle, static_cast<u32>(core::Process::kWin32SemaphoreBase), &decoded)
+               ? decoded
+               : ipc::kHandleInvalid;
 }
 } // namespace
 
@@ -79,7 +77,8 @@ void DoSemCreate(arch::TrapFrame* frame)
     }
     ipc::KSemaphore* s = create_r.value();
 
-    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &s->base);
+    const u64 rights = ipc::HandleRightsForProcess(ipc::KObjectType::Semaphore, core::ProcessCapsSnapshot(proc));
+    auto insert_r = ipc::HandleTableInsert(proc->kobj_handles, &s->base, rights);
     if (!insert_r.has_value())
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem", "create: kobj_handles full in pid", proc->pid);
@@ -88,7 +87,13 @@ void DoSemCreate(arch::TrapFrame* frame)
         return;
     }
     const ipc::Handle ipc_h = insert_r.value();
-    const u64 handle = core::Process::kWin32SemaphoreBase + ipc_h;
+    u64 handle = 0;
+    if (!ipc::HandleEncodeTagged(ipc_h, static_cast<u32>(core::Process::kWin32SemaphoreBase), &handle))
+    {
+        (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
     KLOG_INFO_AV(::duetos::core::LogArea::Win32, "win32/sem", "NtCreateSemaphore OK; handle", handle);
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_SEM_CREATE), frame->rip);
     frame->rax = handle;
@@ -115,14 +120,8 @@ void DoSemWait(arch::TrapFrame* frame)
     }
     // Per-handle rights gate — WaitForSingleObject on a semaphore
     // is a decrementing acquire == Wait.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem",
-                     "NtWaitForSingleObject(sem): handle lacks Wait right; handle", handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore, ipc::kHandleRightWait);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem",
@@ -133,17 +132,36 @@ void DoSemWait(arch::TrapFrame* frame)
     auto* s = reinterpret_cast<ipc::KSemaphore*>(obj);
 
     const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+    ipc::KSemaphoreWaitResult wait_result;
     if (timeout_ms == kInfiniteMs)
     {
-        ipc::KSemaphoreAcquire(s);
-        ipc::KObjectRelease(obj);
-        frame->rax = kWaitObject0;
-        return;
+        wait_result = ipc::KSemaphoreAcquire(s);
     }
-    const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
-    const bool got = ipc::KSemaphoreAcquireTimed(s, ticks);
+    else
+    {
+        const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+        wait_result = ipc::KSemaphoreAcquireTimed(s, ticks);
+    }
     ipc::KObjectRelease(obj);
-    frame->rax = got ? kWaitObject0 : kWaitTimeout;
+    if (wait_result == ipc::KSemaphoreWaitResult::Acquired)
+    {
+        frame->rax = kWaitObject0;
+    }
+    else if (wait_result == ipc::KSemaphoreWaitResult::TimedOut)
+    {
+        frame->rax = kWaitTimeout;
+    }
+    else if (wait_result == ipc::KSemaphoreWaitResult::Cancelled)
+    {
+        // Cancelled returns only so this handler can drop its lookup
+        // reference. The outer dispatcher cancellation boundary exits the
+        // task before ring 3 can observe this internal unwind sentinel.
+        frame->rax = static_cast<u64>(-1);
+    }
+    else
+    {
+        frame->rax = static_cast<u64>(-1);
+    }
 }
 
 void DoSemRelease(arch::TrapFrame* frame)
@@ -174,13 +192,8 @@ void DoSemRelease(arch::TrapFrame* frame)
     }
     // Per-handle rights gate — ReleaseSemaphore posts to the
     // count, signalling waiters == Signal.
-    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem", "release: handle lacks Signal right; handle", handle);
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
-    ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
+    ipc::KObject* obj =
+        ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore, ipc::kHandleRightSignal);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem", "release: bad/closed handle; handle", handle);

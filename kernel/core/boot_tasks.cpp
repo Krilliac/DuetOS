@@ -279,7 +279,6 @@ void KbdReaderTask(void*)
                     const duetos::u32 keyup_msg = alt_held ? kWmSysKeyUp : kWmKeyUp;
                     duetos::drivers::video::WindowPostMessage(active_pe, keyup_msg, vk ? vk : ev.code, lp);
                     duetos::drivers::video::CompositorUnlock();
-                    duetos::drivers::video::WindowMsgWakeAll();
                 }
                 else
                 {
@@ -520,6 +519,7 @@ void KbdReaderTask(void*)
             // MenuContext to 0, but we need the original ctx
             // to know whether to wake a TrackPopupMenu syscall.
             const duetos::u32 ctx_before = duetos::drivers::video::MenuContext();
+            const duetos::u32 window_identity_before = duetos::drivers::video::MenuWindowIdentity();
             const duetos::u32 fired = duetos::drivers::video::MenuFeedKey(static_cast<duetos::u16>(ev.code));
             const bool still_open = duetos::drivers::video::MenuIsOpen();
             if (fired != 0)
@@ -530,7 +530,7 @@ void KbdReaderTask(void*)
                 }
                 else
                 {
-                    duetos::core::DispatchMenuAction(fired, ctx_before);
+                    duetos::core::DispatchMenuAction(fired, ctx_before, window_identity_before);
                 }
                 duetos::drivers::video::MenuClose();
             }
@@ -1190,10 +1190,10 @@ void KbdReaderTask(void*)
             (ev.code == duetos::drivers::input::kKeyArrowLeft || ev.code == duetos::drivers::input::kKeyArrowRight ||
              ev.code == duetos::drivers::input::kKeyArrowUp || ev.code == duetos::drivers::input::kKeyArrowDown))
         {
+            duetos::drivers::video::CompositorLock();
             const duetos::drivers::video::WindowHandle active = duetos::drivers::video::WindowActive();
             if (active != duetos::drivers::video::kWindowInvalid)
             {
-                duetos::drivers::video::CompositorLock();
                 switch (ev.code)
                 {
                 case duetos::drivers::input::kKeyArrowLeft:
@@ -1214,8 +1214,8 @@ void KbdReaderTask(void*)
                 duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
-                duetos::drivers::video::CompositorUnlock();
             }
+            duetos::drivers::video::CompositorUnlock();
             continue;
         }
 
@@ -1675,10 +1675,8 @@ void KbdReaderTask(void*)
                     duetos::drivers::video::WindowPostMessage(active_pe, char_msg, 0x08, lp);
                 }
                 duetos::drivers::video::CompositorUnlock();
-                // Wake any GetMessage blocker — broadcasts
-                // to every process; each re-checks its own
-                // per-window ring.
-                duetos::drivers::video::WindowMsgWakeAll();
+                // Successful posts requested one compositor-deferred
+                // broadcast; CompositorUnlock above has now delivered it.
                 // No screen repaint required — PEs own their
                 // display list and update on next compose when
                 // their pump calls InvalidateRect / GDI calls
@@ -2153,10 +2151,11 @@ void MouseReaderTask(void*)
     {
         bool active;
         duetos::drivers::video::WindowHandle window;
+        duetos::u32 window_identity;
         duetos::u32 grab_offset_x;
         duetos::u32 grab_offset_y;
     };
-    static DragState drag{false, duetos::drivers::video::kWindowInvalid, 0, 0};
+    static DragState drag{false, duetos::drivers::video::kWindowInvalid, 0, 0, 0};
     // Edge-resize state. Activated when the user presses on
     // a window's resize border. Tracks the window + edge +
     // anchor bounds so the resize is computed off the
@@ -2165,21 +2164,23 @@ void MouseReaderTask(void*)
     {
         bool active;
         duetos::drivers::video::WindowHandle window;
+        duetos::u32 window_identity;
         duetos::drivers::video::WindowResizeEdge edge;
         duetos::u32 anchor_cx, anchor_cy;
         duetos::u32 anchor_x, anchor_y, anchor_w, anchor_h;
     };
     static ResizeState resize{
-        false, duetos::drivers::video::kWindowInvalid, duetos::drivers::video::WindowResizeEdge::None, 0, 0, 0, 0, 0,
+        false, duetos::drivers::video::kWindowInvalid, 0, duetos::drivers::video::WindowResizeEdge::None, 0, 0, 0, 0, 0,
         0};
     // Scrollbar drag-the-thumb state.
     struct ScrollbarDrag
     {
         bool active;
         duetos::drivers::video::WindowHandle hwnd;
+        duetos::u32 window_identity;
         duetos::u32 grab_offset_in_thumb;
     };
-    static ScrollbarDrag sb_drag{false, duetos::drivers::video::kWindowInvalid, 0};
+    static ScrollbarDrag sb_drag{false, duetos::drivers::video::kWindowInvalid, 0, 0};
     static bool prev_left = false;
     static bool prev_right = false;
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
@@ -2249,9 +2250,9 @@ void MouseReaderTask(void*)
         {"RAISE", 10, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
     };
     // Title-bar (NC) right-click — the classic Win32 system
-    // menu. RESTORE/MINIMIZE/MAXIMIZE/CLOSE are wired; MOVE
-    // does a one-shot recenter (GAP) and SIZE is shown
-    // disabled — both wait on a modal-input mode.
+    // menu. All six actions are wired; MOVE and SIZE enter the
+    // compositor's modal-input mode and revalidate the target's
+    // public identity on each callback.
     static const duetos::drivers::video::MenuItem kSystemMenuItems[] = {
         {"RESTORE", 20, 0, nullptr, 0},  {"MOVE", 21, 0, nullptr, 0},     {"SIZE", 22, 0, nullptr, 0},
         {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0}, {"CLOSE", 25, 0, nullptr, 0},
@@ -2296,6 +2297,43 @@ void MouseReaderTask(void*)
         // the compositor mutex — the kbd reader can be mid-
         // ConsoleWrite / DesktopCompose at the same time.
         duetos::drivers::video::CompositorLock();
+
+        // Mouse gestures span packets, but raw window slots may be reused
+        // between packets. Resolve each press-time public identity while the
+        // compositor lock is held and cancel if close/reuse changed it.
+        if (drag.active)
+        {
+            drag.window = duetos::drivers::video::WindowResolvePublicHandle(drag.window_identity);
+            if (drag.window == duetos::drivers::video::kWindowInvalid)
+            {
+                drag.active = false;
+                drag.window_identity = 0;
+                duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
+                SerialWrite("[ui] stale title drag cancelled\n");
+            }
+        }
+        if (resize.active)
+        {
+            resize.window = duetos::drivers::video::WindowResolvePublicHandle(resize.window_identity);
+            if (resize.window == duetos::drivers::video::kWindowInvalid)
+            {
+                resize.active = false;
+                resize.window_identity = 0;
+                resize.edge = duetos::drivers::video::WindowResizeEdge::None;
+                SerialWrite("[ui] stale resize cancelled\n");
+            }
+        }
+        if (sb_drag.active)
+        {
+            sb_drag.hwnd = duetos::drivers::video::WindowResolvePublicHandle(sb_drag.window_identity);
+            if (sb_drag.hwnd == duetos::drivers::video::kWindowInvalid)
+            {
+                sb_drag.active = false;
+                sb_drag.window_identity = 0;
+                SerialWrite("[ui] stale scrollbar drag cancelled\n");
+            }
+        }
+
         // Apply per-user mouse sensitivity scale (Settings
         // Mouse panel). 128 = identity. Bypass while a
         // modal-input or DnD session is live so the user
@@ -2561,8 +2599,9 @@ void MouseReaderTask(void*)
                     const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
                     if (in_title)
                     {
-                        duetos::drivers::video::MenuOpen(
-                            kSystemMenuItems, sizeof(kSystemMenuItems) / sizeof(kSystemMenuItems[0]), cx, cy, hit);
+                        duetos::drivers::video::MenuOpenWindow(
+                            kSystemMenuItems, sizeof(kSystemMenuItems) / sizeof(kSystemMenuItems[0]), cx, cy, hit,
+                            duetos::drivers::video::WindowPublicHandle(hit));
                         SerialWrite("[ui] right-click target=title window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
@@ -2592,17 +2631,18 @@ void MouseReaderTask(void*)
                         else if (hit == duetos::apps::terminal::TerminalWindow())
                         {
                             // Terminal body: COPY/PASTE/CLEAR popup.
-                            duetos::drivers::video::MenuOpen(kTerminalMenuItems,
-                                                             sizeof(kTerminalMenuItems) / sizeof(kTerminalMenuItems[0]),
-                                                             cx, cy, hit);
+                            duetos::drivers::video::MenuOpenWindow(
+                                kTerminalMenuItems, sizeof(kTerminalMenuItems) / sizeof(kTerminalMenuItems[0]), cx, cy,
+                                hit, duetos::drivers::video::WindowPublicHandle(hit));
                             SerialWrite("[ui] right-click target=client (terminal) window=");
                             SerialWriteHex(hit);
                             SerialWrite("\n");
                         }
                         else
                         {
-                            duetos::drivers::video::MenuOpen(
-                                kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit);
+                            duetos::drivers::video::MenuOpenWindow(
+                                kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit,
+                                duetos::drivers::video::WindowPublicHandle(hit));
                             SerialWrite("[ui] right-click target=client (native) window=");
                             SerialWriteHex(hit);
                             SerialWrite("\n");
@@ -2685,6 +2725,7 @@ void MouseReaderTask(void*)
             // panel" — in that case the menu stays up and no
             // dispatch happens.
             const duetos::u32 ctx = duetos::drivers::video::MenuContext();
+            const duetos::u32 window_identity = duetos::drivers::video::MenuWindowIdentity();
             const duetos::u32 prev_depth = duetos::drivers::video::MenuStackDepth();
             const duetos::u32 action = duetos::drivers::video::MenuItemAt(cx, cy);
             const duetos::u32 new_depth = duetos::drivers::video::MenuStackDepth();
@@ -2702,7 +2743,7 @@ void MouseReaderTask(void*)
                 }
                 else
                 {
-                    duetos::core::DispatchMenuAction(action, ctx);
+                    duetos::core::DispatchMenuAction(action, ctx, window_identity);
                 }
             }
             else
@@ -3081,6 +3122,7 @@ void MouseReaderTask(void*)
                     {
                         sb_drag.active = true;
                         sb_drag.hwnd = sh;
+                        sb_drag.window_identity = duetos::drivers::video::WindowPublicHandle(sh);
                         sb_drag.grab_offset_in_thumb = click_y - thumb_y;
                     }
                     else
@@ -3109,6 +3151,7 @@ void MouseReaderTask(void*)
                     duetos::drivers::video::WindowGetBounds(rh, &ax, &ay, &aw, &ah);
                     resize.active = true;
                     resize.window = rh;
+                    resize.window_identity = duetos::drivers::video::WindowPublicHandle(rh);
                     resize.edge = rede;
                     resize.anchor_cx = cx;
                     resize.anchor_cy = cy;
@@ -3195,7 +3238,6 @@ void MouseReaderTask(void*)
                     {
                         constexpr duetos::u32 kWmClose = 0x0010;
                         duetos::drivers::video::WindowPostMessage(hit, kWmClose, 0, 0);
-                        duetos::drivers::video::WindowMsgWakeAll();
                         SerialWrite("[ui] post WM_CLOSE window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
@@ -3250,11 +3292,11 @@ void MouseReaderTask(void*)
                         // click would just re-arm the drag.
                         const duetos::u64 kTitleDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
                         static duetos::u64 s_title_dc_tick = 0;
-                        static duetos::drivers::video::WindowHandle s_title_dc_hwnd =
-                            duetos::drivers::video::kWindowInvalid;
+                        static duetos::u32 s_title_dc_hwnd = 0;
+                        const duetos::u32 title_public = duetos::drivers::video::WindowPublicHandle(hit);
                         const duetos::u64 now_tick = duetos::arch::TimerTicks();
                         const bool is_title_dbl =
-                            (s_title_dc_hwnd == hit) && (now_tick - s_title_dc_tick <= kTitleDblClickTicks);
+                            (s_title_dc_hwnd == title_public) && (now_tick - s_title_dc_tick <= kTitleDblClickTicks);
                         if (is_title_dbl)
                         {
                             if (duetos::drivers::video::WindowIsMaximized(hit))
@@ -3272,14 +3314,15 @@ void MouseReaderTask(void*)
                             // Consume the second click so a fast
                             // triple-click doesn't fire a third
                             // toggle in the same gesture.
-                            s_title_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                            s_title_dc_hwnd = 0;
                         }
                         else
                         {
                             s_title_dc_tick = now_tick;
-                            s_title_dc_hwnd = hit;
+                            s_title_dc_hwnd = title_public;
                             drag.active = true;
                             drag.window = hit;
+                            drag.window_identity = title_public;
                             drag.grab_offset_x = cx - wx;
                             drag.grab_offset_y = cy - wy;
                             SerialWrite("[ui] drag begin window=");
@@ -3356,6 +3399,8 @@ void MouseReaderTask(void*)
             SerialWriteHex(drag.window);
             SerialWrite("\n");
             drag.active = false;
+            drag.window = duetos::drivers::video::kWindowInvalid;
+            drag.window_identity = 0;
             duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
             if (snapped)
             {
@@ -3368,6 +3413,7 @@ void MouseReaderTask(void*)
         {
             sb_drag.active = false;
             sb_drag.hwnd = duetos::drivers::video::kWindowInvalid;
+            sb_drag.window_identity = 0;
             SerialWrite("[ui] scrollbar drag end\n");
         }
         if (release_edge && resize.active)
@@ -3376,6 +3422,8 @@ void MouseReaderTask(void*)
             SerialWriteHex(resize.window);
             SerialWrite("\n");
             resize.active = false;
+            resize.window = duetos::drivers::video::kWindowInvalid;
+            resize.window_identity = 0;
             resize.edge = duetos::drivers::video::WindowResizeEdge::None;
         }
         if (release_edge && duetos::drivers::video::TaskbarIsDragging())
@@ -3422,6 +3470,7 @@ void MouseReaderTask(void*)
                 constexpr duetos::u64 kMkRButton = 0x0002;
                 duetos::u32 wx = 0, wy = 0;
                 duetos::drivers::video::WindowGetBounds(pe_hit, &wx, &wy, nullptr, nullptr);
+                const duetos::u32 pe_public = duetos::drivers::video::WindowPublicHandle(pe_hit);
                 // Client-local coords. title bar is 22 px by
                 // default + 2 px top border; widget chrome
                 // uses these constants internally.
@@ -3451,24 +3500,23 @@ void MouseReaderTask(void*)
                     constexpr duetos::u32 kWmLButtonDblClk = 0x0203;
                     const duetos::u64 kDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
                     static duetos::u64 s_last_click_tick = 0;
-                    static duetos::drivers::video::WindowHandle s_last_click_hwnd =
-                        duetos::drivers::video::kWindowInvalid;
+                    static duetos::u32 s_last_click_hwnd = 0;
                     static duetos::u32 s_last_click_x = 0;
                     static duetos::u32 s_last_click_y = 0;
                     const duetos::u64 now_tick = duetos::arch::TimerTicks();
-                    const bool is_dbl = (s_last_click_hwnd == pe_hit) &&
+                    const bool is_dbl = (s_last_click_hwnd == pe_public) &&
                                         (now_tick - s_last_click_tick <= kDblClickTicks) && (s_last_click_x == cx) &&
                                         (s_last_click_y == cy);
                     if (is_dbl)
                     {
                         duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDblClk, wparam, lparam);
-                        s_last_click_hwnd = duetos::drivers::video::kWindowInvalid;
+                        s_last_click_hwnd = 0;
                     }
                     else
                     {
                         duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDown, wparam, lparam);
                         s_last_click_tick = now_tick;
-                        s_last_click_hwnd = pe_hit;
+                        s_last_click_hwnd = pe_public;
                         s_last_click_x = cx;
                         s_last_click_y = cy;
                     }
@@ -3490,15 +3538,13 @@ void MouseReaderTask(void*)
                     // with GET_X/Y_LPARAM.
                     const duetos::u64 ctx_lparam =
                         (static_cast<duetos::u64>(cx) & 0xFFFF) | ((static_cast<duetos::u64>(cy) & 0xFFFF) << 16);
-                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmContextMenu,
-                                                              static_cast<duetos::u64>(pe_hit) + 1, ctx_lparam);
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmContextMenu, pe_public, ctx_lparam);
                     SerialWrite("[win32/wm] wm_contextmenu posted hwnd=");
-                    SerialWriteHex(pe_hit);
+                    SerialWriteHex(pe_public);
                     SerialWrite(" pid=");
                     SerialWriteHex(pe_pid);
                     SerialWrite("\n");
                 }
-                duetos::drivers::video::WindowMsgWakeAll();
             }
             else if (pe_hit != duetos::drivers::video::kWindowInvalid && press_edge)
             {

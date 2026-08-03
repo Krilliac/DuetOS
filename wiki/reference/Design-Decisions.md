@@ -14351,3 +14351,106 @@ _2026-07-30_
   the scheduler’s existing interrupt-disabled protocol and needs the
   planned `WaitQueueBlockLocked` primitive for a complete lost-wakeup
   proof.
+
+## 058 — NIC identity, backend matching, and hardware eligibility are separate gates
+
+- **Scope:** `kernel/drivers/net/nic_ids.h`, `net.h`, the dormant PCI
+  wireless shells, `tests/host/test_nic_ids.cpp`, and
+  `tools/test/test-nic-id-classification-contract.py`.
+- **Decision:** Keep factual PCI candidate classification in one freestanding
+  constexpr header, but never use a candidate tag as permission to map a BAR,
+  access MMIO, load firmware, or claim a driver online. Hardware dispatch has
+  three distinct stages:
+  1. exact vendor/device candidate classification for inventory;
+  2. backend resolution using every qualifier in the upstream match row;
+  3. an explicit DuetOS safe-probe profile backed by verified register,
+     reset, firmware, DMA, interrupt, and shutdown contracts.
+- **Concrete enabled profiles:** Intel wired inventory covers exact upstream
+  e1000/e1000e/igb/igc/ixgbe/i40e sets, but only QEMU-backed `8086:100E` and
+  `8086:10D3` may enter the e1000 register path. Modern virtio-net
+  `1AF4:1041` may enter the virtio 1.x capability transport; transitional
+  `1AF4:1000` remains inventory-only. All PCI wireless safe-probe sets are
+  empty.
+- **Tuple-qualified wireless identity:** Broadcom raw `4355` resolves to
+  brcmfmac only for subsystem `14E4:4355`. Raw `4365` is ambiguous at device-ID
+  level: `14E4:4365` selects brcmfmac, while exact Dell/Foxconn/HP tuples select
+  BCMA. The PCI cache now retains subsystem identity, so inventory can preserve
+  that distinction; all Broadcom hardware gates nevertheless remain closed.
+  Realtek candidates resolve uniquely by device ID, but BAR
+  metadata still follows the backend table: rtl8192se uses BAR1; the other
+  current rtlwifi modules plus rtw88/rtw89 use BAR2.
+- **Epoch revalidation:** Before registry BAR sizing or dispatch, the live
+  function must still match the cached vendor/device, class/revision, type-0
+  layout, and known subsystem tuple. Functional drivers may repeat that check
+  immediately before their first write; a removed or replaced function never
+  inherits the cached device's register contract.
+- **Why:** Coarse Intel ranges previously sent incompatible e100, igb, igc,
+  ixgbe, and i40e devices into e1000 MMIO. The same flattening would send three
+  incompatible Realtek generations through one guessed register layout and
+  treat Broadcom's windowed BAR0 aperture as fixed ChipCommon registers.
+  Exact IDs prevent false inventory; separate eligibility prevents factual
+  inventory from becoming speculative hardware access.
+- **Rules out / defers:** Numeric range classification, device-ID-only
+  resolution for subsystem-qualified rows, generic BAR0 wireless probes, and
+  enabling a family because a parser or ring scaffold exists. New IDs require
+  an upstream `pci_device_id` row or vendor datasheet.
+- **Revisit when:** A concrete wireless/igb/igc/ixgbe backend earns a non-empty
+  tested profile.
+
+---
+
+## 059 — Packet I/O requires generation-owned NIC teardown
+
+- **Scope:** `kernel/drivers/net/net.cpp`, `kernel/drivers/net/pcnet.cpp`,
+  `kernel/drivers/virtio/virtio_net.cpp`, `kernel/net/stack.{h,cpp}`, and
+  driver inventory documentation.
+- **Decision:** A NIC backend may publish packet I/O only with an
+  exact-generation stack binding, a closable operation gate, a joinable worker,
+  serialized DMA ownership, and a proven bus-master-off teardown. The exact AMD
+  PCnet `1022:2000` profile and modern virtio-net `1AF4:1041` implement that
+  contract; other AMD identities and transitional virtio-net `1AF4:1000`
+  remain inventory-only. Runtime QEMU restart proof is still pending.
+- **Why:** The legacy PCnet path hard-coded iface 0, ignored bind failures,
+  launched an immortal poller, lacked TX and DMA synchronization, echoed a
+  write-one-to-clear status value, enabled bus mastering before readiness, and
+  could free rings without proving that the device could no longer access them.
+  Advertising packet I/O under those conditions turns restart or partial
+  bring-up failure into stale callbacks and use-after-free risk.
+- **Rules out / defers:** Compatibility-driven activation merely because a NIC
+  is a QEMU or VirtualBox default. Emulated hardware follows the same lifetime
+  and DMA safety contract as physical hardware.
+- **Revisit when:** Focused QEMU restart smoke proves bring-up, traffic,
+  shutdown, and rebind without an old worker or descriptor DMA reaching the
+  replacement generation; physical Am79C97x hardware remains a separate proof.
+
+---
+
+## 060 — One automatic rolling-release publisher per main-branch revision
+
+_2026-08-02_
+
+- **Scope:** `.github/workflows/build.yml`,
+  `.github/workflows/release.yml`, and the release-channel documentation.
+- **Decision:** A qualifying push to `main` may enter exactly one rolling-tag
+  publisher: `build.yml`'s `publish-rolling` job. That job remains downstream
+  of format, pinned-Rust validation, debug and release builds, QEMU smoke,
+  hosted tests, and the lifetime-download snapshot. `release.yml` does not
+  listen for branch pushes; it remains available only to `v*` tag pushes and
+  explicit manual dispatch for intentional promotion of the rolling and flavor
+  channels.
+- **Why:** Two independently scheduled workflows could build the same or
+  adjacent revisions and overwrite `latest-debug` / `latest-release` in
+  completion order. Per-workflow concurrency groups do not serialize writers
+  across workflow files, so the later finisher could silently publish an older
+  or differently gated artifact set.
+- **Rules out:** Multiple automatic `main`-push publishers and relying on
+  timing, cancellation, or matching workflow names to establish release order.
+- **Source identity rule:** Tag and manual promotions must use an immutable
+  source: a protected, non-rewritten `v*` tag or a full commit SHA. A moving
+  branch such as `main` is not an acceptable manual source even though the
+  current dispatch input still accepts arbitrary strings and retains `main` as
+  its legacy UI default.
+- **Revisit when:** The promotion workflow resolves and records a commit SHA
+  once, proves later checkouts and publication use that same identity, and a
+  repository ruleset or workflow gate rejects mutable/re-written refs. Until
+  then, immutable tag/manual source selection is an operator-enforced boundary.

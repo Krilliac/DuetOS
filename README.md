@@ -46,9 +46,9 @@ Kernel-mode drivers  (PCIe, NVMe, AHCI, xHCI/USB, e1000, HDA, GPU)
 
 The Win32 DLLs are **translators**, not a parallel subsystem. A native DuetOS app and a Windows PE both make the same syscalls to the same kernel, walk the same address-space tables, and paint into the same compositor. There is no second TCP stack, no shadow VFS, no parallel registry. Subsystem isolation rules and the audit checklist live in [`wiki/kernel/Subsystem-Isolation.md`](wiki/kernel/Subsystem-Isolation.md).
 
-Kernel: UEFI boot on x86_64, 4-level paging, SMP-aware scheduler, W^X + SMEP/SMAP + ASLR + stack canaries + retpoline, capability-based IPC, ~190 numbered syscalls. PCIe enumeration, NVMe, AHCI, xHCI/USB, PS/2, Intel HDA, e1000 NIC. HPET-calibrated LAPIC timer. Kernel-mode breakpoint subsystem with hardware DR gates. Live crash dump with inline symbol resolution.
+Kernel: x86_64 boot through GRUB + Multiboot2 on BIOS or UEFI firmware, 4-level paging, SMP-aware scheduler, W^X + SMEP/SMAP + ASLR + stack canaries + retpoline, capability-based IPC, ~190 numbered syscalls. PCIe enumeration, NVMe, AHCI, xHCI/USB, PS/2, Intel HDA, e1000 NIC. HPET-calibrated LAPIC timer. Kernel-mode breakpoint subsystem with hardware DR gates. Live crash dump with inline symbol resolution.
 
-No Linux kernel under this tree, no GNU userland, no Wine vendoring, no ReactOS fork. The kernel is written from scratch and booted directly by GRUB/UEFI into long mode.
+No Linux kernel under this tree, no GNU userland, no Wine vendoring, no ReactOS fork. The kernel is written from scratch. Supported release images boot through GRUB's Multiboot2 handoff on either BIOS or UEFI firmware. The in-tree direct `BOOTX64.EFI` loader is experimental: it validates the kernel ELF but does not yet load its segments, call `ExitBootServices`, construct a versioned `BootInfo`, or hand off to the kernel.
 
 ---
 
@@ -60,6 +60,10 @@ No Linux kernel under this tree, no GNU userland, no Wine vendoring, no ReactOS 
 wget https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso
 qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom duetos-release.iso -serial stdio
 ```
+
+Here OVMF supplies UEFI **firmware**; the hybrid ISO still runs GRUB, which
+hands the kernel over through Multiboot2. This is not the experimental direct
+`BOOTX64.EFI` path.
 
 **From source** — clone, configure, build, boot:
 

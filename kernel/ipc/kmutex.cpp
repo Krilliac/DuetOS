@@ -1,17 +1,9 @@
 /*
- * DuetOS — concrete KMutex implementation, v0 (plan A3-followup).
+ * DuetOS — concrete, recursive KMutex kernel object.
  *
- * See `kmutex.h` for the public contract. This TU owns:
- *   - kheap-backed allocation + KObjectInit on Create,
- *   - the recursion + ownership state machine,
- *   - the destroy callback that runs on last refcount release,
- *   - a self-test that drives the full HandleTable round-trip.
- *
- * `KObject` MUST be the first member of `KMutex` so a HandleTable
- * lookup that returns `KObject*` can be `reinterpret_cast`'d back
- * to `KMutex*` (and a static_cast through KObject* would break the
- * type system; we deliberately stay in the C-style cast lane that
- * the surrounding KObject ecosystem already uses).
+ * The scheduler owns task lifetime and the FIFO sleeping-mutex state. KMutex
+ * adds the user-visible recursive/abandoned contract, object references that
+ * span waits and ownership, and an intrusive dead-task ownership receipt.
  */
 
 #include "ipc/kmutex.h"
@@ -20,11 +12,10 @@
 #include "core/panic.h"
 #include "ipc/handle_table.h"
 #include "ipc/kobject.h"
-#include "log/klog.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
 
-#include <stddef.h> // for offsetof
+#include <stddef.h>
 
 namespace duetos::ipc
 {
@@ -34,22 +25,152 @@ static_assert(__builtin_offsetof(KMutex, base) == 0, "KObject must be the first 
 namespace
 {
 
+KMutex* KMutexFromOwnershipNode(sched::AbandonableOwnershipNode* node)
+{
+    return reinterpret_cast<KMutex*>(reinterpret_cast<u8*>(node) - __builtin_offsetof(KMutex, ownership_node));
+}
+
+void KMutexAbandonOwnership(sched::AbandonableOwnershipNode* node)
+{
+    KASSERT(node != nullptr, "ipc/kmutex", "abandon callback received null ownership node");
+    KMutex* m = KMutexFromOwnershipNode(node);
+
+    // Publish abandoned state before FIFO hand-off. A successor cannot return
+    // from its scheduler wait until MutexAbandon completes the hand-off, so
+    // its exchange below necessarily observes this release or a newer one.
+    __atomic_store_n(&m->recursion, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->owner_tid, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->held, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&m->abandoned_pending, true, __ATOMIC_RELEASE);
+
+    if (!sched::MutexAbandon(&m->inner))
+    {
+        // Keep the holder reference on structural inconsistency. A bounded
+        // leak is safer than freeing storage an unknown owner may reference.
+        core::DebugPanicOrWarn("ipc/kmutex", "dead-owner ledger did not match scheduler mutex owner");
+        return;
+    }
+    KObjectRelease(&m->base);
+}
+
 void KMutexDestroy(KObject* obj)
 {
     auto* m = reinterpret_cast<KMutex*>(obj);
-    if (m->recursion != 0 || m->owner != nullptr)
+    if (__atomic_load_n(&m->recursion, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&m->held, __ATOMIC_ACQUIRE) ||
+        m->ownership_node.owner != nullptr)
     {
-        // Reaching refcount=0 with the lock still held means an
-        // ABI front-end leaked a release. Debug builds panic so
-        // the leak surfaces at the moment of the bug. Release
-        // builds log and leak the mutex memory rather than free
-        // it from under a thread that still believes it owns the
-        // lock — a one-time leak is recoverable; a use-after-free
-        // is not.
+        // Never free storage from under a holder or a scheduler ledger node.
+        // Debug builds stop at the accounting bug; release builds retain the
+        // object as a bounded leak rather than creating a use-after-free.
         core::DebugPanicOrWarn("ipc/kmutex", "destroy on still-held mutex");
         return;
     }
     duetos::mm::KFree(m);
+}
+
+struct KMutexAbandonSelfTestContext
+{
+    KMutex* mutex;
+    sched::WaitQueue release_waiters;
+    u64 release_sequence;
+    bool release_owner;
+    u32 owner_state;
+};
+
+[[noreturn]] void KMutexAbandonSelfTestOwner(void* opaque)
+{
+    auto* context = static_cast<KMutexAbandonSelfTestContext*>(opaque);
+    KASSERT(context != nullptr && context->mutex != nullptr, "ipc/kmutex", "self-test owner context invalid");
+
+    const KMutexWaitResult result = KMutexAcquire(context->mutex);
+    __atomic_store_n(&context->owner_state, result == KMutexWaitResult::Acquired ? 1u : 2u, __ATOMIC_RELEASE);
+    if (result != KMutexWaitResult::Acquired)
+    {
+        sched::SchedExit();
+    }
+
+    // Keep a live kernel Task owning the KMutex long enough for the
+    // coordinator to prove process-null public cancellation is rejected.
+    // Exit deliberately omits KMutexRelease: the reaper must publish exactly
+    // one abandoned result and hand the inner FIFO mutex to the waiter.
+    while (!__atomic_load_n(&context->release_owner, __ATOMIC_ACQUIRE))
+    {
+        const u64 observed = __atomic_load_n(&context->release_sequence, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&context->release_owner, __ATOMIC_ACQUIRE))
+            break;
+        (void)sched::WaitQueueBlockIfSequenceUnchanged(&context->release_waiters, &context->release_sequence, observed);
+    }
+    sched::SchedExit();
+}
+
+KMutexWaitResult KMutexAcquireImpl(KMutex* m, bool timed, u64 ticks)
+{
+    if (m == nullptr)
+    {
+        return KMutexWaitResult::Failed;
+    }
+
+    const u64 current_tid = sched::CurrentTaskId();
+    if (current_tid == ~u64{0})
+    {
+        return KMutexWaitResult::Failed;
+    }
+    if (__atomic_load_n(&m->held, __ATOMIC_ACQUIRE) && __atomic_load_n(&m->owner_tid, __ATOMIC_RELAXED) == current_tid)
+    {
+        const u32 recursion = __atomic_load_n(&m->recursion, __ATOMIC_RELAXED);
+        if (recursion == ~u32{0})
+        {
+            core::DebugPanicOrWarn("ipc/kmutex", "recursion counter saturated");
+            return KMutexWaitResult::Failed;
+        }
+        __atomic_store_n(&m->recursion, recursion + 1, __ATOMIC_RELAXED);
+        return KMutexWaitResult::Acquired;
+    }
+
+    // This reference spans the complete cancellable block. Only success
+    // retains it as the holder reference; every other explicit result drops
+    // it before returning to the ABI dispatcher.
+    if (!KObjectAcquire(&m->base))
+    {
+        return KMutexWaitResult::Failed;
+    }
+
+    const sched::MutexAcquireResult acquire_result =
+        timed ? sched::MutexLockTimedCancellable(&m->inner, ticks) : sched::MutexLockCancellable(&m->inner);
+    if (acquire_result == sched::MutexAcquireResult::TimedOut)
+    {
+        KObjectRelease(&m->base);
+        return KMutexWaitResult::TimedOut;
+    }
+    if (acquire_result == sched::MutexAcquireResult::Cancelled)
+    {
+        KObjectRelease(&m->base);
+        return KMutexWaitResult::Cancelled;
+    }
+    if (acquire_result != sched::MutexAcquireResult::Acquired)
+    {
+        KObjectRelease(&m->base);
+        return KMutexWaitResult::Failed;
+    }
+
+    __atomic_store_n(&m->recursion, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->owner_tid, current_tid, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->held, true, __ATOMIC_RELEASE);
+    if (!sched::SchedTrackCurrentAbandonableOwnership(&m->ownership_node))
+    {
+        __atomic_store_n(&m->recursion, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&m->owner_tid, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&m->held, false, __ATOMIC_RELEASE);
+        sched::MutexUnlock(&m->inner);
+        KObjectRelease(&m->base);
+        return KMutexWaitResult::Failed;
+    }
+
+    if (__atomic_exchange_n(&m->abandoned_pending, false, __ATOMIC_ACQ_REL))
+    {
+        return KMutexWaitResult::Abandoned;
+    }
+    return KMutexWaitResult::Acquired;
 }
 
 } // namespace
@@ -63,107 +184,69 @@ void KMutexDestroy(KObject* obj)
     }
     *m = KMutex{};
     KObjectInit(&m->base, KObjectType::Mutex, &KMutexDestroy);
+    m->inner.ownership_class = sched::Mutex::OwnershipClass::AbandonableUserWaitable;
+    m->ownership_node.abandon = &KMutexAbandonOwnership;
     m->created_tick = sched::SchedNowTicks();
     return m;
 }
 
-void KMutexAcquire(KMutex* m)
+KMutexWaitResult KMutexAcquire(KMutex* m)
 {
-    sched::Task* me = sched::CurrentTask();
-    // Fast path for re-entrant acquire — same owner, just bump
-    // recursion. Read of `owner` is safe outside the inner lock
-    // ONLY when `me == owner`, because no other task can mutate
-    // the owner field while we hold it. Recursion does NOT take
-    // a fresh ref — the holder-ref already counts.
-    if (m->owner == me)
-    {
-        ++m->recursion;
-        return;
-    }
-    // Pin the storage during the wait. If every handle closes
-    // while we're blocked, the wait-ref keeps the KMutex alive
-    // until we wake; on success the same ref upgrades to the
-    // holder-ref so the storage stays alive while we own it.
-    KObjectAcquire(&m->base);
-    sched::MutexLock(&m->inner);
-    m->owner = me;
-    m->recursion = 1;
-    // Wait-ref retained as holder-ref; no count change.
+    return KMutexAcquireImpl(m, false, 0);
 }
 
-bool KMutexAcquireTimed(KMutex* m, u64 ticks)
+KMutexWaitResult KMutexAcquireTimed(KMutex* m, u64 ticks)
 {
-    sched::Task* me = sched::CurrentTask();
-    // Re-entrant acquire bypasses the timeout — a task that
-    // already owns the lock cannot block on itself, so the
-    // timeout never applies and no fresh ref is taken.
-    if (m->owner == me)
+    return KMutexAcquireImpl(m, true, ticks);
+}
+
+bool KMutexRelease(KMutex* m)
+{
+    if (m == nullptr || !__atomic_load_n(&m->held, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&m->owner_tid, __ATOMIC_RELAXED) != sched::CurrentTaskId())
     {
-        ++m->recursion;
-        return true;
-    }
-    KObjectAcquire(&m->base);
-    if (!sched::MutexLockTimed(&m->inner, ticks))
-    {
-        // Timed out — drop the wait-ref. May trigger destroy if
-        // every handle closed while we were blocked AND we were
-        // the last waiter; that's the correct outcome.
-        KObjectRelease(&m->base);
         return false;
     }
-    m->owner = me;
-    m->recursion = 1;
-    // Wait-ref retained as holder-ref.
+
+    const u32 recursion = __atomic_load_n(&m->recursion, __ATOMIC_RELAXED);
+    if (recursion == 0)
+    {
+        return false;
+    }
+    if (recursion > 1)
+    {
+        __atomic_store_n(&m->recursion, recursion - 1, __ATOMIC_RELAXED);
+        return true;
+    }
+
+    // The scheduler verifies and unlinks the exact current Task identity in
+    // one lock transaction. Only then may public state clear and FIFO hand-
+    // off make the next waiter runnable.
+    if (!sched::SchedUntrackCurrentAbandonableOwnership(&m->ownership_node))
+    {
+        return false;
+    }
+    __atomic_store_n(&m->recursion, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->owner_tid, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&m->held, false, __ATOMIC_RELEASE);
+    sched::MutexUnlock(&m->inner);
+    KObjectRelease(&m->base);
     return true;
 }
 
-void KMutexRelease(KMutex* m)
+bool KMutexHeld(const KMutex* m)
 {
-    sched::Task* me = sched::CurrentTask();
-    if (m->owner != me)
-    {
-        // Debug: panic; release: log and refuse. Decrementing
-        // recursion or clearing owner here would corrupt the
-        // lock state visible to the real owner.
-        core::DebugPanicOrWarn("ipc/kmutex", "release by non-owner");
-        return;
-    }
-    if (m->recursion == 0)
-    {
-        // Same shape — a double-release in a release build is
-        // ignored rather than allowed to wrap the recursion
-        // counter into a wedged state.
-        core::DebugPanicOrWarn("ipc/kmutex", "release on already-released mutex");
-        return;
-    }
-    --m->recursion;
-    if (m->recursion > 0)
-    {
-        return; // outer holder still owns it
-    }
-    // Outermost release — clear owner before unlocking so the
-    // next acquirer sees a fresh state.
-    m->owner = nullptr;
-    sched::MutexUnlock(&m->inner);
-    // Drop the holder-ref unconditionally. In the no-hand-off
-    // case, this may push refcount to zero and fire `KMutexDestroy`
-    // (correct: nobody holds and no waiters held a wait-ref).
-    // In the hand-off case, the new holder's wait-ref upgraded
-    // to their holder-ref inside their `KMutexAcquire` /
-    // `KMutexAcquireTimed` success continuation — net refcount
-    // unchanged across the transition (we dropped one, they
-    // implicitly retained one).
-    KObjectRelease(&m->base);
+    return m != nullptr && __atomic_load_n(&m->held, __ATOMIC_ACQUIRE);
 }
 
-sched::Task* KMutexOwner(const KMutex* m)
+u64 KMutexOwnerTid(const KMutex* m)
 {
-    return m->owner;
+    return m != nullptr ? __atomic_load_n(&m->owner_tid, __ATOMIC_ACQUIRE) : 0;
 }
 
 void KMutexSelfTest()
 {
-    arch::SerialWrite("[ipc] kmutex self-test: full HandleTable round-trip\n");
+    arch::SerialWrite("[ipc] kmutex self-test: HandleTable + recursion + cancellation + abandonment\n");
 
     auto create_r = KMutexCreate();
     if (!create_r.has_value())
@@ -171,125 +254,104 @@ void KMutexSelfTest()
         core::Panic("ipc/kmutex", "self-test: KMutexCreate failed");
     }
     KMutex* m = create_r.value();
-
     if (KObjectRefcount(&m->base) != 1)
     {
         core::Panic("ipc/kmutex", "self-test: post-create refcount != 1");
     }
 
-    // Build a synthetic per-test HandleTable on the boot stack.
-    // Static so the SpinLock embedded in HandleTable doesn't sit
-    // on a transient stack frame across an internal yield (the
-    // table itself never yields, but defensive against future
-    // changes).
     static HandleTable table{};
-    auto insert_r = HandleTableInsert(table, &m->base);
-    if (!insert_r.has_value())
+    auto insert_r = HandleTableInsert(table, &m->base, TypeAllowedRights(KObjectType::Mutex));
+    if (!insert_r.has_value() || insert_r.value() == kHandleInvalid)
     {
         core::Panic("ipc/kmutex", "self-test: HandleTableInsert failed");
     }
     const Handle h = insert_r.value();
-    if (h == kHandleInvalid)
-    {
-        core::Panic("ipc/kmutex", "self-test: insert returned kHandleInvalid");
-    }
-
-    // Refcount unchanged — the table took ownership of the
-    // initial reference, no extra acquire performed.
-    if (KObjectRefcount(&m->base) != 1)
-    {
-        core::Panic("ipc/kmutex", "self-test: refcount changed after insert");
-    }
-
-    // Lookup with right type-tag should resolve.
-    KObject* obj_back = HandleTableLookup(table, h, KObjectType::Mutex);
+    KObject* obj_back = HandleTableLookupRef(table, h, KObjectType::Mutex);
     if (obj_back != &m->base)
     {
         core::Panic("ipc/kmutex", "self-test: lookup returned wrong KObject");
     }
-
-    // Lookup with wrong type-tag must return nullptr (KObject's
-    // type-check, not the table's).
-    if (HandleTableLookup(table, h, KObjectType::Event) != nullptr)
+    if (HandleTableLookupRef(table, h, KObjectType::Event) != nullptr)
     {
-        core::Panic("ipc/kmutex", "self-test: lookup with wrong type-tag returned non-null");
+        core::Panic("ipc/kmutex", "self-test: wrong-type lookup succeeded");
     }
 
-    // Cast back through the KObject* and exercise the lock state
-    // machine. Acquire then re-acquire then release-twice — the
-    // recursion counter should walk 0 → 1 → 2 → 1 → 0 cleanly.
     auto* km = reinterpret_cast<KMutex*>(obj_back);
-    KMutexAcquire(km);
-    if (km->recursion != 1 || km->owner == nullptr)
+    if (KMutexAcquire(km) != KMutexWaitResult::Acquired || !KMutexHeld(km) ||
+        __atomic_load_n(&km->recursion, __ATOMIC_RELAXED) != 1)
     {
-        core::Panic("ipc/kmutex", "self-test: state wrong after first acquire");
+        core::Panic("ipc/kmutex", "self-test: first acquire failed");
     }
-    KMutexAcquire(km);
-    if (km->recursion != 2)
+    if (KMutexAcquire(km) != KMutexWaitResult::Acquired || __atomic_load_n(&km->recursion, __ATOMIC_RELAXED) != 2)
     {
-        core::Panic("ipc/kmutex", "self-test: recursion counter did not bump on re-acquire");
+        core::Panic("ipc/kmutex", "self-test: recursive acquire failed");
     }
-    KMutexRelease(km);
-    if (km->recursion != 1 || km->owner == nullptr)
+    if (!KMutexRelease(km) || __atomic_load_n(&km->recursion, __ATOMIC_RELAXED) != 1 || !KMutexRelease(km) ||
+        KMutexHeld(km))
     {
-        core::Panic("ipc/kmutex", "self-test: outer release dropped owner too early");
-    }
-    KMutexRelease(km);
-    if (km->recursion != 0 || km->owner != nullptr)
-    {
-        core::Panic("ipc/kmutex", "self-test: final release did not reset state");
+        core::Panic("ipc/kmutex", "self-test: recursive release failed");
     }
 
-    // Timed-acquire fast paths. Re-entrant timed acquire must
-    // succeed regardless of the timeout (no self-block). A
-    // timed-acquire on an unowned mutex with a non-zero budget
-    // must succeed via the fast path. Real contention (waiter
-    // taking the timeout vs. an unlock-handoff) is verified by
-    // a future SMP/contention test once AP bringup lands; v0
-    // exercises the un-contended branches here.
-    if (!KMutexAcquireTimed(km, 1))
+    if (KMutexAcquireTimed(km, 1) != KMutexWaitResult::Acquired ||
+        KMutexAcquireTimed(km, 0) != KMutexWaitResult::Acquired ||
+        __atomic_load_n(&km->recursion, __ATOMIC_RELAXED) != 2)
     {
-        core::Panic("ipc/kmutex", "self-test: AcquireTimed(1) on free mutex failed");
+        core::Panic("ipc/kmutex", "self-test: timed/re-entrant acquire failed");
     }
-    if (km->recursion != 1 || km->owner == nullptr)
+    if (!KMutexRelease(km) || !KMutexRelease(km) || KMutexHeld(km))
     {
-        core::Panic("ipc/kmutex", "self-test: AcquireTimed did not stamp owner+recursion");
-    }
-    if (!KMutexAcquireTimed(km, 0))
-    {
-        core::Panic("ipc/kmutex", "self-test: re-entrant AcquireTimed(0) failed");
-    }
-    if (km->recursion != 2)
-    {
-        core::Panic("ipc/kmutex", "self-test: re-entrant timed acquire did not bump recursion");
-    }
-    KMutexRelease(km);
-    KMutexRelease(km);
-    if (km->recursion != 0 || km->owner != nullptr)
-    {
-        core::Panic("ipc/kmutex", "self-test: timed-acquire release pairs did not reset state");
+        core::Panic("ipc/kmutex", "self-test: timed acquire release failed");
     }
 
-    // Remove from table — refcount falls to zero, destroy fires,
-    // storage is freed. After this point `m` / `km` are dangling.
+    KMutexAbandonSelfTestContext abandon_context{};
+    abandon_context.mutex = km;
+    const sched::TaskCreateResult owner =
+        sched::SchedCreate(&KMutexAbandonSelfTestOwner, &abandon_context, "kmutex-abandon-owner");
+    if (!owner.created)
+    {
+        core::Panic("ipc/kmutex", "self-test: failed to create abandonment owner");
+    }
+
+    u32 owner_wait_budget = 10000;
+    while (__atomic_load_n(&abandon_context.owner_state, __ATOMIC_ACQUIRE) == 0 && owner_wait_budget-- != 0)
+    {
+        sched::SchedYield();
+    }
+    if (__atomic_load_n(&abandon_context.owner_state, __ATOMIC_ACQUIRE) != 1)
+    {
+        core::Panic("ipc/kmutex", "self-test: abandonment owner did not acquire");
+    }
+    if (sched::SchedKillByPid(owner.tid) != sched::KillResult::Protected)
+    {
+        core::Panic("ipc/kmutex", "self-test: public kill accepted a kernel Task");
+    }
+
+    __atomic_store_n(&abandon_context.release_owner, true, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&abandon_context.release_sequence, 1u, __ATOMIC_RELEASE);
+    sched::WaitQueueWakeAll(&abandon_context.release_waiters);
+
+    if (KMutexAcquireTimed(km, 100) != KMutexWaitResult::Abandoned)
+    {
+        core::Panic("ipc/kmutex", "self-test: dead owner did not publish abandonment");
+    }
+    if (!KMutexRelease(km) || KMutexHeld(km))
+    {
+        core::Panic("ipc/kmutex", "self-test: abandoned successor release failed");
+    }
+    if (KMutexAcquireTimed(km, 0) != KMutexWaitResult::Acquired || !KMutexRelease(km))
+    {
+        core::Panic("ipc/kmutex", "self-test: abandoned state was not consumed exactly once");
+    }
+
+    KObjectRelease(obj_back);
     auto remove_r = HandleTableRemove(table, h);
-    if (!remove_r.has_value())
+    if (!remove_r.has_value() || HandleTableLookupRef(table, h, KObjectType::Mutex) != nullptr ||
+        HandleTableLiveCount(table) != 0)
     {
-        core::Panic("ipc/kmutex", "self-test: HandleTableRemove failed");
+        core::Panic("ipc/kmutex", "self-test: table drain failed");
     }
 
-    // Looking up the now-removed handle returns nullptr.
-    if (HandleTableLookup(table, h, KObjectType::Mutex) != nullptr)
-    {
-        core::Panic("ipc/kmutex", "self-test: lookup after remove returned non-null");
-    }
-
-    if (HandleTableLiveCount(table) != 0)
-    {
-        core::Panic("ipc/kmutex", "self-test: live count != 0 after drain");
-    }
-
-    arch::SerialWrite("[ipc] kmutex self-test OK (Create + Insert + Lookup + recursion + Remove + destroy).\n");
+    arch::SerialWrite("[ipc] kmutex self-test OK (kernel kill protected + WAIT_ABANDONED hand-off)\n");
 }
 
 } // namespace duetos::ipc

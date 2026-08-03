@@ -42,17 +42,19 @@ __declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSig
 {
     /* Best-effort: signal first object, then wait on second.
      * Atomicity not preserved (sub-GAP). */
-    /* Mutex / event ranges are 0x200/0x300 + a kobj_handles slot
-     * (1..63) — the caps grew 8 -> 64 when those objects migrated
-     * to the unified handle table. */
+    /* The low 12 bits carry the mutex/event band plus slot (1..63),
+     * while bits 12..30 carry a non-zero handle generation. */
     unsigned long long sig_handle = (unsigned long long)ObjectToSignal;
+    unsigned sig_low_tag = (unsigned)sig_handle & 0xFFFu;
+    unsigned sig_generation = (unsigned)sig_handle >> 12;
+    int sig_is_opaque = sig_handle != 0 && sig_handle <= 0x7FFFFFFFu && sig_generation != 0;
     long long sig_status = 0;
-    if (sig_handle >= 0x200 && sig_handle < 0x240)
+    if (sig_is_opaque && sig_low_tag > 0x200u && sig_low_tag < 0x240u)
         __asm__ volatile("int $0x80"
                          : "=a"(sig_status)
                          : "a"((long long)27), "D"((long long)ObjectToSignal)
                          : "memory");
-    else if (sig_handle >= 0x300 && sig_handle < 0x340)
+    else if (sig_is_opaque && sig_low_tag > 0x300u && sig_low_tag < 0x340u)
         __asm__ volatile("int $0x80"
                          : "=a"(sig_status)
                          : "a"((long long)31), "D"((long long)ObjectToSignal)
@@ -327,7 +329,8 @@ __declspec(dllexport) NTSTATUS NtRemoveIoCompletionEx(HANDLE IoCompletionHandle,
 }
 
 /* PostQueuedCompletionStatus — Win32-shaped post onto a
- * kernel-backed IOCP handle (the 0xB00-range handles minted by
+ * kernel-backed IOCP handle (a positive generation-tagged opaque
+ * value whose low tag is 0xB01..0xB3F, minted by
  * NtCreateIoCompletion above). Thin wrapper over SYS_IOCP_POST.
  *
  * Exported from ntdll (not kernel32) deliberately: kernel32's

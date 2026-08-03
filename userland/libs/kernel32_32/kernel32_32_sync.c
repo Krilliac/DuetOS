@@ -38,6 +38,16 @@
  * Mirrored here because a freestanding DLL cannot include the kernel
  * header; keep in sync with the same constant in the x86_64 sibling. */
 #define WIN32_HANDLE_CAP_PER_TYPE 0x40u
+#define DUET_KOBJECT_TAG_MASK 0xFFFu
+#define DUET_KOBJECT_POSITIVE_MAX 0x7FFFFFFFu
+
+static int duet32_is_kobject_handle(unsigned handle, unsigned tag_base)
+{
+    const unsigned low_tag = handle & DUET_KOBJECT_TAG_MASK;
+    const unsigned generation = handle >> 12;
+    return handle != 0 && handle <= DUET_KOBJECT_POSITIVE_MAX && generation != 0 && low_tag > tag_base &&
+           low_tag < tag_base + WIN32_HANDLE_CAP_PER_TYPE;
+}
 
 static inline unsigned duet32_tid(void)
 {
@@ -332,11 +342,11 @@ __declspec(dllexport) DWORD __stdcall WaitForSingleObject(HANDLE h, DWORD timeou
 {
     const unsigned handle = (unsigned)(unsigned long)h;
     int syscall_num;
-    if (handle >= 0x200u && handle < 0x200u + WIN32_HANDLE_CAP_PER_TYPE)
+    if (duet32_is_kobject_handle(handle, 0x200u))
         syscall_num = 26; /* SYS_MUTEX_WAIT */
-    else if (handle >= 0x300u && handle < 0x300u + WIN32_HANDLE_CAP_PER_TYPE)
+    else if (duet32_is_kobject_handle(handle, 0x300u))
         syscall_num = 33; /* SYS_EVENT_WAIT */
-    else if (handle >= 0x500u && handle < 0x500u + WIN32_HANDLE_CAP_PER_TYPE)
+    else if (duet32_is_kobject_handle(handle, 0x500u))
         syscall_num = 53; /* SYS_SEM_WAIT */
     else if (handle >= 0x400u && handle < 0x400u + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 54; /* SYS_THREAD_WAIT */

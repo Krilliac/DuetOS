@@ -43,7 +43,7 @@ ABI syscall (SYS_MUTEX_CREATE / SYS_EVENT_WAIT / SYS_NAMED_PIPE_OPEN …)
         ↓
 HandleTableLookupRef(table, h, expected_type)     — refcounted lookup
         ↓
-KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KFile / IocpPort
+KMutex / KEvent / KSemaphore / KMailbox / KWaitable / KMessagePort / KFile / IocpPort
         ↓
 KObject base (refcount + type tag + destroy callback)
         ↓
@@ -62,11 +62,12 @@ syscalls.
 |-----------------|------------------------------------------------------|----------------------------------------------------------|------------------------------------------------------------------------------|
 | `KMutex`        | [`ipc/kmutex.h`](../../kernel/ipc/kmutex.h)          | `CreateMutex` / `pthread_mutex_t`                        | Reentrant lock; owner-aware release; wait-queue blocks on contention.        |
 | `KEvent`        | [`ipc/kevent.h`](../../kernel/ipc/kevent.h)          | `CreateEvent` / eventfd                                  | Binary signal, manual-reset or auto-reset; Wait / Set / Reset.               |
-| `KSemaphore`    | [`ipc/ksemaphore.h`](../../kernel/ipc/ksemaphore.h)  | `CreateSemaphore` / POSIX `sem_t`                        | Counting semaphore; `Acquire` blocks, `Release(n)` wakes n waiters.          |
+| `KSemaphore`    | [`ipc/ksemaphore.h`](../../kernel/ipc/ksemaphore.h)  | `CreateSemaphore` / POSIX `sem_t`                        | Counting semaphore; `Acquire` blocks, `Release(n)` broadcasts once and count admits at most n waiters. |
 | `KMailbox`      | [`ipc/kmailbox.h`](../../kernel/ipc/kmailbox.h)      | `PostThreadMessage` / POSIX message queues               | Bounded FIFO of 32-byte typed messages; `not_full`/`not_empty` condvars.     |
 | `KWaitable`     | [`ipc/kwaitable.h`](../../kernel/ipc/kwaitable.h)    | `WaitForMultipleObjects`                                 | Composite "wait on any of N predicates"; up to 64 predicates per Waitable.   |
+| `KMessagePort`  | [`ipc/kmessage_port.h`](../../kernel/ipc/kmessage_port.h) | Native framed message channel                         | Fixed-storage message ring with a level-triggered readable wait.              |
 | `KFile`         | [`ipc/kfile.h`](../../kernel/ipc/kfile.h)            | NT file handle / POSIX `fd`                              | Open-file abstraction; per-kind release callback routes destroy → fd-pool.   |
-| `IocpPort`      | [`ipc/iocp.h`](../../kernel/ipc/iocp.h)              | `CreateIoCompletionPort` / `GetQueuedCompletionStatus`   | I/O completion queue (built on top of KMailbox); v0 kernel-side only.        |
+| `IocpPort`      | [`ipc/iocp.h`](../../kernel/ipc/iocp.h)              | `CreateIoCompletionPort` / `GetQueuedCompletionStatus`   | Fixed-capacity I/O completion ring with retained-handle blocking removal.    |
 
 Every concrete type embeds `KObject base` as its **first member** so
 a `KObject*` from the handle table can be `reinterpret_cast`'d back
@@ -160,7 +161,7 @@ Adding a syscall is an ABI change — review the contract in
 | `KSemaphore`  | `SYS_SEM_*` (51–53)  | Create / Release / Wait.                                     |
 | Named pipes   | `SYS_NAMED_PIPE_*` (202–203) | Create on server side; Open on client side.           |
 | `KFile`       | (no direct syscall)  | Backing object for POSIX `fd` and NT file handle migrations. |
-| `IocpPort`    | (kernel-side only)   | Win32 `CreateIoCompletionPort` ABI is GAP — see below.       |
+| `IocpPort`    | `SYS_IOCP_*` (159–162), `SYS_IOCP_POST` (213) | Create / post / cancellable remove / close. |
 
 ## Capability / Privilege Surface
 
@@ -210,6 +211,43 @@ fault-domain helper, not recurse.
   condvar pair (KMutex's `wait_queue`, KMailbox's `not_full` /
   `not_empty`, KSemaphore's `cond`). Use the object API; do **not**
   reach past the public functions to touch internal state.
+
+### Cooperative cancellation at blocking objects
+
+`KMutex`, `KEvent`, `KSemaphore`, `KMailbox`, `KWaitable`, `KMessagePort`,
+and `IocpPort` expose
+result-bearing waits. Their blocked paths use the scheduler's cancellable
+mutex/condvar operations and never terminate another task's live kernel
+frame. On `Cancelled`, the scheduler first reacquires the object's companion
+mutex and the object unwinds guarded state before unlocking. Each self-pinning
+object then drops its explicit wait pin before returning. IOCP also supports a
+stack-local boot-test form, and message-port operations use a caller-owned
+lifetime contract, so their retained syscall/handle lookup instead spans the
+wait and is dropped immediately after the result returns.
+
+The result types intentionally cannot blur cancellation into a normal outcome:
+
+- event and semaphore waits distinguish signaled/acquired, timed out,
+  cancelled, and failure;
+- mailbox post/receive return completed, cancelled, or failure, and a cancelled
+  receive does not modify its output buffer;
+- wait-for-any returns `{status,index}`, with a non-ready result carrying
+  `kWaitableInvalidIndex` rather than a plausible predicate index;
+- IOCP removal distinguishes dequeued, timed out, closed, cancelled, and
+  failure; its finite path computes one wrap-safe deadline, and only dequeued
+  writes the completion output. The Win32 adapter fail-fast probes every
+  stable output range before blocking/dequeue, but those snapshots are not
+  page pins, so the later fault-recoverable copies still handle a racing unmap;
+- message-port readable wait returns `Cancelled` without consuming a frame.
+  Its hosted-test branch deliberately keeps `std::condition_variable` behavior.
+
+Win32 event, semaphore, and IOCP adapters translate a cancelled wait to `-1` only as
+an internal unwind sentinel. The syscall dispatcher's outer cancellation guard
+terminates the task after all lookup references and dispatcher-local guards
+have unwound, before ring 3 can observe that sentinel. Native or Linux adapters
+must preserve the same rule when they expose these objects: return an explicit
+cancellation/EINTR-shaped result to the dispatcher and let its outer boundary
+finalize the current task.
 
 Per-object self-tests (`KObjectSelfTest`, `HandleTableSelfTest`,
 `KMutexSelfTest`, …) run from boot before any user code and panic

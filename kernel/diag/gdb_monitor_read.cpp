@@ -11,7 +11,6 @@
 
 #include "diag/gdb_monitor.h"
 
-#include "apps/dbg_core.h"
 #include "drivers/video/widget.h"
 #include "ipc/handle_table.h"
 #include "ipc/kobject.h"
@@ -29,23 +28,6 @@ namespace duetos::diag::mon_internal
 
 namespace
 {
-
-const char* ProcStateName(u8 s)
-{
-    switch (s)
-    {
-    case 0:
-        return "run";
-    case 1:
-        return "ready";
-    case 2:
-        return "blocked";
-    case 3:
-        return "zombie";
-    default:
-        return "?";
-    }
-}
 
 const char* ThreadStateName(u8 s)
 {
@@ -66,9 +48,12 @@ const char* ThreadStateName(u8 s)
     }
 }
 
-core::ScopedProcessRef FindProc(u64 pid)
+void Unavailable(const char* verb, core::ErrorCode reason, MonitorWriter& out)
 {
-    return core::ScopedProcessRef(sched::SchedFindProcessByPidRetained(pid));
+    out.Str(verb);
+    out.Str(": unavailable at stop (lock ");
+    out.Str(core::ErrorCodeName(reason));
+    out.Str(")\n");
 }
 
 void NotFound(const char* verb, u64 pid, MonitorWriter& out)
@@ -79,24 +64,76 @@ void NotFound(const char* verb, u64 pid, MonitorWriter& out)
     out.Str(" not found\n");
 }
 
+core::ErrorCode FindStoppedProc(u64 pid, core::Process** process_out, bool* vm_quiescent_out)
+{
+    const core::ErrorCode status = sched::SchedFindProcessByPidStopped(pid, process_out, vm_quiescent_out);
+    if (status != core::ErrorCode::Ok)
+        return status;
+    if (*process_out == nullptr || core::ProcessLifecycleLoad(*process_out) != core::ProcessLifecycleState::Published)
+    {
+        *process_out = nullptr;
+        *vm_quiescent_out = false;
+        return core::ErrorCode::NotFound;
+    }
+    return core::ErrorCode::Ok;
+}
+
 } // namespace
 
 void CmdPs(MonitorWriter& out)
 {
-    apps::dbg::core::ProcInfo procs[64];
-    const usize n = apps::dbg::core::EnumerateProcesses(procs, 64);
+    constexpr u32 kTaskCap = 128;
+    sched::SchedTaskInfo tasks[kTaskCap]{};
+    u32 total_tasks = 0;
+    const core::ErrorCode status = sched::SchedSnapshotTasksStopped(tasks, kTaskCap, &total_tasks);
+    if (status != core::ErrorCode::Ok)
+    {
+        Unavailable("ps", status, out);
+        return;
+    }
+
+    struct ProcRow
+    {
+        u64 pid;
+        const char* name;
+        u64 ticks;
+        bool all_dead;
+    };
+    ProcRow procs[64]{};
+    u32 n = 0;
+    const u32 shown_tasks = total_tasks < kTaskCap ? total_tasks : kTaskCap;
+    for (u32 i = 0; i < shown_tasks; ++i)
+    {
+        const sched::SchedTaskInfo& task = tasks[i];
+        if (!task.has_process || task.owner_pid == 0)
+            continue;
+        u32 row = 0;
+        for (; row < n; ++row)
+            if (procs[row].pid == task.owner_pid)
+                break;
+        if (row == n)
+        {
+            if (n == 64)
+                continue;
+            procs[n] = {task.owner_pid, task.name, 0, true};
+            row = n++;
+        }
+        procs[row].ticks += task.ticks_run;
+        if (task.state != 4)
+            procs[row].all_dead = false;
+    }
     out.Str("PID    STATE    TICKS       REGIONS  NAME\n");
-    for (usize i = 0; i < n; ++i)
+    for (u32 i = 0; i < n; ++i)
     {
         out.U64(procs[i].pid);
         out.Str("\t");
-        out.Str(ProcStateName(procs[i].state));
+        out.Str(procs[i].all_dead ? "zombie" : "run");
         out.Str("\t");
-        out.U64(procs[i].ticks_used);
+        out.U64(procs[i].ticks);
         out.Str("\t");
-        out.U64(procs[i].region_count);
+        out.Str("-");
         out.Str("\t");
-        out.Str(procs[i].name);
+        out.Str(procs[i].name != nullptr ? procs[i].name : "?");
         out.Line();
     }
     out.Str("(");
@@ -106,14 +143,29 @@ void CmdPs(MonitorWriter& out)
 
 void CmdCaps(u64 pid, MonitorWriter& out)
 {
-    core::ScopedProcessRef process_ref = FindProc(pid);
-    core::Process* p = process_ref.Get();
-    if (p == nullptr)
+    core::Process* p = nullptr;
+    bool vm_quiescent = false;
+    const core::ErrorCode lookup = FindStoppedProc(pid, &p, &vm_quiescent);
+    if (lookup == core::ErrorCode::NotFound)
     {
         NotFound("caps", pid, out);
         return;
     }
-    const core::CapSet caps = core::ProcessCapsSnapshot(p);
+    if (lookup != core::ErrorCode::Ok)
+    {
+        Unavailable("caps", lookup, out);
+        return;
+    }
+    (void)vm_quiescent;
+    core::CapSet caps{};
+    // No lease-expiry side effect in the stop loop: the bounded helper tries
+    // the Process authority lock and publishes only a diagnostic view. Runtime
+    // expiry resumes normally after continue.
+    if (!core::ProcessCapsTrySnapshotNoExpire(p, &caps))
+    {
+        Unavailable("caps", core::ErrorCode::Busy, out);
+        return;
+    }
     out.Str("pid ");
     out.U64(pid);
     out.Str(" caps=0x");
@@ -137,24 +189,30 @@ void CmdCaps(u64 pid, MonitorWriter& out)
 
 void CmdThreads(MonitorWriter& out)
 {
-    apps::dbg::core::KernelOverview ov;
-    apps::dbg::core::GetKernelOverview(&ov);
+    const sched::SchedStats ov = sched::SchedStatsRead();
     out.Str("ctx-switches=");
-    out.U64(ov.sched_context_switches);
+    out.U64(ov.context_switches);
     out.Str(" live=");
-    out.U64(ov.sched_tasks_live);
+    out.U64(ov.tasks_live);
     out.Str(" sleeping=");
-    out.U64(ov.sched_tasks_sleeping);
+    out.U64(ov.tasks_sleeping);
     out.Str(" blocked=");
-    out.U64(ov.sched_tasks_blocked);
+    out.U64(ov.tasks_blocked);
     out.Line();
 
-    apps::dbg::core::ThreadInfo th[128];
-    const usize n = apps::dbg::core::EnumerateThreads(th, 128);
-    out.Str("TID    STATE   PRIO  TICKS       NAME\n");
-    for (usize i = 0; i < n; ++i)
+    sched::SchedTaskInfo th[128]{};
+    u32 total = 0;
+    const core::ErrorCode status = sched::SchedSnapshotTasksStopped(th, 128, &total);
+    if (status != core::ErrorCode::Ok)
     {
-        out.U64(th[i].tid);
+        Unavailable("threads", status, out);
+        return;
+    }
+    const u32 n = total < 128 ? total : 128;
+    out.Str("TID    STATE   PRIO  TICKS       NAME\n");
+    for (u32 i = 0; i < n; ++i)
+    {
+        out.U64(th[i].id);
         out.Str("\t");
         out.Str(ThreadStateName(th[i].state));
         out.Str("\t");
@@ -162,7 +220,7 @@ void CmdThreads(MonitorWriter& out)
         out.Str("\t");
         out.U64(th[i].ticks_run);
         out.Str("\t");
-        out.Str(th[i].name);
+        out.Str(th[i].name != nullptr ? th[i].name : "?");
         if (th[i].is_running)
         {
             out.Str(" *");
@@ -176,45 +234,74 @@ void CmdThreads(MonitorWriter& out)
 
 void CmdHandles(u64 pid, MonitorWriter& out)
 {
-    core::ScopedProcessRef process_ref = FindProc(pid);
-    core::Process* p = process_ref.Get();
-    if (p == nullptr)
+    core::Process* p = nullptr;
+    bool vm_quiescent = false;
+    const core::ErrorCode lookup = FindStoppedProc(pid, &p, &vm_quiescent);
+    if (lookup == core::ErrorCode::NotFound)
     {
         NotFound("handles", pid, out);
         return;
     }
+    if (lookup != core::ErrorCode::Ok)
+    {
+        Unavailable("handles", lookup, out);
+        return;
+    }
+    (void)vm_quiescent;
+
+    ipc::HandleSnapshotEntry entries[ipc::kHandleTableCapacity]{};
+    u32 total = 0;
+    {
+        sync::SpinLockTryGuard handle_guard(p->kobj_handles.lock);
+        if (!handle_guard)
+        {
+            Unavailable("handles", handle_guard.reason(), out);
+            return;
+        }
+        for (u32 slot_index = 1; slot_index < ipc::kHandleTableCapacity; ++slot_index)
+        {
+            const ipc::HandleSlot& slot = p->kobj_handles.slots[slot_index];
+            if (slot.state != ipc::HandleSlotState::Live || slot.obj == nullptr)
+                continue;
+            entries[total++] = {ipc::HandleEncode(slot_index, slot.generation), slot.obj->type, slot.rights};
+        }
+    }
     out.Str("pid ");
     out.U64(pid);
     out.Str(" live=");
-    out.U64(ipc::HandleTableLiveCount(p->kobj_handles));
+    out.U64(total);
     out.Line();
-    // Slot 0 is reserved for kHandleInvalid. Best-effort snapshot:
-    // the stop loop is single-CPU with peers NMI-frozen, so an
-    // unlocked read is a consistent debug view.
-    for (u32 h = 1; h < ipc::kHandleTableCapacity; ++h)
+    const u32 shown = total < ipc::kHandleTableCapacity ? total : ipc::kHandleTableCapacity;
+    for (u32 i = 0; i < shown; ++i)
     {
-        const ipc::KObject* obj = p->kobj_handles.slots[h].obj;
-        if (obj == nullptr)
-        {
-            continue;
-        }
         out.Str("  h=");
-        out.U64(h);
+        out.U64(entries[i].handle);
         out.Str("  type=");
-        out.Str(ipc::KObjectTypeName(obj->type));
-        out.Str("  refs=");
-        out.U64(obj->refcount);
+        out.Str(ipc::KObjectTypeName(entries[i].type));
+        out.Str("  rights=0x");
+        out.Hex(entries[i].rights, 16);
         out.Line();
     }
 }
 
 void CmdVm(u64 pid, MonitorWriter& out)
 {
-    core::ScopedProcessRef process_ref = FindProc(pid);
-    core::Process* p = process_ref.Get();
-    if (p == nullptr)
+    core::Process* p = nullptr;
+    bool vm_quiescent = false;
+    const core::ErrorCode lookup = FindStoppedProc(pid, &p, &vm_quiescent);
+    if (lookup == core::ErrorCode::NotFound)
     {
         NotFound("vm", pid, out);
+        return;
+    }
+    if (lookup != core::ErrorCode::Ok)
+    {
+        Unavailable("vm", lookup, out);
+        return;
+    }
+    if (!vm_quiescent)
+    {
+        out.Str("vm: unavailable at stop (VM transaction owned)\n");
         return;
     }
     const mm::AddressSpace* as = p->as;
@@ -230,7 +317,12 @@ void CmdVm(u64 pid, MonitorWriter& out)
     u32 total = 0;
     u32 shown = 0;
     {
-        sync::SpinLockGuard region_guard(as->regions_lock);
+        sync::SpinLockTryGuard region_guard(as->regions_lock);
+        if (!region_guard)
+        {
+            Unavailable("vm", region_guard.reason(), out);
+            return;
+        }
         total = as->region_count;
         shown = (total < kRowCap) ? total : kRowCap;
         for (u32 i = 0; i < shown; ++i)
@@ -259,21 +351,37 @@ void CmdVm(u64 pid, MonitorWriter& out)
 
 void CmdMods(u64 pid, MonitorWriter& out)
 {
-    core::ScopedProcessRef process_ref = FindProc(pid);
-    core::Process* p = process_ref.Get();
-    if (p == nullptr)
+    core::Process* p = nullptr;
+    bool vm_quiescent = false;
+    const core::ErrorCode lookup = FindStoppedProc(pid, &p, &vm_quiescent);
+    if (lookup == core::ErrorCode::NotFound)
     {
         NotFound("mods", pid, out);
         return;
     }
+    if (lookup != core::ErrorCode::Ok)
+    {
+        Unavailable("mods", lookup, out);
+        return;
+    }
+    if (!vm_quiescent)
+    {
+        out.Str("mods: unavailable at stop (VM transaction owned)\n");
+        return;
+    }
+    core::DllImage images[core::Process::kDllImageCap]{};
+    const u64 image_count =
+        p->dll_image_count < core::Process::kDllImageCap ? p->dll_image_count : core::Process::kDllImageCap;
+    for (u64 i = 0; i < image_count; ++i)
+        images[i] = p->dll_images[i];
     out.Str("pid ");
     out.U64(pid);
     out.Str(" dll-images=");
-    out.U64(p->dll_image_count);
+    out.U64(image_count);
     out.Line();
-    for (u64 i = 0; i < p->dll_image_count && i < core::Process::kDllImageCap; ++i)
+    for (u64 i = 0; i < image_count; ++i)
     {
-        const core::DllImage& d = p->dll_images[i];
+        const core::DllImage& d = images[i];
         out.Str("  [");
         out.U64(i);
         out.Str("] base=0x");
@@ -329,11 +437,22 @@ void CmdWin(MonitorWriter& out)
 
 void CmdWin32(u64 pid, MonitorWriter& out)
 {
-    core::ScopedProcessRef process_ref = FindProc(pid);
-    core::Process* p = process_ref.Get();
-    if (p == nullptr)
+    core::Process* p = nullptr;
+    bool vm_quiescent = false;
+    const core::ErrorCode lookup = FindStoppedProc(pid, &p, &vm_quiescent);
+    if (lookup == core::ErrorCode::NotFound)
     {
         NotFound("win32", pid, out);
+        return;
+    }
+    if (lookup != core::ErrorCode::Ok)
+    {
+        Unavailable("win32", lookup, out);
+        return;
+    }
+    if (!vm_quiescent)
+    {
+        out.Str("win32: unavailable at stop (VM transaction owned)\n");
         return;
     }
     subsystems::win32::custom::ProcessCustomState* st = subsystems::win32::custom::GetState(p);

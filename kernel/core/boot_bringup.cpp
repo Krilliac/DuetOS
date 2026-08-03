@@ -337,6 +337,7 @@
 #include "core/panic.h"
 #include "core/serial_input.h"
 #include "core/service.h"
+#include "core/service_bootstrap_live.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -1140,6 +1141,16 @@ void BootBringupMemPaging()
                                                   KernelHeapSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "resource-domain-selftest",
+                                              []()
+                                              {
+                                                  if (!duetos::core::ResourceDomainSelfTest())
+                                                  {
+                                                      duetos::core::Panic("core/resource-domain",
+                                                                          "resource-domain selftest failed");
+                                                  }
+                                                  return duetos::core::Result<void>{};
+                                              });
         duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "process-handle-lifetime-selftest",
                                               []()
                                               {
@@ -1633,10 +1644,11 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::PerCpuBsp), "boot", "RunPhase PerCpuBsp");
 
     // Decode BSP CPUID 0x1F/0x0B + SRAT row into the per-CPU
-    // topology table. AP rows are filled later by each AP from
-    // inside ApEntryFromTrampoline before signaling online_flag,
-    // so the BSP's WaitForApOnline poll inside SmpStartAps is the
-    // rendezvous; cluster assignment runs after SmpStartAps returns.
+    // topology table. AP rows are filled later by each AP's CPUHP
+    // topology step before it publishes the exact attempt ready token.
+    // The BSP's generation-safe WaitForApReady poll in SmpStartAps is
+    // the rendezvous; only a ready AP is published online and granted
+    // scheduler admission. Cluster assignment runs after SmpStartAps.
     duetos::cpu::TopologyInitBsp();
 
     // Single-instruction per-CPU access self-test. Validates the
@@ -2054,19 +2066,22 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               });
     }
 
-    // Adaptive mutex (illumos-style spin-if-owner-running, park
-    // otherwise). Exercises the fast path, the TryLock surface, the
-    // lockdep round-trip, and the two-task contention park/wake path.
-    // Routed through Phase::Sched because the contention case spawns
-    // workers via SchedCreate and drives them with SchedSleepTicks —
-    // both require the scheduler online. Registered OUTSIDE the
-    // `if constexpr (kBootSelfTests)` gate above: the primitive is a
-    // new kernel sync surface whose correctness has SMP-dependent
-    // edge cases (on_cpu flag handoff at ContextSwitch, park-vs-spin
-    // decision) that a compile-time check cannot prove, so even
-    // release boots run it as a live regression gate. The test is
-    // cheap (~100 ms for the contention worker's sleep) and prints a
-    // single sentinel line on success.
+    // AdaptiveMutex is now a compatibility facade over sched::Mutex;
+    // it does not spin. This exercises scheduler-owned lifetime
+    // accounting, the TryLock and diagnostic-publication surfaces,
+    // lockdep round-trip, and exact FIFO hand-off under contention.
+    // Routed through Phase::Sched because the live path requires a
+    // current Task and the contention case spawns workers. (A complete
+    // pre-SchedInit BSP Lock/Unlock pair is intentionally a no-op and
+    // is not the path this test validates.) Registered OUTSIDE the
+    // `if constexpr (kBootSelfTests)` gate above. AdaptiveMutex keeps
+    // sched::Mutex's Internal ownership class: cancellation never detaches
+    // or abandons it, and task finalization waits for the owner to unlock.
+    // The cancellable/abandonable contract belongs only to user KMutex.
+    // The raw-owner UAF and
+    // SMP check-to-park lost-wake classes that delegation removes are
+    // runtime properties, so release boots retain this regression gate.
+    // The bounded test prints one terminal success sentinel.
     duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "adaptive-mutex-selftest",
                                           []()
                                           {
@@ -2338,10 +2353,40 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::net::drsh::DrshInit();
     DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
-    // Service manager: build the runtime table (no spawns yet — the
-    // autostart set launches later, after ramfs snapshots, where the
-    // inline boot spawns used to run). Self-test covers the crash-loop
-    // respawn rate limiter.
+    // Anchor the generated authority-bound service package in fixed kernel
+    // storage. This stages sealed images and opens the runtime substrate only;
+    // ActivationReady is still false, so no Process, Task, or endpoint is
+    // published here and the compatibility manager remains authoritative.
+    const ServiceBootstrapLiveResultV1 service_bootstrap = ServiceBootstrapLiveInitializeV1();
+    if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::CompatibilityRequired)
+    {
+        KLOG_INFO_2V("core/service-bootstrap",
+                     "package staged and runtime open; activation disabled, compatibility manager retained", "services",
+                     service_bootstrap.generated_service_count, "package-pages", service_bootstrap.package_owned_pages);
+    }
+    else
+    {
+        KLOG_WARN_S("core/service-bootstrap", "live anchor failed; compatibility manager retained", "status",
+                    ServiceBootstrapLiveStatusNameV1(service_bootstrap.status));
+        if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::StageFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor stage result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.stage.status));
+        }
+        else if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailed ||
+                 service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailedStageDiscardFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor runtime result", "status",
+                         ServiceRuntimeStatusNameV1(service_bootstrap.runtime.status));
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor discard result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.discard_status));
+        }
+    }
+
+    // The compatibility manager remains the live launcher until authenticated
+    // endpoint activation is implemented and its generated marker is true. It
+    // builds the old runtime table without spawning; the autostart set launches
+    // later, after ramfs snapshots. Its self-test covers crash-loop limiting.
     duetos::core::ServiceManagerInit();
     DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
 
@@ -3262,6 +3307,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // here is what makes a PE's client area ghost or lose its
     // earliest primitives. Emits `[displaylist-selftest] PASS`.
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::WindowDisplayListSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::WindowMessageIdentitySelfTest());
     // Pass D — app-widget framework. AppWidgetsSelfTest constructs
     // each concrete widget (button/listrow/label/panel), drives
     // synthetic mouse events, and verifies state-flag transitions
@@ -4234,19 +4280,6 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::fs::RamfsAbiSnapshot();
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
-
-    // Launch the userland service set through the service manager. The
-    // manifest (kernel/core/service.cpp) is now the single source of
-    // truth for what runs at boot — the userland shell stub, the native
-    // demo apps (hello_native, nat_calc, nat_sysinfo), and the duet-pkg
-    // selftest — replacing the hand-unrolled SpawnElfFile blocks that
-    // used to live here. ServiceManagerStartAll spawns every autostart
-    // entry in manifest order and starts the `svcmon` supervisor task
-    // that tracks each service's state and respawns Always-services with
-    // crash-loop protection. Operators drive the set at runtime via the
-    // `svc` shell command. (The duet-pkg entry still emits its
-    // `[duet-pkg-selftest] PASS` sentinel on every healthy boot.)
-    duetos::core::ServiceManagerStartAll();
 
     // peexec=<FATPATH> kernel cmdline: load a Windows PE/.exe off
     // FAT32 vol 0 and spawn it as a Win32 process at boot. This is the

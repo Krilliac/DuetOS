@@ -15,10 +15,10 @@
  * the user-mode kernel32 stubs (HeapAlloc, HeapFree, malloc,
  * free, calloc, ...) trampoline through those.
  *
- * The kernel manipulates the free list by reading/writing the
- * user-mapped heap pages through their backing physical frames
- * via PhysToVirt + AddressSpaceLookupUserFrame — same mechanism
- * the PE loader uses to patch IAT slots. No TLB manipulation.
+ * The kernel manipulates the free list through the bounded
+ * AddressSpaceReadUserMemory / AddressSpaceWriteUserMemory transaction
+ * APIs. No backing-frame or direct-map pointer escapes the address-space
+ * mutation lock.
  *
  * v0 scope:
  *   - First-fit allocation.
@@ -28,8 +28,7 @@
  *     (64 KiB), and if the free list can't satisfy a request
  *     the allocator returns 0 (Win32 semantics: HeapAlloc
  *     without HEAP_GENERATE_EXCEPTIONS returns NULL on OOM).
- *   - One heap per process. HeapCreate returns the same heap
- *     VA as GetProcessHeap; HeapDestroy is a no-op.
+ *   - One default heap plus four bounded HeapCreate arenas.
  *   - HeapFree(ptr) is idempotent iff ptr == 0 (Win32 contract).
  *     Double-free on a valid ptr is undefined (we leak /
  *     corrupt; same as a typical Win32 allocator in debug-off
@@ -118,8 +117,8 @@ u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr);
 ///
 /// Not an in-place resizer — v0 has no coalescing and
 /// therefore cannot grow a block into an adjacent free
-/// region. The copy path walks the heap one page-chunk at
-/// a time through the AS lookup used by PeekU64/PokeU64.
+/// region. The copy path walks the heap one page-chunk at a time
+/// through bounded address-space read/write transactions.
 u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size);
 
 /// HeapCreate — allocate a fresh secondary heap inside the
@@ -138,19 +137,19 @@ u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages);
 /// destroyable; HeapDestroy on it returns false.
 bool Win32HeapExDestroy(duetos::core::Process* proc, u64 heap_handle);
 
-/// Resolve a heap handle (the base VA returned by HeapCreate
-/// or the default-heap sentinel) into a slot pointer. Returns
-/// nullptr if the handle is not a registered heap; returns the
-/// pseudo-default-handle slot (a stable singleton inside this
-/// translation unit) when the handle matches the process's
-/// default heap so callers can treat both with one code path.
-/// Used by the syscall layer to dispatch HeapAlloc / HeapFree
-/// / HeapSize / HeapReAlloc against the right heap.
+/// Resolve a heap handle (the base VA returned by HeapCreate or the
+/// default-heap sentinel) into a value receipt. The receipt never exposes a
+/// pointer into Process metadata. Binding-consuming operations revalidate it
+/// while holding Process::win32_heap_lock, so concurrent HeapDestroy cannot
+/// leave a dangling free-list-head pointer.
+inline constexpr u32 kWin32DefaultHeapBindingSlot = ~u32{0};
 struct Win32HeapBinding
 {
     u64 base_va;
     u64 pages;
-    u64* free_head_ptr; // pointer into either Process::heap_free_head or extra_heaps[].free_head
+    u64 generation;
+    u32 slot;
+    u32 _reserved;
 };
 bool Win32HeapResolveHandle(duetos::core::Process* proc, u64 heap_handle, Win32HeapBinding* out);
 

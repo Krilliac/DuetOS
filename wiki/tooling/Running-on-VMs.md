@@ -19,8 +19,10 @@ What it *does* need is a VM configured with **virtual hardware it has
 drivers for**. Pick the controllers below and it boots; pick the
 hypervisor defaults and it won't find its disk.
 
-The single hard rule: **storage must be AHCI (SATA) or NVMe, and
-firmware must be UEFI.** Everything else is graceful.
+The storage rule is **AHCI (SATA) or NVMe**. The supported hybrid ISO can
+start GRUB on either BIOS or UEFI firmware; UEFI is the preferred VM profile
+because it also exercises GOP, but it is not a requirement for the supported
+GRUB + Multiboot2 kernel handoff.
 
 ## Driver coverage (what the VM may expose)
 
@@ -29,8 +31,8 @@ firmware must be UEFI.** Everything else is graceful.
 | Storage | **AHCI/SATA**, **NVMe** | LSI Logic SCSI, VMware PVSCSI, virtio-blk-as-boot |
 | NIC | **e1000/e1000e** (Intel) | vmxnet3, virtio-net-as-only-NIC* |
 | USB | **xHCI** + USB HID; **PS/2** kbd/mouse | EHCI/UHCI-only setups |
-| Display | **UEFI GOP** linear FB (always); Bochs VBE; Intel/AMD/NVIDIA (real HW) | accelerated VMware SVGA-II / VBox VBVA (classified `tier3-vm`, software FB only) |
-| Firmware | **UEFI** (primary), legacy BIOS (secondary) | — |
+| Display | **UEFI GOP** linear FB on UEFI; Bochs VBE on BIOS; Intel/AMD/NVIDIA (real HW) | accelerated VMware SVGA-II / VBox VBVA (classified `tier3-vm`, software FB only) |
+| Firmware | **UEFI or BIOS**, both through GRUB + Multiboot2; UEFI is the preferred VM profile | direct `BOOTX64.EFI` kernel handoff (experimental, incomplete) |
 | Entropy/mem | virtio-rng, virtio-balloon (QEMU) | (optional; absent elsewhere is harmless) |
 
 \* virtio-net *is* driven and drained, but the boot harness pairs it
@@ -40,7 +42,8 @@ with e1000e; on a non-QEMU VM give it an e1000e for the supported path.
 
 ### QEMU (canonical — `tools/qemu/run.sh`)
 
-Already correct: q35 + OVMF (UEFI), `-device nvme` + `-device ahci`,
+Already correct: q35 + OVMF (UEFI firmware) + the hybrid GRUB/Multiboot2 ISO,
+`-device nvme` + `-device ahci`,
 `-device e1000e`, `-device qemu-xhci`, `-smp 4` (default since this
 branch), serial → stdout, auto `kvm:tcg`. Nothing to do. See
 [QEMU Smoke Tests](QEMU-Smoke.md).
@@ -70,7 +73,8 @@ header). Required settings:
 
 ### Bare metal
 
-UEFI boot the hybrid ISO. Works if the machine's storage is
+Boot the hybrid ISO through its GRUB path (UEFI preferred; BIOS supported).
+This is not the experimental direct `BOOTX64.EFI` loader. It works if storage is
 AHCI/NVMe and NIC is a supported Intel part; this is the project's
 actual target (commodity Intel/AMD/NVIDIA). Capture COM1 with a
 USB-UART for the same post-mortem flow.

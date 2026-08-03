@@ -405,9 +405,14 @@ class KMutexCancellationContractTests(unittest.TestCase):
         self.assertRegex(track, r"\b\w+->(?:prev|next)\s*=")
 
         untrack = function_body(self.sched_cpp, r"bool\s+SchedUntrackCurrentAbandonableOwnership")
+        require_pattern(
+            untrack,
+            r"Task\s*\*\s*self\s*=\s*CurrentTask\s*\(\s*\)",
+            "untrack does not capture the current Task once under the scheduler lock",
+        )
         owner_check = require_pattern(
             untrack,
-            r"\b\w+->owner\s*!=\s*(?:Current|CurrentTask)\s*\(\s*\)",
+            r"\b\w+->owner\s*!=\s*(?:self|(?:Current|CurrentTask)\s*\(\s*\))",
             "untrack does not reject a non-owner under the scheduler lock",
         )
         lock_span_containing(untrack, owner_check.start())
@@ -470,6 +475,15 @@ class KMutexCancellationContractTests(unittest.TestCase):
             r"\bm->ownership_node\.abandon\s*=\s*&?[A-Za-z_]\w*\s*;",
             "KMutexCreate does not install its abandonment callback",
         )
+
+        acquire = function_body(self.kmutex_cpp, r"KMutexWaitResult\s+KMutexAcquireImpl")
+        invalid_identity = require_pattern(
+            acquire,
+            r"if\s*\(\s*current_tid\s*==\s*~u64\s*\{\s*0\s*\}\s*\)",
+            "KMutex acquisition does not reject pre-scheduler callers",
+        )
+        wait_ref = require_pattern(acquire, r"\bKObjectAcquire\s*\(", "KMutex acquisition lost its wait reference")
+        self.assertLess(invalid_identity.start(), wait_ref.start())
 
     def test_cancellable_mutex_wait_is_promptly_detached_and_relinquishes_racy_handoff(self) -> None:
         require_pattern(
@@ -566,10 +580,15 @@ class KMutexCancellationContractTests(unittest.TestCase):
             "abandonment callback never releases/hands off the inner mutex",
         )
         self.assertLess(publish.start(), handoff.start(), "waiter can run before abandonment becomes visible")
-        compact_before_handoff = re.sub(r"\s+", "", callback[: handoff.start()])
-        self.assertIn("->held=false;", compact_before_handoff)
-        self.assertIn("->owner_tid=0;", compact_before_handoff)
-        self.assertIn("->recursion=0;", compact_before_handoff)
+        before_handoff = callback[: handoff.start()]
+        for field, value in (("held", "false"), ("owner_tid", "0u?"), ("recursion", "0u?")):
+            with self.subTest(field=field):
+                require_pattern(
+                    before_handoff,
+                    rf"(?:\b\w+->{field}\s*=\s*{value}\s*;|"
+                    rf"__atomic_store_n\s*\(\s*&\w+->{field}\s*,\s*{value}\s*,)",
+                    f"abandonment does not clear {field} before handoff",
+                )
         self.assertRegex(callback, r"\bKObjectRelease\s*\(\s*&\w+->base\s*\)")
 
         exchange = require_pattern(
@@ -612,7 +631,8 @@ class KMutexCancellationContractTests(unittest.TestCase):
         release = function_body(self.kmutex_cpp, r"bool\s+KMutexRelease")
         owner_check = require_pattern(
             release,
-            r"\bm->owner_tid\s*!=\s*(?:sched::)?CurrentTaskId\s*\(\s*\)",
+            r"(?:\bm->owner_tid|__atomic_load_n\s*\(\s*&m->owner_tid\s*,[^)]*\))\s*"
+            r"!=\s*(?:sched::)?CurrentTaskId\s*\(\s*\)",
             "release does not reject the wrong immutable Task identity",
         )
         self.assertRegex(release[owner_check.end() : owner_check.end() + 300], r"\breturn\s+false\s*;")
@@ -628,7 +648,8 @@ class KMutexCancellationContractTests(unittest.TestCase):
         )
         outer_clear = require_pattern(
             release,
-            r"\bm->(?:held|owner_tid)\s*=",
+            r"(?:\bm->(?:held|owner_tid)\s*=|"
+            r"__atomic_store_n\s*\(\s*&m->(?:held|owner_tid)\s*,)",
             "outer release never clears KMutex ownership state",
         )
         self.assertGreater(outer_clear.start(), verified.start() + failure.end())
@@ -639,6 +660,51 @@ class KMutexCancellationContractTests(unittest.TestCase):
         )
         self.assertGreater(unlock.start(), verified.start() + failure.end())
         self.assertRegex(release, r"\breturn\s+true\s*;")
+
+    def test_boot_selftest_executes_kernel_protection_and_abandoned_handoff(self) -> None:
+        owner = function_body(self.kmutex_cpp, r"void\s+KMutexAbandonSelfTestOwner")
+        acquire = require_pattern(
+            owner,
+            r"\bKMutexAcquire\s*\(",
+            "abandonment self-test worker never acquires the KMutex",
+        )
+        exit_call = require_pattern(owner, r"\bsched::SchedExit\s*\(", "abandonment self-test worker never exits")
+        self.assertLess(acquire.start(), exit_call.start())
+        reject_pattern(owner, r"\bKMutexRelease\s*\(", "abandonment self-test worker releases instead of dying owned")
+
+        selftest = function_body(self.kmutex_cpp, r"void\s+KMutexSelfTest")
+        create = require_pattern(
+            selftest,
+            r"SchedCreate\s*\(\s*&KMutexAbandonSelfTestOwner",
+            "KMutex self-test never creates a real owner task",
+        )
+        protected = require_pattern(
+            selftest,
+            r"SchedKillByPid\s*\([^)]*\)\s*!=\s*sched::KillResult::Protected",
+            "KMutex self-test does not prove process-null tasks are publicly protected",
+        )
+        release = require_pattern(
+            selftest,
+            r"release_owner\s*,\s*true",
+            "KMutex self-test never permits the live owner to exit",
+        )
+        abandoned = require_pattern(
+            selftest,
+            r"KMutexAcquireTimed\s*\([^;]*\)\s*!=\s*KMutexWaitResult::Abandoned",
+            "KMutex self-test does not require the one-shot abandoned result",
+        )
+        require_pattern(
+            selftest[abandoned.end() :],
+            r"KMutexRelease\s*\(",
+            "abandoned successor never releases its handed-off ownership",
+        )
+        require_pattern(
+            selftest[abandoned.end() :],
+            r"KMutexAcquireTimed\s*\([^;]*\)\s*!=\s*KMutexWaitResult::Acquired",
+            "runtime self-test never proves the abandoned result was consumed exactly once",
+        )
+        positions = [create.start(), protected.start(), release.start(), abandoned.start()]
+        self.assertEqual(positions, sorted(positions), "KMutex abandonment self-test stages are out of order")
 
 
 if __name__ == "__main__":

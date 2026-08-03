@@ -89,7 +89,8 @@ WRITE / STAT` stay generic. It:
 ## File Handles
 
 Every Win32-PE-side `FILE*` from `ucrtbase` wraps a `FILE*` struct
-around a real kernel handle (range `0x100..0x10F`) and routes through
+around a real opaque kernel handle (low tag `0x100..0x10F`, non-zero
+generation in bits 12..30) and routes through
 `SYS_FILE_OPEN / READ / SEEK / CLOSE`. `stdin` / `stdout` / `stderr`
 are preallocated with synthetic handles; `fwrite` / `fputs` route to
 `SYS_WRITE(fd=1)`.

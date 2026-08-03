@@ -11,7 +11,7 @@
 #include "diag/telemetry_math.h"
 #include "util/saturating.h"
 
-namespace tm = ::duetos::diag::telemetry_math;
+namespace telemetry_math = ::duetos::diag::telemetry_math;
 
 namespace duetos::drivers::video
 {
@@ -103,7 +103,7 @@ RenderFps RenderFpsSample(RenderFpsWindow& window, u64 now_ticks, u32 tick_hz)
         return out;
     }
 
-    const u64 tick_delta = tm::CounterDelta(ticks, window.prev_ticks);
+    const u64 tick_delta = telemetry_math::CounterDelta(ticks, window.prev_ticks);
     if (tick_delta < kRenderFpsMinWindowTicks)
     {
         // Deliberately does NOT advance prev_*: the taskbar samples
@@ -118,8 +118,8 @@ RenderFps RenderFpsSample(RenderFpsWindow& window, u64 now_ticks, u32 tick_hz)
         return out;
     }
 
-    const u64 frame_delta = tm::CounterDelta(frames, window.prev_frames);
-    out.fps_x10 = tm::PresentFpsX10(frame_delta, tick_delta, tick_hz);
+    const u64 frame_delta = telemetry_math::CounterDelta(frames, window.prev_frames);
+    out.fps_x10 = telemetry_math::PresentFpsX10(frame_delta, tick_delta, tick_hz);
     out.valid = true;
 
     window.prev_frames = frames;

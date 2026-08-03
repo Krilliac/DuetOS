@@ -34,6 +34,8 @@
 #   pe-winkill  — spawn ring3-winkill (real-world MSVC PE).
 #                 "pe spawn name=ring3-winkill" + "Windows Kill ".
 #   linux       — spawn the seven Linux ABI smokes.
+#   browser     — spawn the WinInet and raw-WinSock browser PEs.
+#   cancellation-smp — race four cancellation/lifetime boundaries.
 #
 # Usage: profile-boot-smoke.sh <profile> <cmake-binary-dir>
 
@@ -41,7 +43,7 @@ set -eo pipefail
 
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 <profile> <cmake-binary-dir>" >&2
-    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux" >&2
+    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux | browser | cancellation-smp" >&2
     exit 2
 fi
 
@@ -49,6 +51,26 @@ PROFILE="$1"
 BIN_DIR="$2"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_SCRIPT="${REPO_ROOT}/tools/qemu/run.sh"
+VERDICT_SCRIPT="${REPO_ROOT}/tools/test/verify-boot-verdict.py"
+
+# The machine verdict compares the guest's exact SMP sentinel with a caller-
+# supplied contract.  Keep the default aligned with run.sh, but make 2-vCPU
+# and 4-vCPU CI legs explicit through DUETOS_EXPECTED_CPUS.  Do not infer the
+# expected value from guest output: that would let an AP fallback authorize
+# itself.
+EXPECTED_CPUS="${DUETOS_EXPECTED_CPUS:-4}"
+if ! [[ "${EXPECTED_CPUS}" =~ ^([1-9]|[12][0-9]|3[0-2])$ ]]; then
+    echo "FAIL: invalid DUETOS_EXPECTED_CPUS='${EXPECTED_CPUS}' (expected 1..32)" >&2
+    exit 1
+fi
+
+if [[ -n "${DUETOS_SMP:-}" ]]; then
+    QEMU_SMP="${DUETOS_SMP}"
+elif [[ "${EXPECTED_CPUS}" == "4" ]]; then
+    QEMU_SMP="4,sockets=1,cores=2,threads=2"
+else
+    QEMU_SMP="${EXPECTED_CPUS},sockets=1,cores=${EXPECTED_CPUS},threads=1"
+fi
 
 if [[ ! -x "${RUN_SCRIPT}" ]]; then
     echo "SKIP: ${RUN_SCRIPT} not found"
@@ -56,6 +78,14 @@ if [[ ! -x "${RUN_SCRIPT}" ]]; then
 fi
 if ! command -v qemu-system-x86_64 > /dev/null 2>&1; then
     echo "SKIP: qemu-system-x86_64 not installed" >&2
+    exit 2
+fi
+if [[ ! -f "${VERDICT_SCRIPT}" ]]; then
+    echo "FAIL: strict boot-verdict verifier missing: ${VERDICT_SCRIPT}" >&2
+    exit 1
+fi
+if ! command -v python3 > /dev/null 2>&1; then
+    echo "SKIP: python3 not installed (required by strict boot-verdict verifier)" >&2
     exit 2
 fi
 
@@ -73,6 +103,7 @@ rm -f "${SERIAL_LOG}"
 # SIGTERMs QEMU. Capture the exit code instead of discarding it.
 QEMU_RC=0
 DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-480}" \
+DUETOS_SMP="${QEMU_SMP}" \
 DUETOS_SMOKE_PROFILE="${PROFILE}" \
     "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || QEMU_RC=$?
 
@@ -93,13 +124,24 @@ if (( QEMU_RC >= 1 && QEMU_RC <= 255 && QEMU_RC % 2 == 1 )); then
         EXIT_PHASE="${PHASE_NAMES[$ord]}"
     fi
     case "${cls}" in
-        16)  [[ "${b}" == "16" ]] && EXIT_CLASS="pass" ;;   # 0x10
+        16)  # 0x10 is the phase-independent pass byte.
+             if [[ "${b}" == "16" ]]; then
+                 EXIT_CLASS="pass"
+                 EXIT_PHASE=""
+             fi
+             ;;
         32)  EXIT_CLASS="hung" ;;                            # 0x20
         64)  EXIT_CLASS="phase-init-fail" ;;                 # 0x40
         112) EXIT_CLASS="panic" ;;                           # 0x70
     esac
 fi
-echo "smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_phase=${EXIT_PHASE:-n/a}"
+EXIT_RECORD="smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_phase=${EXIT_PHASE:-n/a}"
+# Append the host-produced record only after run.sh has fully closed the guest
+# serial capture.  This ordering is part of the strict verifier contract.  A
+# truncated final guest line remains concatenated with this record and fails
+# closed as malformed rather than being silently repaired here.
+printf '%s\n' "${EXIT_RECORD}" >> "${SERIAL_LOG}"
+printf '%s\n' "${EXIT_RECORD}"
 
 # ----------------------------------------------------------------------
 # Per-profile signature lists. The kernel-built ring3 trio prints
@@ -116,6 +158,7 @@ echo "smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_ph
 # self-tests. The forbidden list is also shared.
 common_expected=(
     "boot : metrics bringup-complete"
+    "package staged and runtime open; activation disabled, compatibility manager retained"
     "[smoke] profile=${PROFILE} complete"
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
@@ -317,9 +360,26 @@ case "${PROFILE}" in
             'linux'
         )
         ;;
+    browser)
+        scenario=(
+            'pe spawn name="ring3-browser-pe"'
+            "[ring3-browser-pe] PASS"
+            'pe spawn name="ring3-mini-browser"'
+            "[ring3-mini-browser] PASS"
+        )
+        ;;
+    cancellation-smp)
+        scenario=(
+            "[cancel-smp] case=publication-barrier PASS"
+            "[cancel-smp] case=kmutex-wake PASS"
+            "[cancel-smp] case=iocp-timeout PASS"
+            "[cancel-smp] case=message-port-close PASS"
+            "[cancel-smp] PASS cpus=${EXPECTED_CPUS} cases=4"
+        )
+        ;;
     *)
         echo "error: unknown profile '${PROFILE}'" >&2
-        echo "  valid: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux" >&2
+        echo "  valid: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux browser cancellation-smp" >&2
         exit 2
         ;;
 esac
@@ -345,13 +405,25 @@ selftest_sigs=(
 )
 
 # ----------------------------------------------------------------------
-# Decision. The forbidden backstop is always on. The structured
-# [boot-report] block + the hierarchical exit code are the primary
-# gate when present; the legacy full-signature list is the fallback
-# for a kernel that predates the boot-observability slice.
+# Decision. The bounded machine verifier is mandatory: it requires one exact
+# SMP=N/N sentinel, boot-report pass, profile completion, and the decoded
+# qemu_rc=33/pass record in that order.  Scenario greps remain as the second
+# layer because the boot report intentionally covers boot health, not each
+# profile's workload-specific output.
 # ----------------------------------------------------------------------
 fail=0
 missing=()
+
+VERDICT_OUTPUT=""
+if ! VERDICT_OUTPUT=$(python3 "${VERDICT_SCRIPT}" "${SERIAL_LOG}" \
+    --expected-cpus "${EXPECTED_CPUS}" \
+    --completion-sentinel "[smoke] profile=${PROFILE} complete" \
+    --expected-exit-class pass); then
+    echo "STRICT BOOT VERDICT: ${VERDICT_OUTPUT}"
+    fail=1
+else
+    echo "STRICT BOOT VERDICT: ${VERDICT_OUTPUT}"
+fi
 
 # Forbidden backstop (PANIC / crash / triple fault / health escalate).
 for sig in "${forbidden[@]}"; do
@@ -377,7 +449,7 @@ if [[ -n "${struct_line}" ]]; then
 fi
 
 if grep -aqF '[boot-report] begin' "${SERIAL_LOG}"; then
-    echo "smoke: gate=structured ([boot-report] present)"
+    echo "smoke: gate=strict-machine+scenario ([boot-report] present)"
     if ! grep -aF '[boot-report] result=pass' "${SERIAL_LOG}" > /dev/null; then
         missing+=("[boot-report] result=pass")
         fail=1
@@ -395,7 +467,10 @@ if grep -aqF '[boot-report] begin' "${SERIAL_LOG}"; then
         fi
     done
 else
-    echo "smoke: gate=legacy (no [boot-report]; full signature list)"
+    # Diagnostic coverage only.  The mandatory verifier above has already
+    # failed this run for missing structured evidence; these greps name any
+    # additional legacy signatures that are absent.
+    echo "smoke: gate=strict-machine-failed (no [boot-report]; diagnostic full signature list)"
     for sig in "${expected[@]}"; do
         # Skip selftest-only signatures when this build had selftests off.
         if [[ ${selftests_on} -eq 0 ]]; then

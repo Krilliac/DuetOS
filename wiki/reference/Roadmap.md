@@ -137,12 +137,15 @@ cleanup debt: move the residual up and delete the rest.
   then commit the PTE and ledger atomically under it. Unmap/protect
   detach or rewrite under the spinlock, drop it, then complete the TLB
   shootdown and frame retirement while the mutex prevents a same-VA
-  mutation from overtaking them. Empty user-half table paths are pruned
-  during the structural commit and their frames are released only after
-  shootdown, bounding sparse map/unmap churn. Fork snapshots one row/PTE
-  at a time and performs frame allocation/copying outside the spinlock.
-  Readers, including the breakpoint resolver, still take only the
-  bounded spinlock and never sleep.
+  mutation from overtaking them. User-AS reclamation snapshots the active
+  CPU mask while migration is pinned, walks the sparse ready-CPU set, and
+  waits for confirmed per-target IPI completion; there is no timeout-based
+  reuse of an owned frame. Empty user-half table paths are pruned during the
+  structural commit, and leaf/table frames are released only after every
+  targeted peer acknowledges invalidation. Fork snapshots one row/PTE at a
+  time and performs frame allocation/copying outside the spinlock. Readers,
+  including the breakpoint resolver, still take only the bounded spinlock
+  and never sleep.
 - **Process/cross-AS lifetime slice implemented on the audit branch:**
   Win32 process-handle slots now have an IRQ-safe owner lock. Lookup takes a
   target reference before dropping that lock; close and final drain detach
@@ -173,24 +176,21 @@ cleanup debt: move the residual up and delete the rest.
   unsynchronised) would buy very little while looking like a
   resolution.
 
-### AdaptiveMutex — close the SMP check-to-park lost-wake window
+### AdaptiveMutex — scheduler-owned compatibility surface
 
-- **Finding:** `AdaptiveMutexLock` rechecks `m_owner` after local `Cli()`,
-  then calls the public `WaitQueueBlock`. A remote unlock can clear the
-  owner and observe an empty wait queue between those two steps; the
-  waiter then enqueues after the last wake and can sleep forever.
-- **Known-good pattern:** `sched::MutexLock` holds `g_sched_lock`
-  continuously across owner check, wait-queue enqueue, and the locked
-  scheduler handoff. Local interrupt masking alone cannot provide that
-  cross-CPU transaction.
-- **Current containment:** the address-space transaction work deliberately
-  uses `sched::Mutex`, not `AdaptiveMutex`. Do not place AdaptiveMutex on
-  another correctness-critical contended path until its park handshake is
-  coupled to the scheduler lock.
-- **Required fix/verification:** expose or reuse a scheduler-owned
-  check-and-park helper, then add a deterministic two-CPU test where unlock
-  lands in the former check/enqueue window. Existing fast-path and ordinary
-  contention self-tests do not force this interleaving.
+- **Resolved on the audit branch:** `AdaptiveMutex` retains its public API but
+  delegates acquire, try-acquire, release, FIFO enrollment, and direct handoff
+  to `sched::Mutex`. The raw `Task*` owner and the split owner-check/wait-queue
+  enrollment are gone, so scheduler lifetime accounting covers every holder
+  and a peer unlock cannot overtake waiter publication.
+- **Compatibility contract:** the current implementation deliberately does not
+  spin. A small publication spinlock protects only the race-free diagnostic
+  snapshot used by `AdaptiveMutexIsHeld`; it is not a second ownership source
+  and cannot be used to guard protected data.
+- **Verification:** the deterministic self-test waits until the contender is
+  observably blocked before allowing the owner to release, then requires FIFO
+  handoff and successor release. Source/format and structural checks are
+  complete; delete this section after the final strict multi-vCPU boot gate.
 
 
 ### PS/2 scan-code ring — SMP single-producer/single-consumer invariant
@@ -207,39 +207,31 @@ cleanup debt: move the residual up and delete the rest.
   reader still uses the existing `Cli()` check-then-block handoff.
 
 
-### Cancelling an untimed-blocked thread — needs a WaitQueue detach primitive
+### Cooperative cancellation of blocked user waits — core path landed
 
-- **Finding (sweep C4):** `SchedKillByPid` cannot terminate a thread that
-  is Blocked. It sets `kill_requested` and returns
-  `KillResult::Blocked`, relying on the task's normal producer to wake
-  it so it can take the kill path. For a thread on an UNTIMED wait whose
-  producer never fires, that wake never comes and the thread is
-  effectively unkillable — and `SchedKillByProcess` inherits the problem,
-  which is why its sweep is now pass-bounded rather than
-  loop-until-empty (a naive retry would spin forever on exactly this).
-- **The kernel is already honest about it.** `SchedKillByPid`'s own
-  comment states the constraint: "Blocked tasks sit on a WaitQueue
-  threaded via `next`. We don't have a safe cross-queue detach primitive
-  in v0 — the producer that owns the WaitQueue might be mid-enqueue."
-  That is a real hazard, not laziness: detaching a task from a queue
-  another CPU may be mid-enqueue on corrupts the list.
-- **Fixed already — the half that was lying.** `NtTerminateThread`
-  mapped `KillResult::Blocked` to `STATUS_SUCCESS`, so a Win32 caller was
-  told a thread had been terminated while it was still running. It now
-  returns `STATUS_PENDING`, which is SUCCESS-class (so `NT_SUCCESS()`
-  callers are unchanged) but distinguishable by an exact comparison.
-  `SchedKillByProcess` likewise now WARNs with a live-task count instead
-  of returning a plausible number in silence.
-- **What a real fix needs:** a safe detach — either a per-WaitQueue lock
-  held across both enqueue and detach, or an epoch/tombstone scheme
-  where the killer marks the entry and the owning producer drops it on
-  its next pass. The first is the same scheduler-ABI addition that
-  `WaitQueueBlockLocked(wq, lock)` needs (see the AddressSpace
-  regions_lock and PS/2 ring entries); doing them together is likely
-  cheaper than either alone.
-- **Blocks on:** that primitive. Deliberately not attempted piecemeal —
-  a detach that races an in-flight enqueue trades an unkillable thread
-  for a corrupted wait queue.
+- **Landed:** scheduler result-bearing cancellable WaitQueue, mutex, and
+  condvar APIs opt a suspended call stack into cross-queue detach under
+  `g_sched_lock`. A killer only publishes intent and makes the Task ready;
+  the resumed Task receives `Cancelled` and unwinds its own references and
+  locks before the outer syscall/trap boundary finalizes it. Condvar
+  cancellation re-acquires the companion mutex on every return path.
+- **Integrated:** KEvent, KSemaphore, KMailbox, KWaitable wait-any, and the
+  GUI message wait use the cancellable APIs and preserve cancellation as a
+  distinct result through their user-visible adapters. Hostile structural
+  contracts guard dequeue ownership, unwind ordering, timeout accounting,
+  and the rule that a foreign CPU never destroys a suspended kernel stack.
+- **Process-wide kill is linearized with spawn:** each Process now owns a
+  monotonic Task-publication tombstone, separate from lifecycle. PID and
+  retained-Process kill close it under `g_sched_lock` before their exact
+  task scan; first and additional Task publication check it under that same
+  lock and fully roll back on rejection. Individual-TID kill does not close
+  the Process, and lifecycle remains Published until last-Task reap.
+- **Residual:** ordinary kernel-only/non-result-bearing waits remain
+  intentionally non-cancellable because their callers cannot report and
+  safely unwind interruption. Each additional user-visible blocking API
+  must migrate deliberately or await its natural producer. Runtime SMP
+  kill-versus-wake and kill-versus-spawn stress is still required beyond
+  the structural contracts and exact object compilation gates.
 
 
 ### Real KASAN

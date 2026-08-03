@@ -30,6 +30,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "syscall/syscall.h"
 #include "util/string.h"
 
@@ -38,6 +39,14 @@ namespace duetos::subsystems::win32
 
 namespace
 {
+
+constinit sync::SpinLock g_dir_notify_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+// Caller holds proc->win32_file_lock. The helper acquires the notify lock in
+// that fixed order, marks exact subscriptions terminal, publishes their
+// sequences, and wakes them before returning.
+void CancelDirNotifyForHandleLocked(core::Process* proc, u32 dir_slot);
 
 // Strip a leading "/disk/<idx>/" prefix; on hit, set *out_volume_idx
 // and return a pointer past the prefix. On miss, *out_volume_idx is
@@ -70,15 +79,42 @@ const char* StripDiskPrefix(const char* path, u32& out_volume_idx, bool& is_disk
 
 i32 AllocDirSlot(core::Process* proc)
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_file_lock);
     for (u64 i = 0; i < core::Process::kWin32DirCap; ++i)
+    {
         if (!proc->win32_dirs[i].in_use)
+        {
+            auto& row = proc->win32_dirs[i];
+            row.in_use = true; // private reservation; no handle is published yet
+            row.entry_count = 0;
+            row.next_index = 0;
+            row.entries = nullptr;
+            row.path[0] = '\0';
+            sync::SpinLockRelease(proc->win32_file_lock, flags);
             return static_cast<i32>(i);
+        }
+    }
+    sync::SpinLockRelease(proc->win32_file_lock, flags);
     // Per-process Win32 directory-handle table saturated. The thunk
     // returns INVALID_HANDLE_VALUE; klog gets the first hit so the
     // operator sees the saturation before subsequent FindFirstFile
     // calls all start failing.
     KLOG_ONCE_WARN("subsystems/win32/dir", "per-process directory handle table full");
     return -1;
+}
+
+void AbortDirSlot(core::Process* proc, u32 slot)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_file_lock);
+    auto& row = proc->win32_dirs[slot];
+    if (row.in_use && row.entries == nullptr)
+    {
+        row.in_use = false;
+        row.entry_count = 0;
+        row.next_index = 0;
+        row.path[0] = '\0';
+    }
+    sync::SpinLockRelease(proc->win32_file_lock, flags);
 }
 
 // Snapshot a FAT32 directory's entries into a fresh KMalloc'd array.
@@ -220,21 +256,30 @@ i64 SysDirOpenKernel(const char* path)
     {
         const auto* v = fs::fat32::Fat32Volume(volume_idx);
         if (v == nullptr)
+        {
+            AbortDirSlot(proc, static_cast<u32>(slot));
             return -1;
+        }
         if (rest == nullptr || *rest == '\0')
             rest = "/";
         if (SnapshotFat32(v, rest, entries, count) < 0)
+        {
+            AbortDirSlot(proc, static_cast<u32>(slot));
             return -1;
+        }
     }
     else
     {
         const fs::RamfsNode* node = RamfsResolvePath(proc->root, path);
         if (SnapshotRamfs(node, entries, count) < 0)
+        {
+            AbortDirSlot(proc, static_cast<u32>(slot));
             return -1;
+        }
     }
 
+    const sync::IrqFlags publish_flags = sync::SpinLockAcquire(proc->win32_file_lock);
     auto& dh = proc->win32_dirs[slot];
-    dh.in_use = true;
     dh.entry_count = count;
     dh.next_index = 0;
     dh.entries = entries;
@@ -246,6 +291,7 @@ i64 SysDirOpenKernel(const char* path)
     for (; pi < sizeof(dh.path) - 1 && rel[pi] != '\0'; ++pi)
         dh.path[pi] = rel[pi];
     dh.path[pi] = '\0';
+    sync::SpinLockRelease(proc->win32_file_lock, publish_flags);
 
     arch::SerialWrite("[win32/dir] open path=\"");
     arch::SerialWrite(path);
@@ -266,14 +312,23 @@ i64 SysDirNext(u64 handle, u64 user_report)
     if (handle < core::Process::kWin32DirBase || handle >= core::Process::kWin32DirBase + core::Process::kWin32DirCap)
         return -1;
     const u32 slot = static_cast<u32>(handle - core::Process::kWin32DirBase);
+    const sync::IrqFlags snapshot_flags = sync::SpinLockAcquire(proc->win32_file_lock);
     auto& dh = proc->win32_dirs[slot];
     if (!dh.in_use || dh.entries == nullptr)
+    {
+        sync::SpinLockRelease(proc->win32_file_lock, snapshot_flags);
         return -1;
+    }
     if (dh.next_index >= dh.entry_count)
+    {
+        sync::SpinLockRelease(proc->win32_file_lock, snapshot_flags);
         return 0; // end of iteration
+    }
 
     auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
-    const auto& e = entries[dh.next_index];
+    const u32 expected_index = dh.next_index;
+    void* const expected_entries = dh.entries;
+    const auto& e = entries[expected_index];
     core::Win32DirEntryReport report;
     for (u32 i = 0; i < sizeof(report.name); ++i)
         report.name[i] = 0;
@@ -289,9 +344,19 @@ i64 SysDirNext(u64 handle, u64 user_report)
     report.size_bytes = static_cast<u64>(e.size_bytes);
     for (u32 i = 0; i < sizeof(report._reserved); ++i)
         report._reserved[i] = 0;
+    sync::SpinLockRelease(proc->win32_file_lock, snapshot_flags);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_report), &report, sizeof(report)))
         return -1;
-    ++dh.next_index;
+
+    const sync::IrqFlags commit_flags = sync::SpinLockAcquire(proc->win32_file_lock);
+    auto& commit_row = proc->win32_dirs[slot];
+    if (!commit_row.in_use || commit_row.entries != expected_entries || commit_row.next_index != expected_index)
+    {
+        sync::SpinLockRelease(proc->win32_file_lock, commit_flags);
+        return -1;
+    }
+    ++commit_row.next_index;
+    sync::SpinLockRelease(proc->win32_file_lock, commit_flags);
     return 1;
 }
 
@@ -303,10 +368,15 @@ i64 SysDirRewind(u64 handle)
     if (handle < core::Process::kWin32DirBase || handle >= core::Process::kWin32DirBase + core::Process::kWin32DirCap)
         return -1;
     const u32 slot = static_cast<u32>(handle - core::Process::kWin32DirBase);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_file_lock);
     auto& dh = proc->win32_dirs[slot];
     if (!dh.in_use)
+    {
+        sync::SpinLockRelease(proc->win32_file_lock, flags);
         return -1;
+    }
     dh.next_index = 0;
+    sync::SpinLockRelease(proc->win32_file_lock, flags);
     return 0;
 }
 
@@ -317,17 +387,23 @@ void SysDirClose(core::Process* proc, u64 handle)
     if (handle < core::Process::kWin32DirBase || handle >= core::Process::kWin32DirBase + core::Process::kWin32DirCap)
         return;
     const u32 slot = static_cast<u32>(handle - core::Process::kWin32DirBase);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_file_lock);
     auto& dh = proc->win32_dirs[slot];
     if (!dh.in_use)
-        return;
-    if (dh.entries != nullptr)
     {
-        mm::KFree(dh.entries);
-        dh.entries = nullptr;
+        sync::SpinLockRelease(proc->win32_file_lock, flags);
+        return;
     }
+    void* const detached_entries = dh.entries;
+    dh.entries = nullptr;
     dh.in_use = false;
     dh.entry_count = 0;
     dh.next_index = 0;
+    dh.path[0] = '\0';
+    CancelDirNotifyForHandleLocked(proc, slot);
+    sync::SpinLockRelease(proc->win32_file_lock, flags);
+    if (detached_entries != nullptr)
+        mm::KFree(detached_entries);
 }
 
 // =====================================================
@@ -350,16 +426,40 @@ struct DirNotifySub
 {
     bool in_use;
     bool subtree;
-    u8 _pad[2];
+    bool closed;
+    u8 _pad;
     u32 filter;      // FILE_NOTIFY_CHANGE_* bits
     u32 last_action; // FILE_ACTION_*
-    u32 _pad2;
+    u32 dir_slot;
+    u64 generation;
+    u64 event_sequence;
+    core::Process* owner;
     char path[64];
     char last_name[64]; // leaf of the published event
     sched::WaitQueue wq;
 };
 
 DirNotifySub g_dir_notify_pool[kDirNotifyPoolCap];
+
+constexpr u64 kSaturatedNotifySequence = ~u64(0);
+
+u64 DirNotifySequenceSnapshot(const DirNotifySub& sub)
+{
+    return __atomic_load_n(&sub.event_sequence, __ATOMIC_ACQUIRE);
+}
+
+void AdvanceDirNotifySequenceLocked(DirNotifySub& sub)
+{
+    u64 observed = __atomic_load_n(&sub.event_sequence, __ATOMIC_RELAXED);
+    while (observed != kSaturatedNotifySequence)
+    {
+        if (__atomic_compare_exchange_n(&sub.event_sequence, &observed, observed + 1, false, __ATOMIC_RELEASE,
+                                        __ATOMIC_RELAXED))
+        {
+            return;
+        }
+    }
+}
 
 bool DirPathEqual(const char* a, const char* b)
 {
@@ -462,15 +562,35 @@ bool PathParentMatches(const char* watch_path, const char* event_path)
 
 } // namespace
 
+namespace
+{
+
+void CancelDirNotifyForHandleLocked(core::Process* proc, u32 dir_slot)
+{
+    const sync::IrqFlags notify_flags = sync::SpinLockAcquire(g_dir_notify_lock);
+    for (u32 i = 0; i < kDirNotifyPoolCap; ++i)
+    {
+        DirNotifySub& sub = g_dir_notify_pool[i];
+        if (!sub.in_use || sub.owner != proc || sub.dir_slot != dir_slot)
+            continue;
+        sub.closed = true;
+        AdvanceDirNotifySequenceLocked(sub);
+        sched::WaitQueueWakeAll(&sub.wq);
+    }
+    sync::SpinLockRelease(g_dir_notify_lock, notify_flags);
+}
+
+} // namespace
+
 void Win32DirNotifyPublish(const char* path, u32 in_mask)
 {
     if (path == nullptr || path[0] == '\0' || in_mask == 0)
         return;
-    arch::Cli();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_dir_notify_lock);
     for (u32 i = 0; i < kDirNotifyPoolCap; ++i)
     {
         DirNotifySub& s = g_dir_notify_pool[i];
-        if (!s.in_use)
+        if (!s.in_use || s.closed)
             continue;
         if (!MaskMatchesFilter(in_mask, s.filter))
             continue;
@@ -486,9 +606,10 @@ void Win32DirNotifyPublish(const char* path, u32 in_mask)
             s.last_name[li] = leaf[li];
         s.last_name[li] = '\0';
         s.last_action = InMaskToFileAction(in_mask);
+        AdvanceDirNotifySequenceLocked(s);
         sched::WaitQueueWakeOne(&s.wq);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_dir_notify_lock, flags);
 }
 
 i64 SysDirNotify(u64 handle, u64 filter, u64 watch_subtree, u64 user_buf, u64 buf_len)
@@ -499,58 +620,105 @@ i64 SysDirNotify(u64 handle, u64 filter, u64 watch_subtree, u64 user_buf, u64 bu
     if (handle < core::Process::kWin32DirBase || handle >= core::Process::kWin32DirBase + core::Process::kWin32DirCap)
         return -1;
     const u32 slot = static_cast<u32>(handle - core::Process::kWin32DirBase);
-    auto& dh = proc->win32_dirs[slot];
-    if (!dh.in_use)
-        return -1;
     if (buf_len < 24) // FILE_NOTIFY_INFORMATION header (12) + 1 wide-char (2) + min padding
         return -1;
 
-    // Allocate a subscription slot.
-    arch::Cli();
+    // File-row -> notify-pool is the sole lock order. Close marks the row
+    // unavailable and terminates matching subscriptions under that same order,
+    // so close/reopen cannot strand a waiter on an ABA-reused directory slot.
+    const sync::IrqFlags file_flags = sync::SpinLockAcquire(proc->win32_file_lock);
+    auto& dh = proc->win32_dirs[slot];
+    if (!dh.in_use || dh.entries == nullptr)
+    {
+        sync::SpinLockRelease(proc->win32_file_lock, file_flags);
+        return -1;
+    }
+
+    const sync::IrqFlags notify_flags = sync::SpinLockAcquire(g_dir_notify_lock);
     i32 sub_idx = -1;
+    u64 sub_generation = 0;
     for (u32 i = 0; i < kDirNotifyPoolCap; ++i)
     {
-        if (!g_dir_notify_pool[i].in_use)
+        if (!g_dir_notify_pool[i].in_use && g_dir_notify_pool[i].generation != kSaturatedNotifySequence)
         {
             sub_idx = static_cast<i32>(i);
             DirNotifySub& s = g_dir_notify_pool[i];
+            ++s.generation;
+            sub_generation = s.generation;
             s.in_use = true;
             s.subtree = (watch_subtree != 0);
-            for (u32 j = 0; j < sizeof(s._pad); ++j)
-                s._pad[j] = 0;
+            s.closed = false;
+            s._pad = 0;
             s.filter = static_cast<u32>(filter);
             s.last_action = 0;
-            s._pad2 = 0;
+            s.dir_slot = slot;
+            s.owner = proc;
             for (u32 j = 0; j < sizeof(s.path); ++j)
                 s.path[j] = 0;
             for (u32 j = 0; j < sizeof(s.last_name); ++j)
                 s.last_name[j] = 0;
             for (u32 j = 0; j < sizeof(dh.path) && j < sizeof(s.path) - 1 && dh.path[j] != '\0'; ++j)
                 s.path[j] = dh.path[j];
-            s.wq.head = nullptr;
-            s.wq.tail = nullptr;
             break;
         }
     }
+    sync::SpinLockRelease(g_dir_notify_lock, notify_flags);
+    sync::SpinLockRelease(proc->win32_file_lock, file_flags);
     if (sub_idx < 0)
+        return -1;
+
+    // Block until any publisher records an event into this slot.
+    u32 action = 0;
+    char name[64] = {};
+    while (true)
     {
-        arch::Sti();
+        const sync::IrqFlags inspect_flags = sync::SpinLockAcquire(g_dir_notify_lock);
+        DirNotifySub& s = g_dir_notify_pool[sub_idx];
+        if (!s.in_use || s.generation != sub_generation)
+        {
+            sync::SpinLockRelease(g_dir_notify_lock, inspect_flags);
+            return -1;
+        }
+        if (s.closed)
+        {
+            s.in_use = false;
+            s.owner = nullptr;
+            sync::SpinLockRelease(g_dir_notify_lock, inspect_flags);
+            return -1;
+        }
+        if (s.last_action != 0)
+        {
+            action = s.last_action;
+            for (u32 j = 0; j < sizeof(name); ++j)
+                name[j] = s.last_name[j];
+            s.in_use = false;
+            s.owner = nullptr;
+            sync::SpinLockRelease(g_dir_notify_lock, inspect_flags);
+            break;
+        }
+
+        const u64 observed_sequence = DirNotifySequenceSnapshot(s);
+        sched::WaitQueue* const waiters = &s.wq;
+        sync::SpinLockRelease(g_dir_notify_lock, inspect_flags);
+
+        const sched::WaitQueueBlockResult wait_result =
+            observed_sequence == kSaturatedNotifySequence
+                ? sched::WaitQueueBlockTimeoutCancellable(waiters, 1)
+                : sched::WaitQueueBlockIfSequenceUnchangedCancellable(
+                      waiters, &g_dir_notify_pool[sub_idx].event_sequence, observed_sequence);
+        if (wait_result != sched::WaitQueueBlockResult::Cancelled)
+            continue;
+
+        const sync::IrqFlags cancel_flags = sync::SpinLockAcquire(g_dir_notify_lock);
+        DirNotifySub& cancelled = g_dir_notify_pool[sub_idx];
+        if (cancelled.in_use && cancelled.generation == sub_generation)
+        {
+            cancelled.in_use = false;
+            cancelled.owner = nullptr;
+        }
+        sync::SpinLockRelease(g_dir_notify_lock, cancel_flags);
         return -1;
     }
-    // Block until any publisher records an event into this slot.
-    DirNotifySub& s = g_dir_notify_pool[sub_idx];
-    while (s.last_action == 0)
-    {
-        sched::WaitQueueBlock(&s.wq);
-        arch::Cli();
-    }
-    // Capture the event + free the slot.
-    u32 action = s.last_action;
-    char name[64];
-    for (u32 j = 0; j < sizeof(name); ++j)
-        name[j] = s.last_name[j];
-    s.in_use = false;
-    arch::Sti();
 
     // Build a single FILE_NOTIFY_INFORMATION record:
     //   u32 NextEntryOffset  = 0

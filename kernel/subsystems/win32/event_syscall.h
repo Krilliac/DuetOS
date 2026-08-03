@@ -9,7 +9,8 @@
  *   SYS_EVENT_CREATE (30) — rdi=manual_reset, rsi=initial_state.
  *   SYS_EVENT_SET    (31) — signal + wake (all / one).
  *   SYS_EVENT_RESET  (32) — clear signal.
- *   SYS_EVENT_WAIT   (33) — rdi=handle, rsi=timeout_ms.
+ *   SYS_EVENT_WAIT   (33) — rdi=handle, rsi=timeout_ms; cancellation
+ *                           returns -1 only for dispatcher-local unwind.
  */
 
 namespace duetos::arch

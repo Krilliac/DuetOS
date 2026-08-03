@@ -17,7 +17,8 @@
  *         DUETOS_DEFER(KObjectRelease(&kf->base)); // fires on any
  *                                                  // failure exit
  *                                                  // from here
- *         RESULT_TRY_ASSIGN(Handle h, HandleTableInsert(table, &kf->base));
+ *         RESULT_TRY_ASSIGN(Handle h, HandleTableInsert(table, &kf->base,
+ *                                                        kHandleRightRead));
  *         DUETOS_DEFER(HandleTableRemove(table, h));
  *
  *         // ... more fallible work ...

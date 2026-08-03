@@ -38,11 +38,11 @@
  * pool's read_refs / write_refs track end lifetime. When the
  * server-side handle closes, the kernel calls
  * NamedPipeOnServerClose(slot, generation) which:
- *   - releases the registry's reservation for the opposite end
- *     if no client ever connected (avoids leaking the pool slot)
+ *   - releases the registry-owned opposite-end reservation exactly once
  *   - clears the registry entry so future clients can't find it
- * Client handles do not touch the registry; they're just
- * ordinary pipe-pool ends managed by CloseForProcess.
+ * Every client takes a fresh opposite-end retain. Client handles do not own
+ * the registry reservation; they are ordinary pipe-pool ends managed by
+ * CloseForProcess.
  */
 
 namespace duetos::ipc
@@ -66,26 +66,20 @@ constexpr u32 kNamedPipeMaxNameLen = 64;
 i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_writer, u32* out_generation);
 
 /// Client side of CreateFile against `\\.\pipe\NAME`. Looks up an
-/// existing registration. If found, marks the client as connected
-/// (so the server-close path stops worrying about the unused
-/// reservation) and writes (pool_idx, server_is_writer) to the
-/// out pointers.
+/// existing registration and atomically takes a fresh retain on the opposite
+/// end while the exact registry entry is still locked. On success, writes
+/// (pool_idx, server_is_writer) to the out pointers and transfers that retain
+/// to the caller. The registry keeps ownership of the original PipeAlloc
+/// reference until exact server close.
 ///
 /// Returns true on hit, false on miss / not-yet-registered.
 bool NamedPipeConnectClient(const char* name, u32* out_pool_idx, bool* out_server_is_writer);
 
-/// Rollback for NamedPipeConnectClient: clears the client_connected
-/// flag for `name` so a caller that connected but then failed to
-/// finish opening (e.g. handle-table full) doesn't leave the
-/// registration looking connected — which would make
-/// NamedPipeOnServerClose skip the orphaned-reservation release and
-/// leak the pipe-pool slot. No-op on miss. Returns true on hit.
-bool NamedPipeUnconnectClient(const char* name);
-
 /// Server-side close hook. Called from the file-close path when a
 /// Win32FileHandle with `named_pipe_registry_slot >= 0` is closed.
-/// Drops the unused opposite-end reservation if no client connected,
-/// and clears the registry entry so future clients can't find it.
+/// Clears the registry entry so future clients cannot find it, then drops the
+/// registry-owned opposite-end reservation exactly once. A connected client's
+/// independently retained reference remains live.
 ///
 /// `generation` is the value NamedPipeRegisterServer handed back for
 /// THIS registration; the call is a no-op unless the slot still

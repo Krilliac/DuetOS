@@ -111,6 +111,7 @@ pub const NODE_KIND_SYMLINK: u32 = 3;
 
 pub const ROOT_NODE_ID: u32 = 0;
 pub const INVALID_NODE_ID: u32 = 0xFFFFFFFFu32;
+pub const DIR_MAX_CHILDREN: u32 = (BLOCK_SIZE / core::mem::size_of::<u32>()) as u32;
 
 /// Maximum symlink target length. Stored inline in the symlink
 /// node's first extent's first block; bounded so a target fits

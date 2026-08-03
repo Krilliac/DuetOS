@@ -13,13 +13,12 @@ use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_dev::BlockDevice;
 use crate::crc32::crc32;
 use crate::format::{
-    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS, NODE_COUNT, NODE_KIND_DIR,
-    NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, SNAPSHOT_BLOCKS, SNAPSHOT_LBA,
-    SUPERBLOCK_LBA,
+    BITMAP_LBA, BLOCK_SIZE, CRC_TABLE_LBA, DIR_MAX_CHILDREN, JOURNAL_BLOCKS, JOURNAL_LBA, MAX_INLINE_EXTENTS,
+    NODE_COUNT, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_SYMLINK, NODE_TABLE_BLOCKS, NODE_TABLE_LBA, SNAPSHOT_BLOCKS,
+    SNAPSHOT_LBA, SUPERBLOCK_LBA,
 };
 use crate::fs::{compute_sb_crc, Fs, FsError, FsResult};
 use crate::mkfs;
-use crate::ops_dir::DIR_MAX_CHILDREN;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -70,7 +69,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
         while top > 0 {
             top -= 1;
             let id = stack[top];
-            let node = self.read_node(id)?;
+            let node = self.read_node_raw(id)?;
             if node.kind != NODE_KIND_DIR || node.child_count == 0 {
                 continue;
             }
@@ -96,7 +95,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
                     report.bad_extents += 1;
                     continue;
                 }
-                let child = self.read_node(cid)?;
+                let child = self.read_node_raw(cid)?;
                 if child.kind != NODE_KIND_FILE && child.kind != NODE_KIND_DIR && child.kind != NODE_KIND_SYMLINK {
                     continue;
                 }
@@ -115,7 +114,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
         let mut ref_count = [0u32; NODE_COUNT as usize];
 
         for id in 0..self.sb.node_count {
-            let node = self.read_node(id)?;
+            let node = self.read_node_raw(id)?;
             if node.kind == 0 {
                 continue;
             }
@@ -186,7 +185,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
         // link_count=1 (self-loop), not derived from any parent's
         // child list, so skip it.
         for id in 0..self.sb.node_count {
-            let node = self.read_node(id)?;
+            let node = self.read_node_raw(id)?;
             if node.kind == 0 || id == self.sb.root_node {
                 continue;
             }
@@ -210,7 +209,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
                     break;
                 }
                 seen[cur as usize] = true;
-                let parent = self.read_node(cur)?;
+                let parent = self.read_node_raw(cur)?;
                 if parent.kind != NODE_KIND_DIR {
                     break;
                 }

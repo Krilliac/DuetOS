@@ -83,7 +83,7 @@ struct InitcallRecord
 
 /// Registry capacity. Sized for the planned subsystems plus
 /// headroom; bump if a real registration is rejected.
-inline constexpr u32 kMaxInitcalls = 64;
+inline constexpr u32 kMaxInitcalls = 96;
 
 /// Register `fn` against `phase`. Returns Ok on success, Err when:
 ///   - `name` or `fn` is null

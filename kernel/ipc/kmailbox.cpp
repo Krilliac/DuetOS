@@ -81,19 +81,28 @@ void KMailboxDestroy(KObject* obj)
     return mb;
 }
 
-void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
+KMailboxWaitResult KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
 {
     // Pin during the (possibly blocking) wait so closing every
     // handle while this producer is parked on not_full cannot run
     // KMailboxDestroy and KFree mb->slots/mb out from under us. Same
     // pattern as KEventWait/KSemaphoreAcquire/KMutexAcquire. The
     // Release after the unlock may itself be the final drop that
-    // fires KMailboxDestroy — that is the correct outcome.
-    KObjectAcquire(&mb->base);
+    // fires KMailboxDestroy — that is the correct outcome. The caller
+    // must supply a live reference at entry.
+    if (mb == nullptr || !KObjectAcquire(&mb->base))
+    {
+        return KMailboxWaitResult::Failed;
+    }
     sched::MutexLock(&mb->inner);
     while (mb->count == mb->capacity)
     {
-        sched::CondvarWait(&mb->not_full, &mb->inner);
+        if (sched::CondvarWaitCancellable(&mb->not_full, &mb->inner) == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&mb->inner);
+            KObjectRelease(&mb->base);
+            return KMailboxWaitResult::Cancelled;
+        }
     }
     // Circular-buffer integrity invariants. `head` must already be
     // a valid index before we dereference `slots[head]`; if a wild
@@ -111,6 +120,7 @@ void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
     sched::CondvarSignal(&mb->not_empty);
     sched::MutexUnlock(&mb->inner);
     KObjectRelease(&mb->base);
+    return KMailboxWaitResult::Completed;
 }
 
 bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg)
@@ -130,14 +140,22 @@ bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg)
     return true;
 }
 
-void KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
+KMailboxWaitResult KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
 {
     // Pin during the (possibly blocking) wait — see KMailboxPost.
-    KObjectAcquire(&mb->base);
+    if (mb == nullptr || out == nullptr || !KObjectAcquire(&mb->base))
+    {
+        return KMailboxWaitResult::Failed;
+    }
     sched::MutexLock(&mb->inner);
     while (mb->count == 0)
     {
-        sched::CondvarWait(&mb->not_empty, &mb->inner);
+        if (sched::CondvarWaitCancellable(&mb->not_empty, &mb->inner) == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&mb->inner);
+            KObjectRelease(&mb->base);
+            return KMailboxWaitResult::Cancelled;
+        }
     }
     KASSERT_WITH_VALUE(mb->tail < mb->capacity, "ipc/kmailbox", "receive: tail oob", static_cast<u64>(mb->tail));
     KASSERT(mb->count > 0, "ipc/kmailbox", "receive: count underflow guard");
@@ -148,6 +166,7 @@ void KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
     sched::CondvarSignal(&mb->not_full);
     sched::MutexUnlock(&mb->inner);
     KObjectRelease(&mb->base);
+    return KMailboxWaitResult::Completed;
 }
 
 bool KMailboxTryReceive(KMailbox* mb, KMailboxMessage* out)
@@ -209,13 +228,19 @@ void KMailboxSelfTest()
 
     // Post one, receive one. Round-trip the message contents.
     const KMailboxMessage sentinel = {0xAA, 0xBB, 0xCC, 0xDD};
-    KMailboxPost(mb, sentinel);
+    if (KMailboxPost(mb, sentinel) != KMailboxWaitResult::Completed)
+    {
+        core::Panic("ipc/kmailbox", "self-test: sentinel post failed");
+    }
     if (KMailboxCount(mb) != 1)
     {
         core::Panic("ipc/kmailbox", "self-test: count != 1 after post");
     }
     KMailboxMessage got{};
-    KMailboxReceive(mb, &got);
+    if (KMailboxReceive(mb, &got) != KMailboxWaitResult::Completed)
+    {
+        core::Panic("ipc/kmailbox", "self-test: sentinel receive failed");
+    }
     if (got.type != 0xAA || got.payload0 != 0xBB || got.payload1 != 0xCC || got.payload2 != 0xDD)
     {
         core::Panic("ipc/kmailbox", "self-test: round-trip corrupted message");
@@ -228,7 +253,10 @@ void KMailboxSelfTest()
     // Fill to capacity (4 posts), try-post returns false.
     for (u64 i = 0; i < kCap; ++i)
     {
-        KMailboxPost(mb, KMailboxMessage{i, i + 1, i + 2, i + 3});
+        if (KMailboxPost(mb, KMailboxMessage{i, i + 1, i + 2, i + 3}) != KMailboxWaitResult::Completed)
+        {
+            core::Panic("ipc/kmailbox", "self-test: fill post failed");
+        }
     }
     if (KMailboxCount(mb) != kCap)
     {
@@ -243,7 +271,10 @@ void KMailboxSelfTest()
     for (u64 i = 0; i < kCap; ++i)
     {
         KMailboxMessage m{};
-        KMailboxReceive(mb, &m);
+        if (KMailboxReceive(mb, &m) != KMailboxWaitResult::Completed)
+        {
+            core::Panic("ipc/kmailbox", "self-test: drain receive failed");
+        }
         if (m.type != i || m.payload0 != i + 1 || m.payload1 != i + 2 || m.payload2 != i + 3)
         {
             core::Panic("ipc/kmailbox", "self-test: FIFO order violated on drain");
@@ -256,17 +287,19 @@ void KMailboxSelfTest()
 
     // HandleTable round-trip.
     static HandleTable table{};
-    auto insert_r = HandleTableInsert(table, &mb->base);
+    auto insert_r = HandleTableInsert(table, &mb->base, TypeAllowedRights(KObjectType::Mailbox));
     if (!insert_r.has_value())
     {
         core::Panic("ipc/kmailbox", "self-test: HandleTableInsert failed");
     }
     const Handle h = insert_r.value();
-    if (HandleTableLookup(table, h, KObjectType::Mailbox) != &mb->base)
+    KObject* looked_up = HandleTableLookupRef(table, h, KObjectType::Mailbox);
+    if (looked_up != &mb->base)
     {
         core::Panic("ipc/kmailbox", "self-test: lookup did not return mailbox");
     }
-    if (HandleTableLookup(table, h, KObjectType::Mutex) != nullptr)
+    KObjectRelease(looked_up);
+    if (HandleTableLookupRef(table, h, KObjectType::Mutex) != nullptr)
     {
         core::Panic("ipc/kmailbox", "self-test: lookup with wrong type-tag returned non-null");
     }
@@ -319,7 +352,10 @@ void StressProducerTask(void* arg)
         KMailboxMessage msg{};
         msg.type = producer_id;
         msg.payload0 = i; // sequence number within this producer's stream
-        KMailboxPost(s->mb, msg);
+        if (KMailboxPost(s->mb, msg) != KMailboxWaitResult::Completed)
+        {
+            return;
+        }
     }
     __atomic_add_fetch(&s->producers_done, 1, __ATOMIC_SEQ_CST);
 }

@@ -174,13 +174,11 @@
     {"kernel32.dll", "GetProcAddress", kOffGetProcAddressReal},
 
     // Win32 mutex (real waitqueue-backed semantics).
-    // CreateMutexW allocates a per-process slot returning a 0x200+
-    // pseudo-handle. WaitForSingleObject dispatches by handle range
-    // — mutex handles route to SYS_MUTEX_WAIT, anything else
-    // pseudo-signals as before. ReleaseMutex routes to
-    // SYS_MUTEX_RELEASE. All three are recursive (Win32 contract).
-    // CloseHandle handles mutex slots too via range
-    // dispatch in SYS_FILE_CLOSE.
+    // CreateMutexW returns a positive generation-tagged opaque identity;
+    // its low 12-bit tag is in 0x201..0x23F. WaitForSingleObject v4 keeps
+    // the full value for SYS_MUTEX_WAIT while classifying only that low tag.
+    // ReleaseMutex routes to SYS_MUTEX_RELEASE. All three are recursive
+    // (Win32 contract), and CloseHandle uses the same exact identity.
     {"kernel32.dll", "CreateMutexW", kOffCreateMutexW}, {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW},     // ignores extra Ex args
     {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj4}, // upgrade
@@ -189,7 +187,7 @@
     // Real event handles. Replaces the kOffReturnOne
     // no-op CreateEventW / SetEvent / ResetEvent from the
     // earlier kernel32 binding.
-    // Per-process event table at 0x300..0x307.
+    // Generation-tagged event identities use low tags 0x301..0x33F.
     {"kernel32.dll", "CreateEventW", kOffCreateEventReal}, {"kernel32.dll", "CreateEventA", kOffCreateEventReal},
     {"kernel32.dll", "CreateEventExW", kOffCreateEventReal}, // ignores extra Ex args
     {"kernel32.dll", "CreateEventExA", kOffCreateEventReal}, {"kernel32.dll", "SetEvent", kOffSetEventReal},

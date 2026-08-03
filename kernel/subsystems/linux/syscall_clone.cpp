@@ -17,9 +17,9 @@
  * remaining flags as anything other than the no-op default that
  * a single-AS / single-fd-table model already implements.
  *
- * Full fork() — separate AS with COW page sharing — and execve()
- * — in-place AS replacement — both stay -ENOSYS in v0 (pending
- * §11.10 follow-ups). Documented as inventory sub-GAPs.
+ * fork() uses a separate address space with an eager page copy (COW remains
+ * a bounded follow-up). execve() performs an in-place transactional image
+ * replacement through the shared loader path.
  *
  * Threading model: the new Task shares the calling Process —
  * same caps, same PID (in the Linux task-group sense), same AS,
@@ -145,16 +145,19 @@ i64 DoFork()
         core::RecordSandboxDenial(core::kCapSpawnThread);
         return kEPERM;
     }
-    // RLIMIT_NPROC: refuse if the parent's live-child count
-    // would exceed the soft cap. Sentinel 0xFF... means "no cap
-    // below kernel ceiling" — skip the check and let the
-    // ProcessCreate-side limit (MAX_SCHED_TASKS) apply.
-    if (parent->linux_rlimit_nproc_cur != 0xFFFFFFFFFFFFFFFFull)
-    {
-        const u64 children = sched::SchedCountChildrenOfPid(parent->pid);
-        if (children >= parent->linux_rlimit_nproc_cur)
-            return kEAGAIN;
-    }
+    const u64 child_tick_budget = core::ProcessTickBudgetSnapshot(parent);
+    if (child_tick_budget == 0)
+        return kEPERM;
+    // RLIMIT_NPROC and the fixed relation table are one atomic admission
+    // decision at registration time. A sentinel soft limit means only the
+    // kernel's bounded relation capacity applies. This early zero check avoids
+    // cloning an address space when admission can never succeed; concurrent
+    // forks are serialized by the parent relation lock below.
+    const u64 configured_child_limit = __atomic_load_n(&parent->linux_rlimit_nproc_cur, __ATOMIC_ACQUIRE);
+    const u64 child_limit =
+        configured_child_limit == 0xFFFFFFFFFFFFFFFFull ? Process::kLinuxChildRelationCap : configured_child_limit;
+    if (child_limit == 0)
+        return kEAGAIN;
     sched::Task* current = sched::CurrentTask();
     arch::TrapFrame* parent_tf = sched::SchedFindUserTrapFrame(current);
     if (parent_tf == nullptr)
@@ -172,7 +175,7 @@ i64 DoFork()
     // stack_va, tick_budget. fd table + win32 handle tables
     // start fresh — fd inheritance + CLOEXEC handling deferred.
     Process* child = core::ProcessCreate(parent->name, child_as, child_caps, parent->root, parent->user_code_va,
-                                         parent->user_stack_va, parent->tick_budget, child_ceiling);
+                                         parent->user_stack_va, child_tick_budget, child_ceiling);
     if (child == nullptr)
     {
         mm::AddressSpaceRelease(child_as);
@@ -182,7 +185,10 @@ i64 DoFork()
     child->user_gs_base = parent->user_gs_base;
     child->linux_brk_base = parent->linux_brk_base;
     child->linux_brk_current = parent->linux_brk_current;
-    child->linux_mmap_cursor = parent->linux_mmap_cursor;
+    // The parent may have sibling tasks claiming automatic VM/Section ranges.
+    // Snapshot atomically; the child is still unpublished and may be assigned
+    // directly.
+    child->linux_mmap_cursor = ::duetos::core::ProcessMmapCursorSnapshot(parent);
     // POSIX fork(2): the child inherits the parent's signal mask
     // and sigaction table; the pending-signal set is cleared. v0
     // ProcessCreate zero-initialises these fields, so without the
@@ -197,37 +203,16 @@ i64 DoFork()
     }
     // Pending signals MUST start empty per POSIX.
     child->linux_pending_signals = 0;
-    // Establish the parent-pid linkage so the child's eventual exit
-    // path (in ProcessRelease) finds this Process and pushes onto
-    // the linux_wait_wq for any in-flight wait4 caller.
-    child->linux_parent_pid = parent->pid;
-
-    // fd inheritance — every parent fd survives into the child.
-    // For pool-backed kinds (3..15) the per-pool ref is shared
-    // via `LinuxFdInheritFromParent`'s HandleTable-Duplicate
-    // path: each side gets a fresh ipc handle pointing at the
-    // same KFile, and the KObject refcount drives the per-pool
-    // release callback (which fires once when the last handle
-    // closes). A pidfd (state 12) holds NO Process reference at
-    // all — it is a weak, pid-keyed handle, so the inherited copy
-    // costs nothing beyond the KFile ref (see the banner in
-    // `pidfd_splice.cpp` for why a strong ref would deadlock
-    // process teardown).
-    //
-    // Dirfd (state 11) is on the owner-aware KFile path. The
-    // snapshot lives on the *parent's* `win32_dirs[]` table and
-    // the child doesn't share that storage; cross-process dirfd
-    // sharing is also refused by `pidfd_splice` for the same
-    // reason. So immediately after the unified inherit, walk the
-    // child's dirfd slots and close them — `LinuxFdClose` drops
-    // the duplicated KFile ref, the parent's ref keeps the
-    // snapshot alive until the parent itself closes the dirfd.
-    core::LinuxFdInheritFromParent(parent, child);
-    for (u32 i = 0; i < 16; ++i)
+    // fd inheritance is one failure-atomic export/import transaction. Every
+    // transferable descriptor shares its retained KFile/OFD identity with the
+    // child, including the FD_CLOEXEC bit. Process-owned directory snapshots
+    // (state 11) are filtered while still represented as private transfer
+    // receipts, before any child slot is published; they can therefore never
+    // expose a parent win32_dirs[] index through the child table.
+    if (!core::LinuxFdInheritFromParent(parent, child))
     {
-        if (parent->linux_fds[i].state != 11)
-            continue;
-        core::LinuxFdClose(child, i);
+        core::ProcessRelease(child);
+        return kENOMEM;
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's
@@ -250,21 +235,34 @@ i64 DoFork()
     desc->user_rsp = parent_tf->rsp;
     desc->user_gs_base = parent->user_gs_base;
 
-    static char s_name[16] = {'l', 'x', '-', 'f', 'o', 'r', 'k', 0};
-    sched::Task* t = sched::SchedCreateUser(&LinuxCloneEntry, desc, s_name, child);
-    if (t == nullptr)
+    // Reserve the durable parent-owned row before SchedCreateUser can publish
+    // the child on another CPU. Capacity and RLIMIT_NPROC are fail-closed. If
+    // scheduler allocation/publication later fails, SchedCreateUser consumes
+    // the child's reference and Process Private teardown atomically removes
+    // this Live row, advances the event sequence, wakes waiters, and releases
+    // the child's strong parent identity edge.
+    if (!core::ProcessRegisterLinuxChildRelation(parent, child, child_limit))
     {
         mm::KFree(desc);
         core::ProcessRelease(child);
+        return kEAGAIN;
+    }
+
+    static char s_name[16] = {'l', 'x', '-', 'f', 'o', 'r', 'k', 0};
+    const u64 child_pid = child->pid;
+    const sched::TaskCreateResult result = sched::SchedCreateUser(&LinuxCloneEntry, desc, s_name, child);
+    if (!result.created)
+    {
+        mm::KFree(desc);
         return kENOMEM;
     }
 
     arch::SerialWrite("[linux/fork] parent pid=");
     arch::SerialWriteHex(parent->pid);
     arch::SerialWrite(" -> child pid=");
-    arch::SerialWriteHex(child->pid);
+    arch::SerialWriteHex(child_pid);
     arch::SerialWrite("\n");
-    return static_cast<i64>(child->pid);
+    return static_cast<i64>(child_pid);
 }
 
 i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
@@ -338,8 +336,8 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     core::ProcessRetain(proc);
 
     static char s_name[16] = {'l', 'x', '-', 'c', 'l', 'o', 'n', 'e', 0, 0, 0, 0, 0, 0, 0, 0};
-    sched::Task* t = sched::SchedCreateUser(&LinuxCloneEntry, desc, s_name, proc);
-    if (t == nullptr)
+    const sched::TaskCreateResult result = sched::SchedCreateUser(&LinuxCloneEntry, desc, s_name, proc);
+    if (!result.created)
     {
         mm::KFree(desc);
         // ProcessRetain consumed by SchedCreateUser's denial
@@ -347,7 +345,7 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
         return kENOMEM;
     }
 
-    const u64 child_tid = sched::TaskId(t);
+    const u64 child_tid = result.tid;
 
     // CLONE_PARENT_SETTID — write the new TID through to the
     // caller's *ptid before the parent's syscall returns. If

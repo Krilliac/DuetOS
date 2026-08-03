@@ -8,10 +8,13 @@
 
 ## Overview
 
-The canonical "did it boot?" gate is `tools/qemu/run.sh`. It launches
-QEMU with the standard DuetOS configuration, watches the serial log
-on stdout, and returns success if the boot reaches the canonical
-end-of-init line within a timeout.
+`tools/qemu/run.sh` is the canonical interactive launcher. The verdict-bearing
+"did it boot?" gate is `tools/test/ctest-boot-smoke.sh`: it launches QEMU
+through `run.sh`, captures the serial log, and requires the complete sentinel
+set with no forbidden signatures. Release CI runs that gate in required mode,
+where missing prerequisites and timeouts fail instead of skipping, then runs
+the release binary's `bringup` profile through GRUB + Multiboot2 as a second
+required check.
 
 ```bash
 DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
@@ -25,6 +28,11 @@ UEFI+q35, virtio-gpu, e1000-net, etc.) runs in parallel, isolated
 from the others. Each profile reports its result through a
 structural sentinel (`[smoke] profile=<name> complete`) on the
 serial log so CI can grep the stream and assert pass/fail.
+
+The BIOS and UEFI labels describe the **firmware profile**. Both supported
+profiles boot the hybrid ISO through GRUB + Multiboot2; neither exercises the
+experimental direct `BOOTX64.EFI` loader. Its bounded banner/ELF-header probe
+lives in the separate `duetos-uefi-smoke` test.
 
 The CTest entry point is:
 
@@ -65,6 +73,33 @@ DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
   a smoke profile).
 
 See the script header for the full env-var list.
+
+## Cancellation SMP oracle
+
+The `cancellation-smp` profile is the deterministic runtime gate for the
+process termination tombstone and cancellation-safe residual IPC unwind. It
+runs only after SMP and Userland bring-up, admits process-backed ring-0 test
+workers, and races these exact boundaries:
+
+- process kill against additional Task publication;
+- KMutex owner release against waiter cancellation;
+- IOCP finite timeout against waiter cancellation;
+- message-port handle close against waiter cancellation.
+
+Every control gate and recovery wait is bounded. The profile fails closed on a
+missing unwind, unexpected linearization, leaked Process/KObject reference, or
+wrong online-CPU count. A passing run ends with the exact marker
+`[cancel-smp] PASS cpus=N cases=4` before the ordinary profile-complete marker.
+
+Run both supported SMP verdict legs from Git Bash or WSL:
+
+```bash
+DUETOS_EXPECTED_CPUS=2 DUETOS_SMP=2,sockets=1,cores=2,threads=1 \
+  tools/test/profile-boot-smoke.sh cancellation-smp build/x86_64-debug
+
+DUETOS_EXPECTED_CPUS=4 DUETOS_SMP=4,sockets=1,cores=2,threads=2 \
+  tools/test/profile-boot-smoke.sh cancellation-smp build/x86_64-debug
+```
 
 ## Emulator boot speed
 

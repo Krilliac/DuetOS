@@ -209,23 +209,25 @@ constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // 54 bytes
 // future row can re-point an import at "terminate the process".
 constexpr u32 kOffDecodePointer = 0x9AD; // 4 bytes (identity)
 
-// === Semaphore family + upgraded WaitForSingleObject v3.
+// === Semaphore family + retired WaitForSingleObject v3.
 constexpr u32 kOffCreateSemaphoreW = 0x9B1;             // 27 bytes (saves rdi+rsi)
 constexpr u32 kOffReleaseSemaphore = 0x9CC;             // 29 bytes (saves rdi+rsi)
 [[maybe_unused]] constexpr u32 kOffWaitForObj3 = 0x9E9; // 94 bytes
                                                         // Retired — see kOffWaitForObj4.
 
-// === real thread-handle wait + 4-range WaitForSingleObject v4.
+// === real thread-handle wait + active 4-family WaitForSingleObject v4.
 constexpr u32 kOffWaitForObj4 = 0xA47; // 122 bytes
-                                       // (v3 + thread range 0x400..0x407 → SYS_THREAD_WAIT)
+                                       // (opaque KObject low tags + legacy thread band)
 
-// The WaitForSingleObject v4 thunk routes each handle type by a fixed
-// `cmp rax, 64` range check (thunks_bytecode.inc, offsets 0xA52/0xA5E/
-// 0xA6A/0xA76). That width MUST cover the full per-type handle space —
-// kHandleTableCapacity slots — or handles past it silently mis-route to
-// the pseudo-signaled fast-success path (the hello-winapi mutex
-// soft-lockup). The width also has to fit an imm8 unsigned compare
-// (< 0x80) and stay below the 0x100 type-base spacing for disjointness.
+// The WaitForSingleObject v4 thunk keeps the original RCX for the selected
+// syscall while isolating the low 12-bit type tag in RAX. Each KObject family
+// subtracts its ABI base and applies a fixed `cmp rax, 64` range check; the
+// legacy thread table remains slot-only. That width MUST cover the full
+// per-type handle space — kHandleTableCapacity identities including the
+// invalid zero identity — or later slots silently mis-route to the
+// transitional pseudo-signaled fast-success path. The width also has to fit
+// an imm8 unsigned compare (< 0x80) and stay below the 0x100 type-base spacing
+// for disjointness.
 static_assert(::duetos::ipc::kHandleTableCapacity <= 64,
               "WaitForSingleObject v4 thunk routes only the first 64 handles per type; raising "
               "kHandleTableCapacity past 64 requires widening the four `cmp rax, 64` immediates in "

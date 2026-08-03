@@ -32,6 +32,7 @@ mod format;
 mod fs;
 mod fsck;
 mod journal;
+#[cfg(not(test))]
 mod kheap_alloc;
 mod mkfs;
 mod ops;

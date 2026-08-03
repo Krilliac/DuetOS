@@ -465,7 +465,7 @@ static NTSTATUS ntdll_vm_transfer(unsigned long long syscall_number, HANDLE Proc
         const unsigned long long target_va = target_base + total;
         const unsigned long long caller_va = caller_base + total;
         if (target_va < target_base || caller_va < caller_base)
-            return (NTSTATUS)NTSTATUS_INVALID_PARAMETER;
+            return ntdll_vm_finish((NTSTATUS)NTSTATUS_INVALID_PARAMETER, total, NumberOfBytesMoved);
 
         /* Args: rdi=handle, rsi=target_va, rdx=caller_buf,
          * r10=bounded len, r8=&moved. */

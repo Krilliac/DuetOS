@@ -27,8 +27,9 @@ brackets even on uniprocessor.
 | Primitive | File | Sleeps? | IRQ-safe? | Use when |
 |-----------|------|---------|-----------|----------|
 | `SpinLock` | [`spinlock.h`](../../kernel/sync/spinlock.h) | no | yes (saves IFLAGS) | Short critical sections, IRQ + process contexts mix |
-| `Mutex` (via `KMutex` in `ipc/`) | [`ipc/kmutex.h`](../../kernel/ipc/kmutex.h) | yes | no | Long critical sections in process context |
-| `AdaptiveMutex` | [`adaptive_mutex.h`](../../kernel/sync/adaptive_mutex.h) | maybe (spins first, parks if needed) | no | Contended mutex where the holder is usually about to release |
+| `sched::Mutex` | [`sched.h`](../../kernel/sched/sched.h) | yes | no | Kernel-internal FIFO sleeping lock; cancellation must unwind and release it |
+| `KMutex` | [`ipc/kmutex.h`](../../kernel/ipc/kmutex.h) | yes | no | Recursive user-visible waitable with explicit cancellation and abandonment results |
+| `AdaptiveMutex` | [`adaptive_mutex.h`](../../kernel/sync/adaptive_mutex.h) | yes (scheduler park) | no | Compatibility surface for existing callers; use `sched::Mutex` directly for new code |
 | `RwLock` | [`rwlock.h`](../../kernel/sync/rwlock.h) | yes | no | Read-mostly data structures, process context only |
 | `Seqlock` | [`seqlock.h`](../../kernel/sync/seqlock.h) | reader: no, writer: no | yes (writer disables IRQ) | Read-side wants no atomics; writer rare |
 | `RCU` | [`rcu.h`](../../kernel/sync/rcu.h) | reader: no | yes | Read-mostly, no reader blocking, deferred reclaim |
@@ -104,51 +105,80 @@ only on the success path, so a declined attempt never pollutes the
 locking-order graph. This is the AB/BA-safe primitive the per-CPU
 work-stealing path is specified to use.
 
-## Mutex (KMutex)
+## Scheduler Mutex and KMutex
 
-Sleeping mutex. The kernel object lives in [`kernel/ipc/kmutex.h`](../../kernel/ipc/kmutex.h)
-because it is reachable from user-mode by handle as well as from kernel-side
-callers. See [IPC](IPC.md) for the kernel-object refcount story; this section
-is a pointer.
+[`sched::Mutex`](../../kernel/sched/sched.h) is the scheduler-owned,
+non-recursive FIFO sleeping lock used by kernel code. Its default `Internal`
+ownership class participates in each task's internal-mutex count. Ordinary
+`MutexLock`/`MutexLockTimed` waits are not cancellation detach points, and an
+internal owner cannot be abandoned: a pending cancellation may finalize only
+after normal control flow releases every internal mutex. Live acquisition
+requires an installed current Task; a null pre-scheduler context is never
+installed as an owner. Non-owner unlock is rejected before lockdep changes,
+and diagnostics snapshot only the immutable owner TID while the scheduler
+lifetime lock is held.
 
-The kernel never holds a `KMutex` across a sleeping operation that depends on
-the mutex (no recursion, no nested blocking I/O). The lockdep class for each
-mutex must be registered on first use.
+[`KMutex`](../../kernel/ipc/kmutex.h) embeds `sched::Mutex` with the explicit
+`AbandonableUserWaitable` class and adds the handle-visible recursive contract.
+Only that class may use the result-bearing cancellable acquire APIs and
+`MutexAbandon`; its task ownership ledger lets the reaper publish an abandoned
+result and transfer the FIFO hand-off safely. These are not generic escape
+hatches for kernel-internal locks. See [IPC](IPC.md) for the kernel-object
+reference contract. Register a lockdep class on first use for either primitive.
+The boot self-test holds a real KMutex in a process-null worker, proves public
+kill returns `Protected`, lets that worker exit without release, and requires
+the successor to observe the one-shot abandoned result.
 
 ## Adaptive Mutex
 
-[`AdaptiveMutex`](../../kernel/sync/adaptive_mutex.h) is an illumos-style
-spin-then-park mutex, interface-compatible with the `sched::Mutex`
-parking pattern. The uncontested fast path is the same CAS-claim; the
-slow path is what distinguishes it:
+[`AdaptiveMutex`](../../kernel/sync/adaptive_mutex.h) is a compatibility
+facade backed by `sched::Mutex`. It deliberately does **not** adaptively spin.
+The retired implementation kept a raw `Task*` owner and performed its owner
+recheck separately from wait-queue enrollment; a killed owner could be reaped
+while a contender still inspected it, and a peer CPU could unlock in the
+check-to-park window. Delegation gives the wrapper the scheduler mutex's exact
+contract:
 
-- **Holder on-CPU** → spin (reading `holder->on_cpu` with acquire
-  semantics each iteration). Release is imminent, so busy-waiting beats
-  paying two context-switch costs to park and unpark.
-- **Holder off-CPU** (blocked / sleeping / ready elsewhere) → park on
-  the mutex's `sched::WaitQueue`.
-- **Spin cap** `kAdaptiveSpinLimit` (10000 iterations, ~50 µs) is the
-  safety net: a runaway holder stuck on its own CPU falls through to
-  the park path rather than pinning a peer forever.
+- owner tests, waiter enrollment, and direct FIFO hand-off are serialized
+  under the scheduler lock;
+- ownership participates in the task's mutex-lifetime accounting, so a task
+  cannot be reaped while this mutex still refers to it;
+- the embedded mutex remains `Internal`, so its wait is non-cancellable and
+  it cannot be abandoned; pending cancellation finalizes only after normal
+  control flow releases it. The user-visible `KMutex` is the separate
+  cancellable/abandonable layer;
+- `kAdaptiveSpinLimit` remains only for source compatibility and is not used
+  to spin.
 
 ```cpp
-void AdaptiveMutexLock(AdaptiveMutex& m);            // spin-then-park
-void AdaptiveMutexUnlock(AdaptiveMutex& m);          // wakes one waiter (FIFO)
+void AdaptiveMutexLock(AdaptiveMutex& m);            // sched::Mutex acquire
+void AdaptiveMutexUnlock(AdaptiveMutex& m);          // direct FIFO hand-off
 bool AdaptiveMutexTryLock(AdaptiveMutex& m);         // non-blocking
-bool AdaptiveMutexIsHeld(const AdaptiveMutex& m);    // diagnostic only
+bool AdaptiveMutexIsHeld(const AdaptiveMutex& m);    // diagnostic snapshot only
 ```
 
-It is a strict Pareto improvement over always-park `sched::Mutex`: the
-uncontested case is identical, the contended case is at worst what
-`sched::Mutex` already pays. **Not** recursive, **not** IRQ-safe (both
-the spin and park paths can block; IRQ-context callers use `SpinLock`),
-no priority inheritance, and no timed acquire (use `MutexLockTimed` for
-that). Lockdep integration mirrors `sched::Mutex` via the `m_class_id`
-field; untagged mutexes short-circuit the hooks. A boot self-test
-(`AdaptiveMutexSelfTest`, called from `boot_bringup.cpp` after the
-SpinLock self-test) exercises the fast path, `TryLock`, lockdep
-round-trip, and two-task contention, emitting
-`[adaptive-mutex] self-test OK`.
+The wrapper's publication spinlock mirrors only whether a public lock call has
+returned and the diagnostic TID that published it. This mirror is never read
+by the scheduler, cancellation finalizer, or reaper. `AdaptiveMutexIsHeld`
+reads that race-free snapshot; it is not an ownership test and must never
+guard protected data. The embedded `sched::Mutex` remains the sole owner and
+wait-queue authority.
+
+Normal use requires task context after `SchedInit`: lock may sleep, so it is
+not IRQ-safe and must not run with preemption disabled. The single-threaded
+BSP may use a complete `Lock`/`Unlock` pair before `SchedInit`; those calls are
+explicit no-ops, `TryLock` reports success, and `IsHeld` reports false because
+there is no schedulable task owner. A pair must never straddle `SchedInit`.
+The mutex is not recursive, has no priority inheritance, and exposes no timed
+acquire (use `sched::MutexLockTimed` directly when a deadline is required).
+Zero-initialization is complete initialization.
+
+`AdaptiveMutexSelfTest` runs in `Phase::Sched` on every boot. It covers
+uncontended acquire/release and diagnostic publication, `TryLock`, lockdep
+accounting, and deterministic two-task contention: the coordinator observes
+the contender blocked before permitting the owner to release, then verifies
+direct FIFO hand-off and final release. Its terminal success sentinel is
+`[adaptive-mutex] self-test OK (scheduler mutex ownership + FIFO hand-off)`.
 
 ## RwLock
 
