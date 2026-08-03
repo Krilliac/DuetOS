@@ -415,6 +415,9 @@ struct PackageFixture
                                                       &authority,
                                                       objects.data(),
                                                       static_cast<u32>(objects.size()),
+                                                      0,
+                                                      nullptr,
+                                                      0,
                                                       0};
     }
 };

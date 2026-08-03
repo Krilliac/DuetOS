@@ -405,9 +405,10 @@ class KMutexCancellationContractTests(unittest.TestCase):
         self.assertRegex(track, r"\b\w+->(?:prev|next)\s*=")
 
         untrack = function_body(self.sched_cpp, r"bool\s+SchedUntrackCurrentAbandonableOwnership")
+        require_pattern(untrack, r"\bCurrentTask\s*\(\s*\)", "untrack does not obtain current Task identity")
         owner_check = require_pattern(
             untrack,
-            r"\b\w+->owner\s*!=\s*(?:Current|CurrentTask)\s*\(\s*\)",
+            r"\b\w+->owner\s*!=\s*\w+",
             "untrack does not reject a non-owner under the scheduler lock",
         )
         lock_span_containing(untrack, owner_check.start())
@@ -567,9 +568,9 @@ class KMutexCancellationContractTests(unittest.TestCase):
         )
         self.assertLess(publish.start(), handoff.start(), "waiter can run before abandonment becomes visible")
         compact_before_handoff = re.sub(r"\s+", "", callback[: handoff.start()])
-        self.assertIn("->held=false;", compact_before_handoff)
-        self.assertIn("->owner_tid=0;", compact_before_handoff)
-        self.assertIn("->recursion=0;", compact_before_handoff)
+        self.assertIn("&m->held,false,", compact_before_handoff)
+        self.assertIn("&m->owner_tid,0", compact_before_handoff)
+        self.assertIn("&m->recursion,0", compact_before_handoff)
         self.assertRegex(callback, r"\bKObjectRelease\s*\(\s*&\w+->base\s*\)")
 
         exchange = require_pattern(
@@ -612,7 +613,7 @@ class KMutexCancellationContractTests(unittest.TestCase):
         release = function_body(self.kmutex_cpp, r"bool\s+KMutexRelease")
         owner_check = require_pattern(
             release,
-            r"\bm->owner_tid\s*!=\s*(?:sched::)?CurrentTaskId\s*\(\s*\)",
+            r"(?:__atomic_load_n\s*\(\s*&)?m->owner_tid(?:\s*,\s*__ATOMIC_\w+\s*\))?\s*!=\s*(?:sched::)?CurrentTaskId\s*\(\s*\)",
             "release does not reject the wrong immutable Task identity",
         )
         self.assertRegex(release[owner_check.end() : owner_check.end() + 300], r"\breturn\s+false\s*;")
@@ -628,7 +629,7 @@ class KMutexCancellationContractTests(unittest.TestCase):
         )
         outer_clear = require_pattern(
             release,
-            r"\bm->(?:held|owner_tid)\s*=",
+            r"(?:__atomic_store_n\s*\(\s*&m->(?:held|owner_tid)\s*,|m->(?:held|owner_tid)\s*=)",
             "outer release never clears KMutex ownership state",
         )
         self.assertGreater(outer_clear.start(), verified.start() + failure.end())

@@ -46,6 +46,10 @@ Task* CurrentTask()
 {
     return nullptr;
 }
+u64 CurrentTaskId()
+{
+    return 0;
+}
 void MutexLock(Mutex*) {}
 void MutexUnlock(Mutex*) {}
 } // namespace duetos::sched
