@@ -138,6 +138,17 @@ void DbgEmit2V(DbgChannel, const char*, const char*, const char*, u64, const cha
 void DbgEmit3V(DbgChannel, const char*, const char*, const char*, u64, const char*, u64, const char*, u64) {}
 } // namespace duetos::core
 
+// kernel/loader/image_patch.h serialises direct image writes behind a
+// sched::Mutex (ImagePatchMutationGuard), so pe_loader.cpp now pulls in
+// the scheduler lock symbols. The fuzz harness is single-threaded, so
+// the locks are no-ops here — same shape as fs_stubs.cpp.
+namespace duetos::sched
+{
+struct Mutex;
+void MutexLock(Mutex*) {}
+void MutexUnlock(Mutex*) {}
+} // namespace duetos::sched
+
 namespace duetos::debug
 {
 void ProbeFire(ProbeId, u64, u64) {}

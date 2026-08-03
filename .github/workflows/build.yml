@@ -121,6 +121,20 @@ jobs:
           sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      # cmake/DuetOSRust.cmake exports RUSTUP_TOOLCHAIN for the cargo
+      # invocation, which makes rustup bypass /rust-toolchain.toml - so the
+      # components pinned there (rust-src, required by -Zbuild-std) are not
+      # auto-installed. Provision the pinned toolchain explicitly, reading the
+      # channel out of the toml so this can never drift from the pin.
+      - name: Provision pinned Rust toolchain
+        run: |
+          CHANNEL="$(awk -F'\"' '/^channel = /{print $2}' rust-toolchain.toml)"
+          if [ -z "$CHANNEL" ]; then
+            echo 'could not read channel from rust-toolchain.toml' >&2
+            exit 1
+          fi
+          rustup toolchain install "$CHANNEL" --profile minimal --component rust-src --target x86_64-unknown-none
+
       - name: Verify host structural contracts
         run: |
           python3 tools/test/test-verify-boot-verdict.py
@@ -261,6 +275,20 @@ jobs:
           sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      # cmake/DuetOSRust.cmake exports RUSTUP_TOOLCHAIN for the cargo
+      # invocation, which makes rustup bypass /rust-toolchain.toml - so the
+      # components pinned there (rust-src, required by -Zbuild-std) are not
+      # auto-installed. Provision the pinned toolchain explicitly, reading the
+      # channel out of the toml so this can never drift from the pin.
+      - name: Provision pinned Rust toolchain
+        run: |
+          CHANNEL="$(awk -F'\"' '/^channel = /{print $2}' rust-toolchain.toml)"
+          if [ -z "$CHANNEL" ]; then
+            echo 'could not read channel from rust-toolchain.toml' >&2
+            exit 1
+          fi
+          rustup toolchain install "$CHANNEL" --profile minimal --component rust-src --target x86_64-unknown-none
+
       - name: Configure
         run: cmake --preset x86_64-release
       - name: Build
@@ -371,6 +399,20 @@ jobs:
           sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      # cmake/DuetOSRust.cmake exports RUSTUP_TOOLCHAIN for the cargo
+      # invocation, which makes rustup bypass /rust-toolchain.toml - so the
+      # components pinned there (rust-src, required by -Zbuild-std) are not
+      # auto-installed. Provision the pinned toolchain explicitly, reading the
+      # channel out of the toml so this can never drift from the pin.
+      - name: Provision pinned Rust toolchain
+        run: |
+          CHANNEL="$(awk -F'\"' '/^channel = /{print $2}' rust-toolchain.toml)"
+          if [ -z "$CHANNEL" ]; then
+            echo 'could not read channel from rust-toolchain.toml' >&2
+            exit 1
+          fi
+          rustup toolchain install "$CHANNEL" --profile minimal --component rust-src --target x86_64-unknown-none
+
       - name: Enable KVM access (~50× speedup vs TCG when present)
         run: |
           if [[ -e /dev/kvm ]]; then

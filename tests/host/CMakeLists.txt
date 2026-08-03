@@ -364,6 +364,7 @@ target_sources(
         "${CMAKE_SOURCE_DIR}/../../kernel/syscall/service_endpoint_ingress.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_protocol_policy.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_endpoint.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_reap_ledger.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/ipc/channel_core.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/ipc/endpoint_request_ledger.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/ipc/kmessage_port.cpp"
