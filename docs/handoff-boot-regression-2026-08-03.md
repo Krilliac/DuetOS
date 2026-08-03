@@ -1,0 +1,124 @@
+# Boot regression handoff — 2026-08-03
+
+State of `main` at `7383661b` and what is known about the two open boot
+failures. Written so the next session starts from evidence, not from a
+re-derivation.
+
+## Where CI stands
+
+Green: `build debug`, `build release`, `host tests (asan-ubsan)`,
+`host tests (thread)`, `fuzz-all`, `clang-format`, `cargo fmt + clippy`,
+`clang-tidy`.
+
+Red: all 14 boot jobs (10 `qemu smoke`, 4 `build+smoke flavor`).
+
+## Provenance — this is not from the landing mechanics
+
+The last green `build.yml` on this tree was `e8669b23` (2026-07-31 09:16).
+Pre-landing `main` (`e4bf541f`) was that commit plus one docs-only change,
+so `main` was verified-good. Roughly 938 commits accumulated on the feature
+branch after 07-31 with no green build; landing them is what exposed these.
+Both failures below are pre-existing in that accumulated work.
+
+## Open failure 1 — AP kernel stack overflow (blocks every boot job)
+
+```
+[panic-precis] sched/kstack: guard-page hit — kernel stack overflow
+  caller=0xffffffff803aa51a (TrapDispatch, traps.cpp:1776)  cpu=1  hv=KVM
+[W] cpu/percpu : CurrentCpu LAPIC-resolved a non-kernel GSBASE on a non-BSP
+    CPU (swapgs / AP-GS gap; recovered) — REGRESSION, count 69
+```
+
+Facts established:
+
+- Identical across every profile and both 2 and 4 vCPU: same detection RIP,
+  same fallback count (69), same ~13.3 s mark. Deterministic, not a race.
+- Guard addresses differ but are exactly one slot (`0x21000`) apart, so these
+  are distinct stacks — **not** a slot collision.
+- Resolved against the matching `duetos-kernel-debug` ELF, the overflow RIP
+  `0xffffffff8039d15e` is `ApEntryFromTrampoline`, `smp.cpp:1209` — which is
+  the `core::LogWithValue(..., "AP online cpu_id", ...)` call.
+- Serial output at the panic is interleaved character-by-character between
+  BSP and AP.
+
+So an AP overflows 128 KiB inside klog, immediately on coming online.
+`percpu.cpp` documents exactly this hazard: klog tags every line via
+`CurrentCpuIdOrBsp()` → `CurrentCpu()`, and re-entering that while GSBASE is
+stale is unbounded recursion. `CurrentCpu()`'s fallback deliberately does not
+log, and the `OnTimerTick` warn sets its one-shot flag before emitting, so the
+obvious two recursion guards are present — the actual cycle is not yet
+identified.
+
+`smp.cpp` was rewritten by +436 lines in the landed work, and the kernel's own
+comment states a non-zero fallback count *is* the regression signal ("a clean
+boot must stay at zero now the AP-bring-up GS ordering + AP lidt are fixed").
+The AP-GS gap is the prime suspect as root, with the overflow as consequence.
+
+AP init ordering in `ApSetupCurrent` reads correctly: `LoadGdtForCurrent` →
+`WriteMsrGsBase` → `WriteMsrKernelGsBase` → `IdtLoadForCurrent`. The 69
+fallbacks therefore come from somewhere else; finding that caller is the next
+concrete step.
+
+## Open failure 2 — Linux fd self-test still panics
+
+```
+[panic-precis] proc/linux-fd: self-test: saturated fd slot became reusable
+```
+
+`7383661b` fixed a real bug in `LinuxFdClearSlotLocked`: it seeded a local with
+`kLinuxFdGenerationExhausted`, called `LinuxFdNextGeneration`, and discarded the
+return — but that function zeroes `*next_out` before deciding whether the epoch
+may advance, so a saturated slot was published as generation 0. That
+un-retires a permanently-retired slot and violates "zero is never published".
+
+That fix is real and is confirmed present in the shipped binary (disassembly of
+`LinuxFdClearSlotLocked` shows the return value stored, not discarded).
+**It is not sufficient** — booting the post-fix artifact still panics on the
+same assertion. One of the other three conditions in the self-test
+(`kernel/proc/process.cpp` ~5695) still fails:
+
+```c
+exhausted_slot.state != 0 ||
+exhausted_slot.generation != kLinuxFdGenerationExhausted ||
+LinuxFdAllocLowest(p, 15) >= 0 ||
+LinuxFdNextGeneration(kLinuxFdGenerationExhausted, &forbidden_next) ||
+forbidden_next != 0
+```
+
+Next step: instrument which of the five disjuncts trips. `LinuxFdAllocLowest`
+returning >= 0 is the most likely remaining candidate.
+
+Note the static contract test originally **pinned the buggy statement sequence
+as the contract**, so it passed while the kernel panicked. It has been rewritten
+to assert the invariant and verified to fail against the old code — but treat
+the rest of the `tools/test/test-*.py` suite with the same suspicion.
+
+## Local reproduction loop (this is the important part)
+
+The dev host already has QEMU 8.2.2, `grub-mkrescue`, `xorriso`, `mtools` in
+WSL, and `/dev/kvm` is present. There is no need to build locally — CI's
+`build debug` job succeeds and uploads both the ISO and the ELF:
+
+```bash
+gh run download <run-id> -n duetos-kernel-debug -D /tmp/kern
+gh run download <run-id> -n qemu-serial-log-bringup-2cpu -D /tmp/serial
+
+# boot it (reproduces the AP overflow in ~90s)
+qemu-system-x86_64 -enable-kvm -cpu host -cdrom /tmp/kern/duetos.iso \
+  -smp 2 -m 512M -display none -serial stdio -no-reboot
+
+# resolve any runtime RIP against the matching ELF
+addr2line -f -C -i -e /tmp/kern/kernel/duetos-kernel.elf 0x<rip>
+```
+
+Two traps that cost time here:
+
+- Under TCG the boot does not reach AP bringup within 60 s, so a "no overflow"
+  result from a short run is meaningless. Always confirm the log contains
+  `Bringing up APs` before concluding anything. Use `-enable-kvm`.
+- `DUETOS_SMOKE_ISO` with a prebuilt ISO does not apply `DUETOS_SMOKE_PROFILE`
+  (the profile is injected by regenerating the GRUB cmdline into a fresh ISO),
+  so that combination silently boots the default profile.
+
+Serial logs contain NUL bytes; parse them in Python
+(`read_bytes().replace(b"\x00", b"")`) rather than with shell text tools.
