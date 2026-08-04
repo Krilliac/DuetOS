@@ -7,6 +7,13 @@
  * in advapi32_32_sec.c. What is left here is still v0 stub tier and
  * carries its markers inline.
  */
+#include "../common/duet32_syscall.h"
+
+/* SYS_RANDOM_BYTES (kernel/syscall/syscall.h) — kernel CSPRNG, RDSEED/RDRAND
+ * seeded. Returns the number of bytes written; a short count means the copy
+ * faulted part-way and the buffer must NOT be treated as random. */
+#define SYS_RANDOM_BYTES 212
+
 typedef unsigned int DWORD;
 typedef int BOOL;
 typedef void* HANDLE;
@@ -14,6 +21,32 @@ typedef HANDLE HCRYPTPROV;
 typedef HANDLE HCRYPTHASH;
 typedef HANDLE HCRYPTKEY;
 typedef unsigned char BYTE;
+
+
+/*
+ * Fill `buf` from the kernel CSPRNG. Returns 1 only on a full-length fill.
+ *
+ * These are security APIs. Returning success with predictable bytes is
+ * strictly worse than failing: callers use them for session tokens, nonces,
+ * key material and authentication challenges, and a caller that receives
+ * FALSE takes its error path, whereas a caller handed LCG output ships a
+ * broken secret. Both entry points below previously ran
+ *   ctr = ctr * 1103515245u + 12345u
+ * which is the textbook glibc LCG — trivially predictable from one output.
+ *
+ * The old comment here claimed a real RNG "needs the 32-bit syscall
+ * trampoline"; that trampoline now exists in ../common/duet32_syscall.h and
+ * every other _32 DLL already issues syscalls through it.
+ */
+static BOOL duet32_csprng_fill(void* buf, unsigned len)
+{
+    if (buf == 0)
+        return 0;
+    if (len == 0)
+        return 1;
+    int wrote = duet_syscall2(SYS_RANDOM_BYTES, (unsigned)(unsigned long)buf, len);
+    return (wrote >= 0 && (unsigned)wrote == len) ? 1 : 0;
+}
 
 /* CryptoAPI stubs. v0 returns FALSE so caller's NULL-on-fail path runs. */
 __declspec(dllexport) BOOL __stdcall CryptAcquireContextA(HCRYPTPROV* h, const char* n, const char* p, DWORD type,
@@ -94,18 +127,8 @@ __declspec(dllexport) BOOL __stdcall CryptExportKey(HCRYPTKEY k, HCRYPTKEY exp_k
 }
 __declspec(dllexport) BOOL __stdcall CryptGenRandom(HCRYPTPROV p, DWORD len, BYTE* buf)
 {
-    /* v0 fills with a counter so callers that consume entropy see
-     * "something" non-zero. Real RNG via SYS_RAND_BYTES needs the
-     * 32-bit syscall trampoline; v0 sequence is good enough for
-     * "did the call succeed" probes. */
     (void)p;
-    static unsigned counter = 0xC0DEF00D;
-    for (DWORD i = 0; i < len; ++i)
-    {
-        counter = counter * 1103515245u + 12345u;
-        buf[i] = (BYTE)(counter >> 16);
-    }
-    return 1;
+    return duet32_csprng_fill(buf, len);
 }
 __declspec(dllexport) BOOL __stdcall CryptGetHashParam(HCRYPTHASH h, DWORD p, BYTE* data, DWORD* len, DWORD flags)
 {
@@ -198,15 +221,9 @@ __declspec(dllexport) BOOL __stdcall ReportEventW(HANDLE h, unsigned short type,
     return 1;
 }
 
-/* SystemFunction036 = RtlGenRandom — secure RNG. v0 uses same LCG. */
+/* SystemFunction036 = RtlGenRandom — documented as cryptographically secure,
+ * so it must come from the kernel CSPRNG or fail. */
 __declspec(dllexport) BOOL __stdcall SystemFunction036(void* buf, unsigned len)
 {
-    static unsigned ctr = 0xBADCAFE;
-    BYTE* p = (BYTE*)buf;
-    for (unsigned i = 0; i < len; ++i)
-    {
-        ctr = ctr * 1103515245u + 12345u;
-        p[i] = (BYTE)(ctr >> 16);
-    }
-    return 1;
+    return duet32_csprng_fill(buf, len);
 }
