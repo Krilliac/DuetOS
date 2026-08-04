@@ -118,8 +118,7 @@ void __cdecl mainCRTStartup(void)
         retirement_ok = FALSE;
 
     HANDLE t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-    OutVerdict("[thread2_smoke] CreateThread          = ",
-               t != NULL ? "PASS\r\n" : "FAIL\r\n");
+    OutVerdict("[thread2_smoke] CreateThread          = ", t != NULL ? "PASS\r\n" : "FAIL\r\n");
     if (t == NULL)
         retirement_ok = FALSE;
 
@@ -132,8 +131,7 @@ void __cdecl mainCRTStartup(void)
         ExitCodeCanary active = {EXIT_CANARY_BEFORE, EXIT_CANARY_UNTOUCHED, EXIT_CANARY_AFTER};
         BOOL active_ok = g_started != 0 && GetExitCodeThread(t, &active.value) && active.value == STILL_ACTIVE &&
                          ExitCodeCanariesIntact(&active);
-        OutVerdict("[thread2_smoke] active exit-code canary= ",
-                   active_ok ? "PASS\r\n" : "FAIL\r\n");
+        OutVerdict("[thread2_smoke] active exit-code canary= ", active_ok ? "PASS\r\n" : "FAIL\r\n");
         if (!active_ok)
             retirement_ok = FALSE;
 
@@ -144,16 +142,14 @@ void __cdecl mainCRTStartup(void)
 
         /* SetThreadPriority. */
         BOOL sp = SetThreadPriority(t, THREAD_PRIORITY_NORMAL);
-        OutVerdict("[thread2_smoke] SetThreadPriority     = ",
-                   sp ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] SetThreadPriority     = ", sp ? "PASS\r\n" : "FAIL/STUB\r\n");
 
         if (g_worker_release == NULL || !SetEvent(g_worker_release))
             retirement_ok = FALSE;
 
         /* Wait for finish. */
         DWORD r = WaitForSingleObject(t, 5000);
-        OutVerdict("[thread2_smoke] WaitForSingleObject(t)= ",
-                   r == WAIT_OBJECT_0 ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] WaitForSingleObject(t)= ", r == WAIT_OBJECT_0 ? "PASS\r\n" : "FAIL/STUB\r\n");
         if (r != WAIT_OBJECT_0)
             retirement_ok = FALSE;
 
@@ -161,7 +157,8 @@ void __cdecl mainCRTStartup(void)
         ExitCodeCanary completed = {EXIT_CANARY_BEFORE, EXIT_CANARY_UNTOUCHED, EXIT_CANARY_AFTER};
         BOOL gec = GetExitCodeThread(t, &completed.value);
         OutVerdict("[thread2_smoke] GetExitCodeThread     = ",
-                   gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed) ? "PASS (0x42)\r\n" : "FAIL/STUB\r\n");
+                   gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed) ? "PASS (0x42)\r\n"
+                                                                                        : "FAIL/STUB\r\n");
         if (!gec || completed.value != 0x42 || !ExitCodeCanariesIntact(&completed) || g_ran == 0)
             retirement_ok = FALSE;
 
@@ -179,8 +176,7 @@ void __cdecl mainCRTStartup(void)
         BOOL stale_rejected = WaitForSingleObject(stale, 0) == WAIT_FAILED &&
                               !GetExitCodeThread(stale, &stale_probe.value) &&
                               stale_probe.value == EXIT_CANARY_UNTOUCHED && ExitCodeCanariesIntact(&stale_probe);
-        OutVerdict("[thread2_smoke] stale handle + canary = ",
-                   stale_rejected ? "PASS\r\n" : "FAIL\r\n");
+        OutVerdict("[thread2_smoke] stale handle + canary = ", stale_rejected ? "PASS\r\n" : "FAIL\r\n");
         if (!stale_rejected)
             retirement_ok = FALSE;
 
@@ -202,8 +198,7 @@ void __cdecl mainCRTStartup(void)
             BOOL replacement_ok = WaitForSingleObject(replacement, 5000) == WAIT_OBJECT_0 &&
                                   GetExitCodeThread(replacement, &replacement_exit.value) &&
                                   replacement_exit.value == 0x24 && ExitCodeCanariesIntact(&replacement_exit);
-            OutVerdict("[thread2_smoke] closed row reclaimed = ",
-                       replacement_ok ? "PASS\r\n" : "FAIL\r\n");
+            OutVerdict("[thread2_smoke] closed row reclaimed = ", replacement_ok ? "PASS\r\n" : "FAIL\r\n");
             if (!replacement_ok)
                 retirement_ok = FALSE;
             CloseHandle(replacement);
@@ -228,8 +223,7 @@ void __cdecl mainCRTStartup(void)
     {
         INIT_ONCE io = INIT_ONCE_STATIC_INIT;
         BOOL ran = InitOnceExecuteOnce(&io, init_once_fn, NULL, NULL);
-        OutVerdict("[thread2_smoke] InitOnceExecuteOnce   = ",
-                   ran ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] InitOnceExecuteOnce   = ", ran ? "PASS\r\n" : "FAIL/STUB\r\n");
     }
 
     Out("[thread2_smoke] done\r\n");
