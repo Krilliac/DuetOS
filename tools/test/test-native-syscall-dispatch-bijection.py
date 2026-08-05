@@ -254,7 +254,7 @@ class NativeSyscallDispatchBijectionTests(unittest.TestCase):
         self.assertEqual(1, len(reported.stdout.splitlines()))
         parsed = json.loads(reported.stdout)
         self.assertTrue(parsed["ok"])
-        self.assertEqual(225, parsed["counts"]["idl"])
+        self.assertEqual(228, parsed["counts"]["idl"])
 
     def test_cli_failure_is_text_by_default_and_json_only_on_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -289,11 +289,11 @@ class NativeSyscallDispatchBijectionTests(unittest.TestCase):
         report = AUDITOR.audit_repository(ROOT)
         self.assertTrue(report["ok"], report["errors"])
         self.assertEqual(
-            {"dispatch": 225, "enum": 225, "idl": 225, "implemented": 225, "reserved": 0, "retired": 0},
+            {"dispatch": 228, "enum": 228, "idl": 228, "implemented": 228, "reserved": 0, "retired": 0},
             report["counts"],
         )
         self.assertEqual([176, 177, 178, 179], report["unassigned_numbers"])
-        self.assertEqual(225, sum(report["classification_counts"].values()))
+        self.assertEqual(228, sum(report["classification_counts"].values()))
         cases = {row["name"]: row for row in report["cases"]}
         self.assertEqual("delegated_call", cases["SYS_FILE_OPEN"]["classification"])
         self.assertEqual("subsystems::win32::DoFileOpen", cases["SYS_FILE_OPEN"]["delegate"])

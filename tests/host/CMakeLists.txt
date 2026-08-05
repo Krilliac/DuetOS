@@ -839,6 +839,12 @@ add_host_test(kernel32_console_input)
 # Counting / chunk-sizing helpers behind the SYS_STDIN_PEEK wiring, from
 # the same freestanding header.
 add_host_test(kernel32_console_peek)
+# SYS_GAMEPAD_STATE wire ABI: pins the kernel struct
+# (kernel/subsystems/win32/input_syscall.h) field-for-field against its
+# userland twin (userland/libs/xinput1_4/xinput_wire.h), which nothing
+# else can do - they are built by different compilers.
+add_host_test(xinput_wire)
+target_include_directories(test_xinput_wire PRIVATE "${CMAKE_SOURCE_DIR}/../../userland/libs/xinput1_4")
 # HID gamepad driver: links the real kernel TU through the hosted seam.
 add_host_test(hid_gamepad)
 target_compile_definitions(test_hid_gamepad PRIVATE DUETOS_HOSTED_TEST=1)

@@ -11,6 +11,10 @@
  */
 #include <windows.h>
 
+#define ERROR_SUCCESS_ 0u
+#define ERROR_NOT_CONNECTED_ 1167u /* ERROR_DEVICE_NOT_CONNECTED */
+#define ERROR_EMPTY_ 4306u         /* ERROR_EMPTY */
+
 extern DWORD XInputGetState(DWORD idx, void* state);
 extern DWORD XInputSetState(DWORD idx, void* vibration);
 extern DWORD XInputGetCapabilities(DWORD idx, DWORD flags, void* caps);
@@ -30,39 +34,56 @@ void __cdecl mainCRTStartup(void)
 {
     Out("[xinput_smoke] starting\r\n");
 
+    /* Slot 0 decides what every call below must answer. With no pad
+     * attached (the QEMU case) every entry point reports
+     * ERROR_DEVICE_NOT_CONNECTED; with one attached they report their
+     * real results instead. Checking against a fixed 1167 would pass
+     * under emulation and fail the moment someone plugs a controller
+     * into real hardware -- the one case actually worth proving. */
     BYTE state[16] = {0};
     DWORD r = XInputGetState(0, state);
+    const int connected = (r == ERROR_SUCCESS_);
     Out("[xinput_smoke] XInputGetState(0)         = ");
-    Out((r == 1167) ? "PASS\r\n" : "FAIL\r\n"); /* ERROR_DEVICE_NOT_CONNECTED */
+    Out((connected || r == ERROR_NOT_CONNECTED_) ? "PASS\r\n" : "FAIL\r\n");
 
+    /* Vibration is accepted and dropped (no interrupt-OUT report
+     * writer yet), so a connected pad answers success. */
     BYTE vib[4] = {0};
     r = XInputSetState(0, vib);
     Out("[xinput_smoke] XInputSetState(0)         = ");
-    Out((r == 1167) ? "PASS\r\n" : "FAIL\r\n");
+    Out((r == (connected ? ERROR_SUCCESS_ : ERROR_NOT_CONNECTED_)) ? "PASS\r\n" : "FAIL\r\n");
 
     BYTE caps[20] = {0};
     r = XInputGetCapabilities(0, 0, caps);
     Out("[xinput_smoke] XInputGetCapabilities(0)  = ");
-    Out((r == 1167) ? "PASS\r\n" : "FAIL\r\n");
+    Out((r == (connected ? ERROR_SUCCESS_ : ERROR_NOT_CONNECTED_)) ? "PASS\r\n" : "FAIL\r\n");
 
     BYTE battery[2] = {0};
     r = XInputGetBatteryInformation(0, 0, battery);
     Out("[xinput_smoke] XInputGetBatteryInformation = ");
-    Out((r == 1167) ? "PASS\r\n" : "FAIL\r\n");
+    Out((r == (connected ? ERROR_SUCCESS_ : ERROR_NOT_CONNECTED_)) ? "PASS\r\n" : "FAIL\r\n");
+
+    /* No keystroke queue yet: a connected pad reports the empty
+     * sentinel rather than success. */
+    BYTE keystroke[8] = {0};
+    r = XInputGetKeystroke(0, 0, keystroke);
+    Out("[xinput_smoke] XInputGetKeystroke(0)     = ");
+    Out((r == (connected ? ERROR_EMPTY_ : ERROR_NOT_CONNECTED_)) ? "PASS\r\n" : "FAIL\r\n");
 
     XInputEnable(TRUE);
     Out("[xinput_smoke] XInputEnable(TRUE)        = PASS (returned)\r\n");
 
-    /* Verify all 4 slots return the not-connected sentinel. */
-    int connected_or_invalid = 0;
+    /* Every slot must answer one of the two legal codes. A bad slot
+     * index or an unmapped wire struct shows up as neither. */
+    int bad_slot = 0;
     for (DWORD i = 0; i < 4; ++i)
     {
         r = XInputGetState(i, state);
-        if (r != 1167)
-            connected_or_invalid = 1;
+        if (r != ERROR_SUCCESS_ && r != ERROR_NOT_CONNECTED_)
+            bad_slot = 1;
     }
-    Out("[xinput_smoke] All 4 slots not-connected = ");
-    Out(connected_or_invalid ? "FAIL\r\n" : "PASS\r\n");
+    Out("[xinput_smoke] All 4 slots answer legally = ");
+    Out(bad_slot ? "FAIL\r\n" : "PASS\r\n");
 
     Out("[xinput_smoke] done\r\n");
     Out("[ring3-xinput-smoke] PASS\r\n");
