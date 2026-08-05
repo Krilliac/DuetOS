@@ -1,3 +1,4 @@
+#include "kernel32_console_vt.h" /* screen-buffer mirror VT tracker */
 #include "kernel32_internal.h"
 #include "kernel32_nls_format.h" /* nls_locale_number (LOCALE_RETURN_NUMBER) */
 
@@ -536,11 +537,31 @@ typedef struct
     short max_cols, max_rows;
 } DUETOS_CONSOLE_SBI;
 
-/* In-memory cursor + attribute state. */
-static short g_console_cur_x = 0, g_console_cur_y = 0;
-static unsigned short g_console_attrs = 0x07;
+/* In-memory screen-buffer mirror: cursor + attributes + the VT
+ * tracker state (kernel32_console_vt.h). Explicit console API
+ * calls (SetConsoleCursorPosition / SetConsoleTextAttribute) and
+ * VT sequences written under ENABLE_VIRTUAL_TERMINAL_PROCESSING
+ * both land here, so GetConsoleScreenBufferInfo reflects either
+ * control style. Field order: cols, rows, cur_x, cur_y, attrs,
+ * then zeroed parser state. */
+static duetos_cvt_state g_console_mirror = {80, 25, 0, 0, 0x07, 0, 0, 0, 0, {0}};
 static int g_console_cursor_visible = 1;
 static int g_console_cursor_size = 25; /* pct of cell */
+
+/* Cross-TU entry (declared in kernel32_internal.h): observe bytes
+ * written to a console OUTPUT handle. Only stdout/stderr with
+ * ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) feed the tracker — on
+ * the stdin handle the same bit means ENABLE_ECHO_INPUT, so input
+ * handles never reach the mirror. */
+void kernel32_console_vt_observe(HANDLE h, const void* buf, DWORD len)
+{
+    const unsigned long long raw = (unsigned long long)(UINT_PTR)h;
+    if (raw != 0xFFFFFFF5ULL && raw != 0xFFFFFFF4ULL) /* STD_OUTPUT / STD_ERROR only */
+        return;
+    if ((kernel32_console_mode_of(h) & 0x4u) == 0)
+        return;
+    duetos_cvt_feed(&g_console_mirror, (const unsigned char*)buf, len);
+}
 
 /* Emit raw bytes to stdout via SYS_WRITE(fd=1). Used by
  * SetConsoleCursorPosition, SetConsoleTextAttribute and
@@ -583,17 +604,21 @@ __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_S
     (void)h;
     if (info == (DUETOS_CONSOLE_SBI*)0)
         return 0;
-    info->cols = 80;
-    info->rows = 25;
-    info->cur_x = g_console_cur_x;
-    info->cur_y = g_console_cur_y;
-    info->attrs = g_console_attrs;
+    info->cols = g_console_mirror.cols;
+    info->rows = g_console_mirror.rows;
+    /* The tracker uses deferred wrap (cursor may sit at x == cols
+     * after filling the last column, like the kernel Terminal);
+     * Win32 reports the cursor inside the buffer, so clamp. */
+    info->cur_x =
+        (g_console_mirror.cur_x >= g_console_mirror.cols) ? (short)(g_console_mirror.cols - 1) : g_console_mirror.cur_x;
+    info->cur_y = g_console_mirror.cur_y;
+    info->attrs = g_console_mirror.attrs;
     info->win_left = 0;
     info->win_top = 0;
-    info->win_right = 79;
-    info->win_bot = 24;
-    info->max_cols = 80;
-    info->max_rows = 25;
+    info->win_right = (short)(g_console_mirror.cols - 1);
+    info->win_bot = (short)(g_console_mirror.rows - 1);
+    info->max_cols = g_console_mirror.cols;
+    info->max_rows = g_console_mirror.rows;
     return 1;
 }
 
@@ -612,8 +637,8 @@ typedef struct
 __declspec(dllexport) BOOL SetConsoleCursorPosition(HANDLE h, DUETOS_COORD pos)
 {
     (void)h;
-    g_console_cur_x = pos.x;
-    g_console_cur_y = pos.y;
+    g_console_mirror.cur_x = pos.x;
+    g_console_mirror.cur_y = pos.y;
     /* Emit ANSI CUP: ESC [ <row+1> ; <col+1> H */
     char esc[24];
     int p = 0;
@@ -678,7 +703,7 @@ static unsigned short win32_color_to_ansi_idx(unsigned short c)
 __declspec(dllexport) BOOL SetConsoleTextAttribute(HANDLE h, unsigned short attrs)
 {
     (void)h;
-    g_console_attrs = attrs;
+    g_console_mirror.attrs = attrs;
     /* Emit ANSI SGR: ESC [ 0 ; <fg> ; <bg> m */
     unsigned short fg3 = attrs & 0x07;
     int fg_bright = (attrs & 0x08) ? 1 : 0;
@@ -754,13 +779,8 @@ __declspec(dllexport) BOOL FillConsoleOutputCharacterW(HANDLE h, wchar_t16 ch, D
     return FillConsoleOutputCharacterA(h, (char)(ch & 0xFF), count, origin, written);
 }
 
-__declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE h, DWORD* count)
-{
-    (void)h;
-    if (count != (DWORD*)0)
-        *count = 0; /* No queued console input under emulator. */
-    return 1;
-}
+/* GetNumberOfConsoleInputEvents moved to kernel32_console.c, which
+ * owns the INPUT_RECORD queue it reports on. */
 
 /* ------------------------------------------------------------------
  * Local-time conversion

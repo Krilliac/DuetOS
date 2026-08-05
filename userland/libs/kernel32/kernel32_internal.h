@@ -69,6 +69,17 @@ unsigned long long duet_compat_query(void);
 long long syscall_get_tid(void);
 void syscall_yield(void);
 
+/* Console cross-TU helpers.
+ * kernel32_console_mode_of — per-std-handle console mode word
+ * (kernel32_interlocked.c owns the mode table). Returns the
+ * stdout-shaped default 0x03 for non-console handles.
+ * kernel32_console_vt_observe — feed bytes just written to a
+ * console OUTPUT handle into the screen-buffer mirror's VT tracker
+ * (kernel32_locale.c owns the mirror). No-op unless the handle is
+ * stdout/stderr with ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) set. */
+DWORD kernel32_console_mode_of(HANDLE h);
+void kernel32_console_vt_observe(HANDLE h, const void* buf, DWORD len);
+
 /* Exported entry points called from a different slice than the one
  * that defines them — declared here so the caller's TU sees a
  * prototype (the definition stays in its domain slice). */

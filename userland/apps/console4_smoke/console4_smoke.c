@@ -8,7 +8,7 @@
  *   SetConsoleCursorPosition (emits ANSI escape)
  *   SetConsoleTextAttribute (emits ANSI SGR)
  *   FillConsoleOutputCharacterA (emits fill)
- *   ReadConsoleA (returns immediately, v0 stub)
+ *   ReadConsoleA (real blocking read; only attempted when input is queued)
  */
 #include <windows.h>
 
@@ -91,13 +91,24 @@ void __cdecl mainCRTStartup(void)
         Out(ok && written == 80u * 25u ? "PASS\r\n" : "FAIL\r\n");
     }
 
-    /* 7. ReadConsoleA — v0 stub returns immediately with 0 chars. */
+    /* 7. ReadConsoleA — now a real blocking read. Probe the input queue
+     * first so an unattended boot doesn't wedge waiting for a keypress;
+     * only attempt the read when input is already queued. */
     {
-        char buf[16] = {0};
-        DWORD nRead = 0xFFFF;
-        BOOL ok = ReadConsoleA(in, buf, sizeof(buf), &nRead, NULL);
-        Out("[console4_smoke] ReadConsoleA stub      = ");
-        Out(ok && nRead == 0 ? "PASS\r\n" : "FAIL\r\n");
+        DWORD nEvents = 0xFFFF;
+        BOOL ok = GetNumberOfConsoleInputEvents(in, &nEvents);
+        Out("[console4_smoke] ReadConsoleA           = ");
+        if (ok && nEvents == 0)
+        {
+            Out("PASS (no input queued; blocking read skipped)\r\n");
+        }
+        else
+        {
+            char buf[16] = {0};
+            DWORD nRead = 0;
+            BOOL rok = ReadConsoleA(in, buf, sizeof(buf), &nRead, NULL);
+            Out(rok ? "PASS\r\n" : "FAIL\r\n");
+        }
     }
 
     Out("[console4_smoke] done\r\n");

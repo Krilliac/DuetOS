@@ -42,6 +42,7 @@ SRC_FILES=(
     "${SRC_DIR}/kernel32_env.c"
     "${SRC_DIR}/kernel32_locale.c"
     "${SRC_DIR}/kernel32_io.c"
+    "${SRC_DIR}/kernel32_console.c"
     "${SRC_DIR}/kernel32_sync.c"
     "${SRC_DIR}/kernel32_fs.c"
     "${SRC_DIR}/kernel32_psapi.c"
@@ -250,6 +251,11 @@ set +e
     /export:FillConsoleOutputCharacterA \
     /export:FillConsoleOutputCharacterW \
     /export:GetNumberOfConsoleInputEvents \
+    /export:ReadConsoleInputA \
+    /export:ReadConsoleInputW \
+    /export:PeekConsoleInputA \
+    /export:PeekConsoleInputW \
+    /export:FlushConsoleInputBuffer \
     /export:CreateFileMappingW \
     /export:OpenFileMappingW \
     /export:MapViewOfFile \

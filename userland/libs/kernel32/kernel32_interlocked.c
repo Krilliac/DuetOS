@@ -140,6 +140,16 @@ static int console_mode_index(HANDLE h)
     return -1;
 }
 
+/* Cross-TU accessor (declared in kernel32_internal.h): the console
+ * VT tracker (kernel32_locale.c) and the console-input surface
+ * (kernel32_console.c) key their behaviour off the per-handle mode
+ * word this TU owns. Same defaulting as GetConsoleMode below. */
+DWORD kernel32_console_mode_of(HANDLE h)
+{
+    const int idx = console_mode_index(h);
+    return (idx >= 0) ? g_console_mode[idx] : 0x03u;
+}
+
 __declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
 {
     if (lpMode == (DWORD*)0)
