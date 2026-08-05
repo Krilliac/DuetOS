@@ -107,6 +107,7 @@ struct MemDC
     u32 text_color;      // 0x00RRGGBB (unpacked from COLORREF on set)
     u32 bk_color;        // 0x00RRGGBB
     u8 bk_mode;          // kBkModeTransparent (default) or kBkModeOpaque
+    u8 rop2;             // R2_* binary raster op (kRop2CopyPen default)
     i32 cur_x;           // DC current position, set by MoveToEx, read by LineTo
     i32 cur_y;
 };
@@ -224,6 +225,12 @@ bool GdiDeleteObject(u64 hobj); // works on any GDI object kind
 // bitmap extents but do not reject arbitrary inputs.
 void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb);
 
+/// ROP2-aware variants: apply the DC's binary raster op per pixel
+/// (Rop2Apply in gdi_surface_math.h). The plain helpers above are
+/// thin wrappers with kRop2CopyPen.
+void GdiPaintRectOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u8 rop2);
+void GdiDrawLineOnBitmapRop(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb, u8 rop2);
+
 /// Paint NUL-terminated ASCII into `bmp` using the 8x8 bitmap font.
 /// `fg` inks glyph pixels; `bg` paints the glyph cell background if
 /// `opaque` is true. Stops at the first NUL or when the next glyph
@@ -269,6 +276,7 @@ struct WindowDcState
     u64 selected_pen;
     u64 selected_brush;
     u64 selected_font;
+    u8 rop2; // R2_* binary raster op (kRop2CopyPen default)
     i32 cur_x;
     i32 cur_y;
 };
@@ -285,6 +293,7 @@ WindowDcState* GdiWindowDcState(u32 public_hwnd);
 u32 GdiSetTextColor(u64 hdc, u32 rgb); // returns previous
 u32 GdiSetBkColor(u64 hdc, u32 rgb);   // returns previous
 u8 GdiSetBkMode(u64 hdc, u8 mode);     // returns previous
+u8 GdiSetRop2(u64 hdc, u8 mode);       // returns previous; 0 on bad mode
 
 // Syscall dispatchers.
 void DoGdiCreateCompatibleDC(arch::TrapFrame* frame);
@@ -309,6 +318,7 @@ void DoGdiGetSysColor(arch::TrapFrame* frame);
 void DoGdiGetSysColorBrush(arch::TrapFrame* frame);
 void DoGdiCreateFont(arch::TrapFrame* frame);
 void DoGdiGetTextMetrics(arch::TrapFrame* frame);
+void DoGdiSetRop2(arch::TrapFrame* frame);
 
 // System palette — Win32 COLOR_* indices 0..30. Returns a
 // Classic-theme COLORREF or 0x00C0C0C0 for unknown indices.

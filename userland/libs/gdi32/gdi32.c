@@ -139,6 +139,51 @@ static HANDLE gdi32_hwnd_from_hdc(HDC dc)
     return (HANDLE)(v & ~GDI_TAG);
 }
 
+/* --- DC clip state (forward declarations) ------------------------
+ *
+ * The clip engine (per-DC clip-region pool + the SelectClipRgn /
+ * ExtSelectClipRgn / IntersectClipRect / ExcludeClipRect family) is
+ * defined with the Region API at the end of this file; the draw
+ * wrappers above it consult these three helpers. All return "draw
+ * everything" answers when the DC has no clip region set. */
+static int gdi32_clip_pt_visible(HDC dc, INT x, INT y);
+static int gdi32_clip_rect_visible(HDC dc, INT l, INT t, INT r, INT b);
+/* Intersect [l,t,r,b) with the DC clip. Returns the piece count
+ * written to `out`, or -1 when the DC has no clip (caller draws the
+ * original rect unclipped). */
+static int gdi32_clip_fill_pieces(HDC dc, INT l, INT t, INT r, INT b, RECT* out, int cap);
+static void gdi32_clip_release(HDC dc);
+
+/* --- ROP2 shadow -------------------------------------------------
+ *
+ * The kernel stores a per-DC rop2 for memory-DC drawing
+ * (SYS_GDI_SET_ROP2); this user-side shadow answers GetROP2 and
+ * drives the window-DC colour transform below. Module-global like
+ * g_bk_mode — same single-DC-at-a-time limitation. */
+#define GDI32_R2_BLACK 1
+#define GDI32_R2_NOT 6
+#define GDI32_R2_XORPEN 7
+#define GDI32_R2_COPYPEN 13
+#define GDI32_R2_WHITE 16
+
+static INT g_rop2 = GDI32_R2_COPYPEN;
+
+/* Window-DC drawing goes through the compositor display list, which
+ * carries a colour but no raster op — so the only ROP2 modes a
+ * window DC can honour are the ones expressible as a colour:
+ * R2_BLACK and R2_WHITE.
+ * GAP: R2_NOT / R2_XORPEN on a window DC draw with the pen colour
+ * (no destination read-back path) — memory-DC drawing honours them
+ * in the kernel. */
+static COLORREF gdi32_rop2_colour(COLORREF c)
+{
+    if (g_rop2 == GDI32_R2_BLACK)
+        return 0x00000000;
+    if (g_rop2 == GDI32_R2_WHITE)
+        return 0x00FFFFFF;
+    return c;
+}
+
 /* --- DC management --- */
 __declspec(dllexport) HDC GetDC(HANDLE hWnd)
 {
@@ -151,7 +196,9 @@ __declspec(dllexport) HDC GetWindowDC(HANDLE hWnd)
 __declspec(dllexport) INT ReleaseDC(HANDLE hWnd, HDC dc)
 {
     (void)hWnd;
-    (void)dc;
+    /* Common-DC semantics: attributes (incl. the clip region) reset
+     * between GetDC / ReleaseDC pairs. */
+    gdi32_clip_release(dc);
     return 1;
 }
 /* CreateCompatibleDC — allocates a kernel-side MemDC (no pixel
@@ -170,6 +217,8 @@ __declspec(dllexport) BOOL DeleteDC(HDC dc)
 {
     if (dc == (HDC)0)
         return 0;
+    /* A recycled kernel DC handle must not inherit this DC's clip. */
+    gdi32_clip_release(dc);
     /* GDI_TAG-wrapped HDCs (window DCs) are not kernel-tracked;
      * succeed silently. Real memory DCs get released. */
     if (((unsigned long long)dc & GDI_TAG) == GDI_TAG)
@@ -824,6 +873,7 @@ static COLORREF gdi32_brush_colour(HBRUSH br)
  * y, w, h, colour. r8 / r9 via register vars. */
 static BOOL gdi32_rect_core(unsigned num, HANDLE hwnd, INT x, INT y, INT w, INT h, COLORREF colour)
 {
+    colour = gdi32_rop2_colour(colour);
     register long long r10_w asm("r10") = (long long)w;
     register long long r8_h asm("r8") = (long long)h;
     register long long r9_c asm("r9") = (long long)(unsigned long long)colour;
@@ -937,6 +987,9 @@ __declspec(dllexport) INT DrawTextA(HDC dc, const char* text, INT len, void* r, 
         return 0;
     RECT* rc = (RECT*)r;
     unsigned n = gdi32_strnlen(text, len);
+    /* GAP: text clip is whole-run reject on the 8x8 cell bbox. */
+    if (!gdi32_clip_rect_visible(dc, rc->left, rc->top, rc->left + (INT)n * 8, rc->top + 8))
+        return 8;
     /* Default text colour is black — real GDI uses the DC's
      * stored text colour; v0 ignores SetTextColor. */
     gdi32_text_core(hwnd, rc->left, rc->top, text, n, 0);
@@ -946,6 +999,12 @@ __declspec(dllexport) INT DrawTextW(HDC dc, const wchar_t16* text, INT len, void
 {
     if (!r || !text)
         return 0;
+    /* GAP: clip-region text clip is whole-rect reject. */
+    {
+        const RECT* rc = (const RECT*)r;
+        if (!gdi32_clip_rect_visible(dc, rc->left, rc->top, rc->right, rc->bottom))
+            return 8; /* nominal row height — nothing drawn */
+    }
     /* The kernel handler accepts the HDC directly (memDC tag or
      * window-DC raw handle), copies in `rdx` wchar_ts, downcodes
      * non-ASCII to '?', and applies DT_CENTER / DT_VCENTER /
@@ -1032,6 +1091,9 @@ __declspec(dllexport) BOOL ExtTextOutA(HDC dc, INT x, INT y, UINT opts, const vo
      * "failed". */
     if (!gdi32_eto_clip(opts, r, &x, &y, &text, &len))
         return 1;
+    /* GAP: clip-region text clip is whole-run reject on the cell bbox. */
+    if (!gdi32_clip_rect_visible(dc, x, y, x + (INT)len * GDI_FONT_CELL_PX, y + GDI_FONT_CELL_PX))
+        return 1;
     return gdi32_text_core(hwnd, x, y, text, len, 0);
 }
 __declspec(dllexport) BOOL ExtTextOutW(HDC dc, INT x, INT y, UINT opts, const void* r, const wchar_t16* text, UINT len,
@@ -1057,6 +1119,9 @@ __declspec(dllexport) BOOL ExtTextOutW(HDC dc, INT x, INT y, UINT opts, const vo
     UINT clipped_len = n;
     if (!gdi32_eto_clip(opts, r, &x, &y, &clipped_text, &clipped_len))
         return 1;
+    /* GAP: clip-region text clip is whole-run reject on the cell bbox. */
+    if (!gdi32_clip_rect_visible(dc, x, y, x + (INT)clipped_len * GDI_FONT_CELL_PX, y + GDI_FONT_CELL_PX))
+        return 1;
     return gdi32_text_core(hwnd, x, y, clipped_text, clipped_len, 0);
 }
 __declspec(dllexport) BOOL TextOutA(HDC dc, INT x, INT y, const char* text, INT len)
@@ -1065,6 +1130,9 @@ __declspec(dllexport) BOOL TextOutA(HDC dc, INT x, INT y, const char* text, INT 
     if (!hwnd)
         return 0;
     unsigned n = gdi32_strnlen(text, len);
+    /* GAP: text clip is whole-run reject on the 8x8 cell bbox. */
+    if (!gdi32_clip_rect_visible(dc, x, y, x + (INT)n * GDI_FONT_CELL_PX, y + GDI_FONT_CELL_PX))
+        return 1;
     return gdi32_text_core(hwnd, x, y, text, n, 0);
 }
 __declspec(dllexport) BOOL TextOutW(HDC dc, INT x, INT y, const wchar_t16* text, INT len)
@@ -1082,6 +1150,9 @@ __declspec(dllexport) BOOL TextOutW(HDC dc, INT x, INT y, const wchar_t16* text,
         buf[n] = (c > 0 && c < 0x7F) ? (char)c : '?';
     }
     buf[n] = 0;
+    /* GAP: text clip is whole-run reject on the 8x8 cell bbox. */
+    if (!gdi32_clip_rect_visible(dc, x, y, x + (INT)n * GDI_FONT_CELL_PX, y + GDI_FONT_CELL_PX))
+        return 1;
     return gdi32_text_core(hwnd, x, y, buf, n, 0);
 }
 __declspec(dllexport) INT FillRect(HDC dc, const void* r, HBRUSH br)
@@ -1095,7 +1166,18 @@ __declspec(dllexport) INT FillRect(HDC dc, const void* r, HBRUSH br)
     if (w <= 0 || h <= 0)
         return 1;
     COLORREF col = gdi32_brush_colour(br);
-    return gdi32_rect_core(SYS_GDI_FILL_RECT, hwnd, rc->left, rc->top, w, h, col) ? 1 : 0;
+    /* Clip enforcement: a fill decomposes exactly — one kernel fill
+     * per surviving clip piece. */
+    RECT pieces[8];
+    int np = gdi32_clip_fill_pieces(dc, rc->left, rc->top, rc->right, rc->bottom, pieces, 8);
+    if (np < 0)
+        return gdi32_rect_core(SYS_GDI_FILL_RECT, hwnd, rc->left, rc->top, w, h, col) ? 1 : 0;
+    for (int i = 0; i < np; ++i)
+    {
+        (void)gdi32_rect_core(SYS_GDI_FILL_RECT, hwnd, pieces[i].left, pieces[i].top, pieces[i].right - pieces[i].left,
+                              pieces[i].bottom - pieces[i].top, col);
+    }
+    return 1; /* fully clipped out == succeeded at drawing nothing */
 }
 __declspec(dllexport) INT FrameRect(HDC dc, const void* r, HBRUSH br)
 {
@@ -1106,6 +1188,10 @@ __declspec(dllexport) INT FrameRect(HDC dc, const void* r, HBRUSH br)
     INT w = rc->right - rc->left;
     INT h = rc->bottom - rc->top;
     if (w <= 0 || h <= 0)
+        return 1;
+    /* GAP: outline clip is whole-shape reject only — a partially
+     * clipped frame draws its full outline. */
+    if (!gdi32_clip_rect_visible(dc, rc->left, rc->top, rc->right, rc->bottom))
         return 1;
     COLORREF col = gdi32_brush_colour(br);
     return gdi32_rect_core(SYS_GDI_RECTANGLE, hwnd, rc->left, rc->top, w, h, col) ? 1 : 0;
@@ -1125,6 +1211,7 @@ typedef struct
 
 static BOOL gdi32_line_core(HANDLE hwnd, INT x0, INT y0, INT x1, INT y1, COLORREF col)
 {
+    col = gdi32_rop2_colour(col);
     register long long r10_x1 asm("r10") = (long long)x1;
     register long long r8_y1 asm("r8") = (long long)y1;
     register long long r9_c asm("r9") = (long long)(unsigned long long)col;
@@ -1263,7 +1350,16 @@ __declspec(dllexport) BOOL LineTo(HDC dc, INT x, INT y)
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
-    BOOL rv = gdi32_line_core(hwnd, g_cur_x, g_cur_y, x, y, 0);
+    /* Clip: skip the draw when the segment's bounding box misses the
+     * clip entirely; the current position still advances.
+     * GAP: a partially clipped segment draws in full (no span clip). */
+    INT bl = g_cur_x < x ? g_cur_x : x;
+    INT br2 = g_cur_x > x ? g_cur_x : x;
+    INT bt = g_cur_y < y ? g_cur_y : y;
+    INT bb = g_cur_y > y ? g_cur_y : y;
+    BOOL rv = 1;
+    if (gdi32_clip_rect_visible(dc, bl, bt, br2 + 1, bb + 1))
+        rv = gdi32_line_core(hwnd, g_cur_x, g_cur_y, x, y, 0);
     g_cur_x = x;
     g_cur_y = y;
     return rv;
@@ -1287,8 +1383,16 @@ __declspec(dllexport) BOOL Polyline(HDC dc, const void* pts, INT n)
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
+    /* Clip: per-segment bounding-box reject.
+     * GAP: partially clipped segments draw in full. */
     for (INT i = 0; i + 1 < n; ++i)
     {
+        INT bl = p[i].x < p[i + 1].x ? p[i].x : p[i + 1].x;
+        INT br2 = p[i].x > p[i + 1].x ? p[i].x : p[i + 1].x;
+        INT bt = p[i].y < p[i + 1].y ? p[i].y : p[i + 1].y;
+        INT bb = p[i].y > p[i + 1].y ? p[i].y : p[i + 1].y;
+        if (!gdi32_clip_rect_visible(dc, bl, bt, br2 + 1, bb + 1))
+            continue;
         (void)gdi32_line_core(hwnd, p[i].x, p[i].y, p[i + 1].x, p[i + 1].y, 0);
     }
     return 1;
@@ -1313,7 +1417,13 @@ __declspec(dllexport) BOOL Polygon(HDC dc, const void* pts, INT n)
     if (!hwnd)
         return 0;
     Polyline(dc, pts, n);
-    (void)gdi32_line_core(hwnd, p[n - 1].x, p[n - 1].y, p[0].x, p[0].y, 0);
+    /* Closing edge gets the same per-segment clip reject. */
+    INT bl = p[n - 1].x < p[0].x ? p[n - 1].x : p[0].x;
+    INT br2 = p[n - 1].x > p[0].x ? p[n - 1].x : p[0].x;
+    INT bt = p[n - 1].y < p[0].y ? p[n - 1].y : p[0].y;
+    INT bb = p[n - 1].y > p[0].y ? p[n - 1].y : p[0].y;
+    if (gdi32_clip_rect_visible(dc, bl, bt, br2 + 1, bb + 1))
+        (void)gdi32_line_core(hwnd, p[n - 1].x, p[n - 1].y, p[0].x, p[0].y, 0);
     return 1;
 }
 /* Win32 Rectangle paints a bordered outline + fills the interior
@@ -1328,6 +1438,9 @@ __declspec(dllexport) BOOL Rectangle(HDC dc, INT l, INT t, INT r, INT b)
     INT h = b - t;
     if (w <= 0 || h <= 0)
         return 1;
+    /* GAP: outline clip is whole-shape reject only. */
+    if (!gdi32_clip_rect_visible(dc, l, t, r, b))
+        return 1;
     return gdi32_rect_core(SYS_GDI_RECTANGLE, hwnd, l, t, w, h, 0);
 }
 __declspec(dllexport) BOOL Ellipse(HDC dc, INT l, INT t, INT r, INT b)
@@ -1339,6 +1452,9 @@ __declspec(dllexport) BOOL Ellipse(HDC dc, INT l, INT t, INT r, INT b)
     INT h = b - t;
     if (w <= 0 || h <= 0)
         return 1;
+    /* GAP: ellipse clip is whole-shape reject only. */
+    if (!gdi32_clip_rect_visible(dc, l, t, r, b))
+        return 1;
     return gdi32_rect_core(SYS_GDI_ELLIPSE, hwnd, l, t, w, h, 0);
 }
 
@@ -1347,6 +1463,11 @@ __declspec(dllexport) COLORREF SetPixel(HDC dc, INT x, INT y, COLORREF col)
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return (COLORREF)-1;
+    /* Clip enforcement is exact for single pixels. A clipped-out
+     * pixel is a successful no-op. */
+    if (!gdi32_clip_pt_visible(dc, x, y))
+        return col;
+    col = gdi32_rop2_colour(col);
     register long long r10_c asm("r10") = (long long)(unsigned long long)col;
     long long rv;
     __asm__ volatile("int $0x80"
@@ -1631,54 +1752,31 @@ __declspec(dllexport) BOOL GetCharWidth32W(HDC dc, UINT first, UINT last, INT* w
     return GetCharWidth32A(dc, first, last, widths);
 }
 
-/* SetROP2 / GetROP2 — drawing-mode setter. R2_COPYPEN (13) is
- * the universal default; accept any set, return previous. */
+/* SetROP2 / GetROP2 — binary raster op. The kernel keeps a per-DC
+ * rop2 that the memory-DC paint helpers honour (R2_BLACK / R2_NOT /
+ * R2_XORPEN / R2_COPYPEN / R2_WHITE); the user shadow answers
+ * GetROP2 and drives the window-DC colour transform (see
+ * gdi32_rop2_colour). */
+#define SYS_GDI_SET_ROP2 229
+
 __declspec(dllexport) INT SetROP2(HDC dc, INT mode)
 {
-    (void)dc;
-    (void)mode;
-    return 13;
+    if (mode < 1 || mode > 16)
+        return 0;
+    (void)gdi32_syscall2(SYS_GDI_SET_ROP2, (long long)(unsigned long long)dc, (long long)mode);
+    INT prev = g_rop2;
+    g_rop2 = mode;
+    return prev;
 }
 __declspec(dllexport) INT GetROP2(HDC dc)
 {
     (void)dc;
-    return 13;
+    return g_rop2;
 }
 
-/* GetClipBox — fill the RECT with a "cover everything" extent.
- * Returns SIMPLEREGION (2). */
-__declspec(dllexport) INT GetClipBox(HDC dc, RECT* r)
-{
-    (void)dc;
-    if (r)
-    {
-        r->left = 0;
-        r->top = 0;
-        r->right = 1024;
-        r->bottom = 768;
-    }
-    return 2;
-}
-
-__declspec(dllexport) INT IntersectClipRect(HDC dc, INT l, INT t, INT r, INT b)
-{
-    (void)dc;
-    (void)l;
-    (void)t;
-    (void)r;
-    (void)b;
-    return 2; /* SIMPLEREGION */
-}
-
-__declspec(dllexport) INT ExcludeClipRect(HDC dc, INT l, INT t, INT r, INT b)
-{
-    (void)dc;
-    (void)l;
-    (void)t;
-    (void)r;
-    (void)b;
-    return 2;
-}
+/* GetClipBox / IntersectClipRect / ExcludeClipRect are implemented
+ * with the DC clip engine at the end of this file (they need the
+ * clip pool that lives below the Region API). */
 
 __declspec(dllexport) INT SetStretchBltMode(HDC dc, INT mode)
 {
@@ -1929,14 +2027,15 @@ __declspec(dllexport) INT GetPath(HDC dc, void* pts, unsigned char* types, INT b
  * fixed pool, tagged GDI_RGN_TAG so DeleteObject can free the slot
  * and the kernel-bitmap branch never mistakes it for a bitmap.
  *
+ * CombineRgn runs the exact rect-list set algebra from
+ * gdi32_region.h (AND = pairwise intersection, DIFF = band
+ * subtraction, OR/XOR = disjoint composition) and only collapses to
+ * a bounding-box over-approximation when the exact result exceeds
+ * GDI_RGN_MAX_RECTS rects.
+ *
  * GAP: GDI_RGN_SLOTS regions / GDI_RGN_MAX_RECTS rects each —
- * CreateRectRgn over capacity returns NULL.
- * GAP: RGN_AND / RGN_OR / RGN_XOR / RGN_DIFF on multi-rect inputs
- * collapse to the bounding-box of the exact-rectangle result (no
- * rectangle-decomposition coalescing). RGN_COPY and the single-
- * rect cases are exact; complex multi-rect set algebra is the
- * deferred bit — revisit when a caller needs pixel-exact regions
- * (e.g. non-rectangular window clipping).
+ * CreateRectRgn over capacity returns NULL; over-capacity combine
+ * results collapse to a bounding box (see CombineRgn).
  */
 #define GDI_RGN_SLOTS 16
 #define GDI_RGN_MAX_RECTS 8
@@ -1969,6 +2068,26 @@ typedef struct
 } GdiRegion;
 
 static GdiRegion g_regions[GDI_RGN_SLOTS];
+
+/* Defined below CombineRgn (kept near their historical position);
+ * forward-declared so CombineRgn can use the exact set algebra. */
+static int gdi32_rgn_copy_rects(const GdiRegion* rg, GdiRgnRect* out);
+static INT gdi32_rgn_complexity(const GdiRegion* rg);
+
+/* Store an exact rect-list result into a destination region. */
+static void gdi32_rgn_store(GdiRegion* dst, const GdiRgnRect* rects, int count)
+{
+    if (count > GDI_RGN_MAX_RECTS)
+        count = GDI_RGN_MAX_RECTS;
+    dst->count = count;
+    for (int i = 0; i < count; ++i)
+    {
+        dst->rects[i].left = rects[i].left;
+        dst->rects[i].top = rects[i].top;
+        dst->rects[i].right = rects[i].right;
+        dst->rects[i].bottom = rects[i].bottom;
+    }
+}
 
 /* Map an HRGN back to its pool slot, or NULL if the handle isn't
  * one of ours / is stale. */
@@ -2102,76 +2221,80 @@ __declspec(dllexport) INT CombineRgn(HRGN hDst, HRGN hSrc1, HRGN hSrc2, INT mode
     if (!s2)
         return RGN_ERROR;
 
-    RECT b1, b2;
-    int have1 = gdi32_rgn_bbox(s1, &b1);
-    int have2 = gdi32_rgn_bbox(s2, &b2);
-    RECT result = {0, 0, 0, 0};
-    int empty = 1;
-
+    /* Exact rect-list set algebra (gdi32_region.h). The sources are
+     * copied out first, so hDst may alias either source (Win32 allows
+     * CombineRgn(h, h, other, ...)). */
+    GdiRgnRect ra[GDI_RGN_MAX_RECTS];
+    GdiRgnRect rb[GDI_RGN_MAX_RECTS];
+    GdiRgnRect res[GDI_RGN_MAX_RECTS];
+    const int na = gdi32_rgn_copy_rects(s1, ra);
+    const int nb = gdi32_rgn_copy_rects(s2, rb);
+    int nres;
     switch (mode)
     {
-    case RGN_OR:
-    case RGN_XOR:
-        /* GAP: OR/XOR collapse to the union bounding box of both
-         * sources rather than an exact rect decomposition. */
-        if (have1 && have2)
-        {
-            result.left = b1.left < b2.left ? b1.left : b2.left;
-            result.top = b1.top < b2.top ? b1.top : b2.top;
-            result.right = b1.right > b2.right ? b1.right : b2.right;
-            result.bottom = b1.bottom > b2.bottom ? b1.bottom : b2.bottom;
-            empty = 0;
-        }
-        else if (have1)
-        {
-            result = b1;
-            empty = 0;
-        }
-        else if (have2)
-        {
-            result = b2;
-            empty = 0;
-        }
-        break;
     case RGN_AND:
-        /* Intersection of the two bounding boxes — exact when both
-         * sources are single rects. */
-        if (have1 && have2)
-        {
-            result.left = b1.left > b2.left ? b1.left : b2.left;
-            result.top = b1.top > b2.top ? b1.top : b2.top;
-            result.right = b1.right < b2.right ? b1.right : b2.right;
-            result.bottom = b1.bottom < b2.bottom ? b1.bottom : b2.bottom;
-            empty = (result.right <= result.left || result.bottom <= result.top);
-        }
+        nres = GdiRgnIntersect(ra, na, rb, nb, res, GDI_RGN_MAX_RECTS);
+        break;
+    case RGN_OR:
+        nres = GdiRgnUnion(ra, na, rb, nb, res, GDI_RGN_MAX_RECTS);
+        break;
+    case RGN_XOR:
+        nres = GdiRgnXor(ra, na, rb, nb, res, GDI_RGN_MAX_RECTS);
         break;
     case RGN_DIFF:
-        /* GAP: DIFF returns src1's bounding box when the regions
-         * don't overlap, else empty — no partial-rect subtraction. */
-        if (have1 && !have2)
-        {
-            result = b1;
-            empty = 0;
-        }
-        else if (have1 && have2)
-        {
-            int overlap = !(b2.right <= b1.left || b2.left >= b1.right || b2.bottom <= b1.top || b2.top >= b1.bottom);
-            if (!overlap)
-            {
-                result = b1;
-                empty = 0;
-            }
-        }
+        nres = GdiRgnSubtract(ra, na, rb, nb, res, GDI_RGN_MAX_RECTS);
         break;
     default:
         return RGN_ERROR;
     }
 
     dst->used = 1;
-    if (empty)
+    if (nres >= 0)
     {
-        dst->count = 0;
-        return RGN_NULLREGION;
+        gdi32_rgn_store(dst, res, nres);
+        return gdi32_rgn_complexity(dst);
+    }
+
+    /* GAP: exact result exceeded GDI_RGN_MAX_RECTS rects — collapse
+     * to a bounding-box over-approximation (per-mode, mirroring the
+     * pre-exact behaviour). Revisit by raising GDI_RGN_MAX_RECTS if
+     * a real PE trips this. */
+    RECT b1, b2;
+    const int have1 = gdi32_rgn_bbox(s1, &b1);
+    const int have2 = gdi32_rgn_bbox(s2, &b2);
+    RECT result = {0, 0, 0, 0};
+    if (mode == RGN_AND)
+    {
+        if (have1 && have2)
+        {
+            result.left = b1.left > b2.left ? b1.left : b2.left;
+            result.top = b1.top > b2.top ? b1.top : b2.top;
+            result.right = b1.right < b2.right ? b1.right : b2.right;
+            result.bottom = b1.bottom < b2.bottom ? b1.bottom : b2.bottom;
+        }
+    }
+    else if (mode == RGN_DIFF)
+    {
+        if (have1)
+            result = b1;
+    }
+    else /* RGN_OR / RGN_XOR: union bounding box */
+    {
+        if (have1 && have2)
+        {
+            result.left = b1.left < b2.left ? b1.left : b2.left;
+            result.top = b1.top < b2.top ? b1.top : b2.top;
+            result.right = b1.right > b2.right ? b1.right : b2.right;
+            result.bottom = b1.bottom > b2.bottom ? b1.bottom : b2.bottom;
+        }
+        else if (have1)
+        {
+            result = b1;
+        }
+        else if (have2)
+        {
+            result = b2;
+        }
     }
     gdi32_rgn_set_single(dst, &result);
     return dst->count == 0 ? RGN_NULLREGION : RGN_SIMPLEREGION;
@@ -2337,44 +2460,439 @@ __declspec(dllexport) HRGN CreateEllipticRgn(INT l, INT t, INT r, INT b)
     return gdi32_rgn_handle(idx);
 }
 
-/* SelectClipRgn — set a clipping region on a DC. The kernel has no
- * clip-region enforcement path, so this records the handle but does
- * not affect drawing. Returns the region complexity. */
+/* --- DC clip regions ---------------------------------------------
+ *
+ * Per-DC clip state, keyed by HDC in a fixed pool (same pattern as
+ * the path slots). A DC with no slot has NO clip — the implicit
+ * clip is the whole device surface. A slot with count == 0 is a
+ * legitimately EMPTY clip (everything clipped out), reachable via
+ * IntersectClipRect with a disjoint rect.
+ *
+ * Enforcement is user-side, in the draw wrappers above: FillRect
+ * decomposes into one kernel fill per clip piece (exact), SetPixel
+ * tests membership (exact), and the outline / text primitives
+ * reject whole shapes by bounding box.
+ * GAP: partially clipped outlines / text / memory-DC blits draw
+ * unclipped — the kernel draw paths carry no clip region. Revisit
+ * when the compositor display list grows a clip channel.
+ */
+#define GDI_CLIP_SLOTS 8
+#define GDI_DEVICE_W 1024 /* keep in sync with GetDeviceCaps HORZRES */
+#define GDI_DEVICE_H 768  /* keep in sync with GetDeviceCaps VERTRES */
+
+typedef struct
+{
+    HDC dc; /* 0 == free slot */
+    INT count;
+    RECT rects[GDI_RGN_MAX_RECTS];
+} GdiDcClip;
+
+static GdiDcClip g_dc_clips[GDI_CLIP_SLOTS];
+
+static GdiDcClip* gdi32_clip_find(HDC dc)
+{
+    if (!dc)
+        return (GdiDcClip*)0;
+    for (int i = 0; i < GDI_CLIP_SLOTS; ++i)
+    {
+        if (g_dc_clips[i].dc == dc)
+            return &g_dc_clips[i];
+    }
+    return (GdiDcClip*)0;
+}
+
+static GdiDcClip* gdi32_clip_get(HDC dc)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (s || !dc)
+        return s;
+    for (int i = 0; i < GDI_CLIP_SLOTS; ++i)
+    {
+        if (!g_dc_clips[i].dc)
+        {
+            g_dc_clips[i].dc = dc;
+            g_dc_clips[i].count = 0;
+            return &g_dc_clips[i];
+        }
+    }
+    return (GdiDcClip*)0; /* GAP: clip pool exhausted — caller fails */
+}
+
+static void gdi32_clip_release(HDC dc)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (s)
+    {
+        s->dc = (HDC)0;
+        s->count = 0;
+    }
+}
+
+/* Copy a clip slot's rects — or, for a DC with no clip (s == NULL),
+ * the device rect — into a GdiRgnRect list of GDI_RGN_MAX_RECTS
+ * capacity. Returns the count. */
+static int gdi32_clip_base_rects(const GdiDcClip* s, GdiRgnRect* out)
+{
+    if (!s)
+    {
+        out[0].left = 0;
+        out[0].top = 0;
+        out[0].right = GDI_DEVICE_W;
+        out[0].bottom = GDI_DEVICE_H;
+        return 1;
+    }
+    int n = s->count;
+    if (n > GDI_RGN_MAX_RECTS)
+        n = GDI_RGN_MAX_RECTS;
+    for (int i = 0; i < n; ++i)
+    {
+        out[i].left = s->rects[i].left;
+        out[i].top = s->rects[i].top;
+        out[i].right = s->rects[i].right;
+        out[i].bottom = s->rects[i].bottom;
+    }
+    return n;
+}
+
+static void gdi32_clip_store(GdiDcClip* s, const GdiRgnRect* rects, int count)
+{
+    if (count > GDI_RGN_MAX_RECTS)
+        count = GDI_RGN_MAX_RECTS;
+    s->count = count;
+    for (int i = 0; i < count; ++i)
+    {
+        s->rects[i].left = rects[i].left;
+        s->rects[i].top = rects[i].top;
+        s->rects[i].right = rects[i].right;
+        s->rects[i].bottom = rects[i].bottom;
+    }
+}
+
+static INT gdi32_clip_complexity(const GdiDcClip* s)
+{
+    if (s->count == 0)
+        return RGN_NULLREGION;
+    return s->count == 1 ? RGN_SIMPLEREGION : RGN_COMPLEXREGION;
+}
+
+/* Enforcement helpers (forward-declared near the top of the file). */
+static int gdi32_clip_pt_visible(HDC dc, INT x, INT y)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+        return 1;
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, buf);
+    return GdiRgnPtIn(buf, n, x, y);
+}
+
+static int gdi32_clip_rect_visible(HDC dc, INT l, INT t, INT r, INT b)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+        return 1;
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, buf);
+    GdiRgnRect q;
+    q.left = l;
+    q.top = t;
+    q.right = r;
+    q.bottom = b;
+    if (!GdiRgnNormRect(&q))
+        return 0;
+    return GdiRgnRectIn(buf, n, &q);
+}
+
+static int gdi32_clip_fill_pieces(HDC dc, INT l, INT t, INT r, INT b, RECT* out, int cap)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+        return -1; /* no clip — caller draws the original rect */
+    GdiRgnRect base[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, base);
+    GdiRgnRect q;
+    q.left = l;
+    q.top = t;
+    q.right = r;
+    q.bottom = b;
+    if (!GdiRgnNormRect(&q))
+        return 0;
+    GdiRgnRect res[GDI_RGN_MAX_RECTS];
+    /* n disjoint rects ∩ one rect yields ≤ n pieces — cannot
+     * overflow GDI_RGN_MAX_RECTS. */
+    int m = GdiRgnIntersect(base, n, &q, 1, res, GDI_RGN_MAX_RECTS);
+    if (m < 0)
+        m = 0;
+    if (m > cap)
+        m = cap;
+    for (int i = 0; i < m; ++i)
+    {
+        out[i].left = res[i].left;
+        out[i].top = res[i].top;
+        out[i].right = res[i].right;
+        out[i].bottom = res[i].bottom;
+    }
+    return m;
+}
+
+/* SelectClipRgn — set (a COPY of) the region as the DC's clip; a
+ * NULL region resets to "no clip". Returns the resulting clip
+ * complexity. */
 __declspec(dllexport) INT SelectClipRgn(HDC dc, HRGN hrgn)
 {
-    // STUB: clip region stored but not enforced by kernel draw calls.
-    (void)dc;
+    if (!dc)
+        return RGN_ERROR;
     if (!hrgn)
-        return RGN_SIMPLEREGION; /* NULL = reset to no clip */
+    {
+        gdi32_clip_release(dc); /* NULL = reset to no clip */
+        return RGN_SIMPLEREGION;
+    }
     GdiRegion* rg = gdi32_rgn_resolve(hrgn);
     if (!rg)
         return RGN_ERROR;
-    return gdi32_rgn_complexity(rg);
+    GdiDcClip* s = gdi32_clip_get(dc);
+    if (!s)
+        return RGN_ERROR; /* GAP: clip pool exhausted */
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_rgn_copy_rects(rg, buf);
+    gdi32_clip_store(s, buf, n);
+    return gdi32_clip_complexity(s);
 }
 
-/* ExtSelectClipRgn — combine a region with the DC's current clip. */
+/* ExtSelectClipRgn — combine a region with the DC's current clip
+ * (device surface when none is set) per the RGN_* mode. */
 __declspec(dllexport) INT ExtSelectClipRgn(HDC dc, HRGN hrgn, INT mode)
 {
-    // STUB: clip region stored but not enforced by kernel draw calls.
-    (void)dc;
-    (void)mode;
+    if (!dc)
+        return RGN_ERROR;
     if (!hrgn)
+    {
+        /* A NULL region is only legal with RGN_COPY (full reset). */
+        if (mode != RGN_COPY)
+            return RGN_ERROR;
+        gdi32_clip_release(dc);
         return RGN_SIMPLEREGION;
+    }
+    if (mode == RGN_COPY)
+        return SelectClipRgn(dc, hrgn);
     GdiRegion* rg = gdi32_rgn_resolve(hrgn);
     if (!rg)
         return RGN_ERROR;
-    return gdi32_rgn_complexity(rg);
+
+    GdiRgnRect base[GDI_RGN_MAX_RECTS];
+    const int bn = gdi32_clip_base_rects(gdi32_clip_find(dc), base);
+    GdiRgnRect rr[GDI_RGN_MAX_RECTS];
+    const int rn = gdi32_rgn_copy_rects(rg, rr);
+    GdiRgnRect res[GDI_RGN_MAX_RECTS];
+    int m;
+    switch (mode)
+    {
+    case RGN_AND:
+        m = GdiRgnIntersect(base, bn, rr, rn, res, GDI_RGN_MAX_RECTS);
+        break;
+    case RGN_OR:
+        m = GdiRgnUnion(base, bn, rr, rn, res, GDI_RGN_MAX_RECTS);
+        break;
+    case RGN_XOR:
+        m = GdiRgnXor(base, bn, rr, rn, res, GDI_RGN_MAX_RECTS);
+        break;
+    case RGN_DIFF:
+        m = GdiRgnSubtract(base, bn, rr, rn, res, GDI_RGN_MAX_RECTS);
+        break;
+    default:
+        return RGN_ERROR;
+    }
+    GdiDcClip* s = gdi32_clip_get(dc);
+    if (!s)
+        return RGN_ERROR; /* GAP: clip pool exhausted */
+    if (m >= 0)
+    {
+        gdi32_clip_store(s, res, m);
+    }
+    else
+    {
+        /* GAP: exact combine overflowed GDI_RGN_MAX_RECTS — collapse
+         * to the union bounding box of both operands (over-
+         * approximation: clips less than the exact result would). */
+        GdiRgnRect b1, b2, box;
+        const int h1 = GdiRgnBBox(base, bn, &b1);
+        const int h2 = GdiRgnBBox(rr, rn, &b2);
+        box = h1 ? b1 : b2;
+        if (h1 && h2)
+        {
+            box.left = b1.left < b2.left ? b1.left : b2.left;
+            box.top = b1.top < b2.top ? b1.top : b2.top;
+            box.right = b1.right > b2.right ? b1.right : b2.right;
+            box.bottom = b1.bottom > b2.bottom ? b1.bottom : b2.bottom;
+        }
+        gdi32_clip_store(s, &box, (h1 || h2) ? 1 : 0);
+    }
+    return gdi32_clip_complexity(s);
 }
 
-/* GetClipRgn — retrieve the DC's current clip region. Returns 0 if
- * no clip region is set, 1 if one is set (copied into hrgn), -1 on
- * error. v0 never sets a clip, so this always returns 0. */
+/* GetClipRgn — copy the DC's clip into `hrgn`. Returns 0 if the DC
+ * has no clip region, 1 on success, -1 on a bad handle. */
 __declspec(dllexport) INT GetClipRgn(HDC dc, HRGN hrgn)
 {
-    // STUB: no clip region tracking in v0 — always "not set".
-    (void)dc;
-    (void)hrgn;
-    return 0;
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!dc || !rg)
+        return -1;
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+        return 0;
+    rg->count = s->count;
+    for (INT i = 0; i < s->count; ++i)
+        rg->rects[i] = s->rects[i];
+    return 1;
+}
+
+/* OffsetClipRgn — translate the DC's clip region. */
+__declspec(dllexport) INT OffsetClipRgn(HDC dc, INT dx, INT dy)
+{
+    if (!dc)
+        return RGN_ERROR;
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+        return RGN_SIMPLEREGION; /* no clip — whole surface, unmoved */
+    for (INT i = 0; i < s->count; ++i)
+    {
+        s->rects[i].left += dx;
+        s->rects[i].right += dx;
+        s->rects[i].top += dy;
+        s->rects[i].bottom += dy;
+    }
+    return gdi32_clip_complexity(s);
+}
+
+/* IntersectClipRect — shrink the clip to its intersection with the
+ * rect. With no clip set, the clip becomes rect ∩ device surface. */
+__declspec(dllexport) INT IntersectClipRect(HDC dc, INT l, INT t, INT r, INT b)
+{
+    if (!dc)
+        return RGN_ERROR;
+    GdiRgnRect base[GDI_RGN_MAX_RECTS];
+    const int bn = gdi32_clip_base_rects(gdi32_clip_find(dc), base);
+    GdiRgnRect q;
+    q.left = l;
+    q.top = t;
+    q.right = r;
+    q.bottom = b;
+    GdiRgnRect res[GDI_RGN_MAX_RECTS];
+    int m = 0;
+    if (GdiRgnNormRect(&q))
+    {
+        /* ≤ bn disjoint pieces — cannot overflow the cap. */
+        m = GdiRgnIntersect(base, bn, &q, 1, res, GDI_RGN_MAX_RECTS);
+        if (m < 0)
+            m = 0;
+    }
+    GdiDcClip* s = gdi32_clip_get(dc);
+    if (!s)
+        return RGN_ERROR; /* GAP: clip pool exhausted */
+    gdi32_clip_store(s, res, m);
+    return gdi32_clip_complexity(s);
+}
+
+/* ExcludeClipRect — remove the rect from the clip. With no clip
+ * set, the clip becomes device surface \ rect. */
+__declspec(dllexport) INT ExcludeClipRect(HDC dc, INT l, INT t, INT r, INT b)
+{
+    if (!dc)
+        return RGN_ERROR;
+    GdiDcClip* existing = gdi32_clip_find(dc);
+    GdiRgnRect q;
+    q.left = l;
+    q.top = t;
+    q.right = r;
+    q.bottom = b;
+    if (!GdiRgnNormRect(&q))
+    {
+        /* Empty rect excludes nothing. */
+        if (existing)
+            return gdi32_clip_complexity(existing);
+        return RGN_SIMPLEREGION;
+    }
+    GdiRgnRect base[GDI_RGN_MAX_RECTS];
+    const int bn = gdi32_clip_base_rects(existing, base);
+    /* bn ≤ 8 rects minus one rect → ≤ 32 pieces, which always fits
+     * GDI_RGN_WORK_CAP; only the ≤ 8 store cap can overflow. */
+    GdiRgnRect res[GDI_RGN_WORK_CAP];
+    int m = GdiRgnSubtract(base, bn, &q, 1, res, GDI_RGN_WORK_CAP);
+    GdiDcClip* s = gdi32_clip_get(dc);
+    if (!s)
+        return RGN_ERROR; /* GAP: clip pool exhausted */
+    if (m >= 0 && m <= GDI_RGN_MAX_RECTS)
+    {
+        gdi32_clip_store(s, res, m);
+    }
+    else if (m > GDI_RGN_MAX_RECTS)
+    {
+        /* GAP: exact exclusion needs more than GDI_RGN_MAX_RECTS
+         * rects — collapse to the surviving pieces' bounding box
+         * (over-approximation: the excluded band may still draw). */
+        GdiRgnRect box;
+        GdiRgnBBox(res, m, &box);
+        gdi32_clip_store(s, &box, 1);
+    }
+    else
+    {
+        /* Unreachable with the caps above; keep the base clip. */
+        gdi32_clip_store(s, base, bn);
+    }
+    return gdi32_clip_complexity(s);
+}
+
+/* GetClipBox — bounding box of the DC's clip (device surface when
+ * no clip is set). Returns the clip complexity. */
+__declspec(dllexport) INT GetClipBox(HDC dc, RECT* r)
+{
+    if (!r)
+        return RGN_ERROR;
+    GdiDcClip* s = gdi32_clip_find(dc);
+    if (!s)
+    {
+        r->left = 0;
+        r->top = 0;
+        r->right = GDI_DEVICE_W;
+        r->bottom = GDI_DEVICE_H;
+        return RGN_SIMPLEREGION;
+    }
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, buf);
+    GdiRgnRect box;
+    GdiRgnBBox(buf, n, &box);
+    r->left = box.left;
+    r->top = box.top;
+    r->right = box.right;
+    r->bottom = box.bottom;
+    return gdi32_clip_complexity(s);
+}
+
+/* PtVisible / RectVisible — visibility against the DC's clip
+ * (device surface when no clip is set). */
+__declspec(dllexport) BOOL PtVisible(HDC dc, INT x, INT y)
+{
+    GdiDcClip* s = gdi32_clip_find(dc);
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, buf);
+    return GdiRgnPtIn(buf, n, x, y) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL RectVisible(HDC dc, const RECT* prc)
+{
+    if (!prc)
+        return 0;
+    GdiDcClip* s = gdi32_clip_find(dc);
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_clip_base_rects(s, buf);
+    GdiRgnRect q;
+    q.left = prc->left;
+    q.top = prc->top;
+    q.right = prc->right;
+    q.bottom = prc->bottom;
+    if (!GdiRgnNormRect(&q))
+        return 0;
+    return GdiRgnRectIn(buf, n, &q) ? 1 : 0;
 }
 
 /* PathToRegion — convert the closed path into a region. Each subpath

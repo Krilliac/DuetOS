@@ -246,6 +246,7 @@ WindowDcState* GdiWindowDcState(u32 public_hwnd)
         s->selected_pen = 0;
         s->selected_brush = 0;
         s->selected_font = 0;
+        s->rop2 = kRop2CopyPen;
         s->cur_x = 0;
         s->cur_y = 0;
     }
@@ -427,6 +428,7 @@ u64 GdiCreateCompatibleDC()
             g_mem_dcs[i].text_color = 0x00000000;
             g_mem_dcs[i].bk_color = 0x00FFFFFF;
             g_mem_dcs[i].bk_mode = kBkModeOpaque;
+            g_mem_dcs[i].rop2 = kRop2CopyPen;
             g_mem_dcs[i].selected_pen = 0;   // implicit BLACK_PEN
             g_mem_dcs[i].selected_brush = 0; // implicit WHITE_BRUSH
             g_mem_dcs[i].cur_x = 0;
@@ -681,6 +683,30 @@ u8 GdiSetBkMode(u64 hdc, u8 mode)
     return mode;
 }
 
+u8 GdiSetRop2(u64 hdc, u8 mode)
+{
+    if (!Rop2ModeValid(mode))
+        return 0;
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc != nullptr)
+    {
+        const u8 prev = dc->rop2;
+        dc->rop2 = mode;
+        return prev;
+    }
+    if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr)
+        {
+            const u8 prev = s->rop2;
+            s->rop2 = mode;
+            return prev;
+        }
+    }
+    return mode;
+}
+
 u64 GdiSelectObject(u64 hdc, u64 hobj)
 {
     const u64 obj_tag = hobj & kGdiTagMask;
@@ -922,7 +948,7 @@ GdiUsage GdiSnapshotUsage()
 // replay — same output, just landing in a guest-owned off-screen
 // buffer rather than the framebuffer.
 
-void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+void GdiPaintRectOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u8 rop2)
 {
     if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
         return;
@@ -944,12 +970,31 @@ void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
         return;
 
     const u32 stride = bmp->pitch / 4;
+    if (!Rop2NeedsDst(rop2))
+    {
+        // Destination-independent op (COPYPEN / BLACK / WHITE and
+        // the COPYPEN fallbacks): one value, straight stores.
+        const u32 value = Rop2Apply(rop2, 0, rgb);
+        for (i64 yy = y0; yy < y1; ++yy)
+        {
+            u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
+            for (i64 xx = x0; xx < x1; ++xx)
+                row[xx] = value;
+        }
+        return;
+    }
+    // Read-modify-write ops (R2_NOT / R2_XORPEN).
     for (i64 yy = y0; yy < y1; ++yy)
     {
         u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
         for (i64 xx = x0; xx < x1; ++xx)
-            row[xx] = rgb;
+            row[xx] = Rop2Apply(rop2, row[xx], rgb);
     }
+}
+
+void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+{
+    GdiPaintRectOnBitmapRop(bmp, x, y, w, h, rgb, kRop2CopyPen);
 }
 
 void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque)
@@ -1029,7 +1074,7 @@ void GdiPaintTextOnBitmapWithFont(Bitmap* bmp, i32 x, i32 y, const char* text, u
     }
 }
 
-void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
+void GdiDrawLineOnBitmapRop(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb, u8 rop2)
 {
     if (bmp == nullptr || bmp->pixels == nullptr)
         return;
@@ -1048,7 +1093,8 @@ void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
     {
         if (x >= 0 && y >= 0 && static_cast<u32>(x) < bmp->width && static_cast<u32>(y) < bmp->height)
         {
-            bmp->pixels[static_cast<u64>(y) * stride + static_cast<u64>(x)] = rgb;
+            u32* px = bmp->pixels + static_cast<u64>(y) * stride + static_cast<u64>(x);
+            *px = Rop2Apply(rop2, *px, rgb);
         }
         if (x == x1 && y == y1)
             break;
@@ -1064,6 +1110,11 @@ void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
             y += sy;
         }
     }
+}
+
+void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
+{
+    GdiDrawLineOnBitmapRop(bmp, x0, y0, x1, y1, rgb, kRop2CopyPen);
 }
 
 void GdiBlitIntoBitmap(Bitmap* bmp, i32 dst_x, i32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px)
@@ -1191,6 +1242,12 @@ void DoGdiSetBkColor(arch::TrapFrame* frame)
 void DoGdiSetBkMode(arch::TrapFrame* frame)
 {
     frame->rax = GdiSetBkMode(frame->rdi, static_cast<u8>(frame->rsi));
+}
+
+void DoGdiSetRop2(arch::TrapFrame* frame)
+{
+    // rdi = HDC (memDC handle or raw HWND), rsi = R2_* mode.
+    frame->rax = GdiSetRop2(frame->rdi, static_cast<u8>(frame->rsi));
 }
 
 void DoGdiBitBltDC(arch::TrapFrame* frame)
@@ -1690,7 +1747,7 @@ void DoGdiLineTo(arch::TrapFrame* frame)
             Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
             if (bmp != nullptr)
             {
-                GdiDrawLineOnBitmap(bmp, dc->cur_x, dc->cur_y, x1, y1, rgb);
+                GdiDrawLineOnBitmapRop(bmp, dc->cur_x, dc->cur_y, x1, y1, rgb, dc->rop2);
                 dc->cur_x = x1;
                 dc->cur_y = y1;
                 ok = true;
@@ -1774,13 +1831,15 @@ void DoGdiPatBlt(arch::TrapFrame* frame)
             Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
             if (bmp != nullptr)
             {
-                GdiPaintRectOnBitmap(bmp, x, y, w, h, brush_rgb);
+                GdiPaintRectOnBitmapRop(bmp, x, y, w, h, brush_rgb, dc->rop2);
                 ok = true;
             }
         }
     }
     else if (tag == 0)
     {
+        // GAP: window-DC PatBlt ignores ROP2 — the compositor display
+        // list carries a colour but no raster op.
         CompositorLock();
         const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
         if (h_comp != kWindowInvalid)
@@ -1827,12 +1886,15 @@ void DoGdiRectangleFilled(arch::TrapFrame* frame)
             Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
             if (bmp != nullptr)
             {
-                GdiPaintRectOnBitmap(bmp, x, y, w, h, brush_rgb);
-                // 1-px outline via four Bresenham edges.
-                GdiDrawLineOnBitmap(bmp, x, y, x + w - 1, y, pen_rgb);
-                GdiDrawLineOnBitmap(bmp, x + w - 1, y, x + w - 1, y + h - 1, pen_rgb);
-                GdiDrawLineOnBitmap(bmp, x + w - 1, y + h - 1, x, y + h - 1, pen_rgb);
-                GdiDrawLineOnBitmap(bmp, x, y + h - 1, x, y, pen_rgb);
+                GdiPaintRectOnBitmapRop(bmp, x, y, w, h, brush_rgb, dc->rop2);
+                // 1-px outline via four Bresenham edges. Note: with a
+                // read-modify-write ROP (R2_NOT / R2_XORPEN) the four
+                // corner pixels are touched twice by adjacent edges —
+                // same artefact real GDI's polyline corners show.
+                GdiDrawLineOnBitmapRop(bmp, x, y, x + w - 1, y, pen_rgb, dc->rop2);
+                GdiDrawLineOnBitmapRop(bmp, x + w - 1, y, x + w - 1, y + h - 1, pen_rgb, dc->rop2);
+                GdiDrawLineOnBitmapRop(bmp, x + w - 1, y + h - 1, x, y + h - 1, pen_rgb, dc->rop2);
+                GdiDrawLineOnBitmapRop(bmp, x, y + h - 1, x, y, pen_rgb, dc->rop2);
                 ok = true;
             }
         }
@@ -1889,6 +1951,8 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
             Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
             if (bmp != nullptr)
             {
+                // GAP: ellipse painting ignores the DC's ROP2 (always
+                // COPYPEN) — only line/rect/fill honour it so far.
                 PaintFilledEllipseOnBitmap(bmp, x, y, w, h, brush_rgb);
                 PaintEllipseOutlineOnBitmap(bmp, x, y, w, h, pen_rgb);
                 ok = true;

@@ -215,6 +215,52 @@ constexpr BlitRect ClipBlit(i32 sx, i32 sy, i32 dx, i32 dy, i32 w, i32 h, i32 sr
     return out;
 }
 
+// --- ROP2 (binary raster op) pixel math ---------------------------
+//
+// Win32 SetROP2 codes the memory-DC paint helpers honour. Kept here
+// (not gdi_objects.h) so the hosted test test_gdi32_rop2.cpp can pin
+// the per-pixel truth table without pulling kernel headers.
+inline constexpr u8 kRop2Black = 1;    // R2_BLACK   — always 0
+inline constexpr u8 kRop2Not = 6;      // R2_NOT     — ~dst
+inline constexpr u8 kRop2XorPen = 7;   // R2_XORPEN  — dst ^ pen
+inline constexpr u8 kRop2CopyPen = 13; // R2_COPYPEN — pen (default)
+inline constexpr u8 kRop2White = 16;   // R2_WHITE   — always 1s
+
+/// Apply a binary raster op to one 0x00RRGGBB pixel. `dst` is the
+/// current surface pixel, `src` the pen/brush colour.
+/// GAP: of the 16 Win32 R2_* codes only BLACK / NOT / XORPEN /
+/// COPYPEN / WHITE are computed; the other 11 fall back to COPYPEN.
+/// Revisit when a PE draws with R2_MASKPEN-family ops.
+constexpr u32 Rop2Apply(u8 rop2, u32 dst, u32 src)
+{
+    switch (rop2)
+    {
+    case kRop2Black:
+        return 0x00000000u;
+    case kRop2White:
+        return 0x00FFFFFFu;
+    case kRop2Not:
+        return ~dst & 0x00FFFFFFu;
+    case kRop2XorPen:
+        return (dst ^ src) & 0x00FFFFFFu;
+    default:
+        return src;
+    }
+}
+
+/// True when the op reads the destination pixel (read-modify-write);
+/// false ops can precompute one value and store it straight through.
+constexpr bool Rop2NeedsDst(u8 rop2)
+{
+    return rop2 == kRop2Not || rop2 == kRop2XorPen;
+}
+
+/// True for the mode values SetROP2 accepts (Win32 R2_* range).
+constexpr bool Rop2ModeValid(u8 rop2)
+{
+    return rop2 >= 1 && rop2 <= 16;
+}
+
 /// Per-process allocation admission: would granting `want_bytes` (one
 /// more object) keep this owner inside both its object-count and its
 /// byte budget?

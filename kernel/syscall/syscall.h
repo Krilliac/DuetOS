@@ -2353,6 +2353,11 @@ enum SyscallNumber : u64
     // 1-2 derive the exact current service instance; operations 3-8 require
     // kCapServiceControl inside the mixed-policy ingress.
     SYS_SERVICE_CONTROL = 228,
+
+    // SYS_GDI_SET_ROP2 — SetROP2. rdi = HDC, rsi = R2_* mode (1..16).
+    // Sets the per-DC binary raster op consulted by the kernel draw
+    // paths (PatBlt / filled rectangle / LineTo on memory DCs).
+    SYS_GDI_SET_ROP2 = 229,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL

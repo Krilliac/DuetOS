@@ -7,7 +7,9 @@
  * handle-pool plumbing. gdi32.c owns the HRGN pool and the
  * __declspec(dllexport) wrappers; this header owns the math the
  * query/manipulation exports (GetRgnBox, PtInRegion, RectInRegion,
- * OffsetRgn, SetRectRgn, EqualRgn) are built from.
+ * OffsetRgn, SetRectRgn, EqualRgn) are built from, plus the exact
+ * combine ops (intersect / subtract / union / xor) behind
+ * CombineRgn and the DC clip engine.
  *
  * Region model: a region is a list of `count` rectangles. A
  * single-rect region is exact; multi-rect regions (CombineRgn) are
@@ -124,12 +126,17 @@ static inline int GdiRgnISqrt(long long v)
     long long bit = 1LL << 30;
     while (bit > v)
         bit >>= 2;
+    /* Binary-search accumulation: candidate bits must descend by
+     * powers of TWO for the `t*t <= v` acceptance test to be sound
+     * (the classic power-of-4 remainder algorithm has a different
+     * acceptance test). The pre-narrowing above only picks a starting
+     * point; bit > v/4 >= isqrt(v) holds for all v > 0. */
     while (bit > 0)
     {
         long long t = r + bit;
         if (t * t <= v)
             r = t;
-        bit >>= 2;
+        bit >>= 1;
     }
     return (int)r;
 }
@@ -210,6 +217,170 @@ static inline int GdiRgnEllipseRects(int left, int top, int right, int bottom, G
         ++written;
     }
     return written;
+}
+
+/* --- Combine ops (exact rect-list set algebra) -------------------
+ *
+ * All lists are assumed to hold pairwise-disjoint, normalized,
+ * non-empty rects (the invariant every producer in this header and
+ * in gdi32.c maintains). Every operation preserves that invariant:
+ * intersection of disjoint lists is disjoint; subtraction only
+ * shrinks; union is computed as a + (b \ a).
+ *
+ * Overflow contract: each op returns -1 when the exact result does
+ * not fit the caller's `cap` (or an internal work list would exceed
+ * GDI_RGN_WORK_CAP). Callers fall back to their bounding-box
+ * approximation on -1 rather than silently dropping area. */
+#define GDI_RGN_WORK_CAP 32
+
+/* Subtract rect `s` from rect `r` (both normalized, non-empty,
+ * half-open). Writes the up-to-4 disjoint surviving pieces of `r`
+ * into `out` (top band, bottom band, middle-left, middle-right).
+ * Returns the piece count: 0 when `s` covers `r`, 1 (== *r) when
+ * they do not overlap. */
+static inline int GdiRgnSubtractRect(const GdiRgnRect* r, const GdiRgnRect* s, GdiRgnRect* out)
+{
+    if (s->right <= r->left || s->left >= r->right || s->bottom <= r->top || s->top >= r->bottom)
+    {
+        out[0] = *r;
+        return 1;
+    }
+    int n = 0;
+    const int midTop = s->top > r->top ? s->top : r->top;
+    const int midBot = s->bottom < r->bottom ? s->bottom : r->bottom;
+    if (s->top > r->top)
+    {
+        out[n].left = r->left;
+        out[n].top = r->top;
+        out[n].right = r->right;
+        out[n].bottom = s->top;
+        ++n;
+    }
+    if (s->bottom < r->bottom)
+    {
+        out[n].left = r->left;
+        out[n].top = s->bottom;
+        out[n].right = r->right;
+        out[n].bottom = r->bottom;
+        ++n;
+    }
+    if (s->left > r->left)
+    {
+        out[n].left = r->left;
+        out[n].top = midTop;
+        out[n].right = s->left;
+        out[n].bottom = midBot;
+        ++n;
+    }
+    if (s->right < r->right)
+    {
+        out[n].left = s->right;
+        out[n].top = midTop;
+        out[n].right = r->right;
+        out[n].bottom = midBot;
+        ++n;
+    }
+    return n;
+}
+
+/* Pairwise intersection of two disjoint rect lists. Returns the
+ * count written to `out`, or -1 if a non-empty piece would exceed
+ * `cap`. */
+static inline int GdiRgnIntersect(const GdiRgnRect* a, int an, const GdiRgnRect* b, int bn, GdiRgnRect* out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < an; ++i)
+    {
+        for (int j = 0; j < bn; ++j)
+        {
+            const int l = a[i].left > b[j].left ? a[i].left : b[j].left;
+            const int t = a[i].top > b[j].top ? a[i].top : b[j].top;
+            const int r = a[i].right < b[j].right ? a[i].right : b[j].right;
+            const int bo = a[i].bottom < b[j].bottom ? a[i].bottom : b[j].bottom;
+            if (r > l && bo > t)
+            {
+                if (n >= cap)
+                    return -1;
+                out[n].left = l;
+                out[n].top = t;
+                out[n].right = r;
+                out[n].bottom = bo;
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+/* List subtraction a \ b. Iteratively carves every rect of `b` out
+ * of a working copy of `a`. Returns the count written to `out`, or
+ * -1 on overflow of `cap` or the internal work lists. */
+static inline int GdiRgnSubtract(const GdiRgnRect* a, int an, const GdiRgnRect* b, int bn, GdiRgnRect* out, int cap)
+{
+    GdiRgnRect cur[GDI_RGN_WORK_CAP];
+    GdiRgnRect next[GDI_RGN_WORK_CAP];
+    if (an > GDI_RGN_WORK_CAP)
+        return -1;
+    int cn = an;
+    for (int i = 0; i < an; ++i)
+        cur[i] = a[i];
+    for (int j = 0; j < bn; ++j)
+    {
+        int nn = 0;
+        for (int i = 0; i < cn; ++i)
+        {
+            GdiRgnRect pieces[4];
+            const int pc = GdiRgnSubtractRect(&cur[i], &b[j], pieces);
+            for (int k = 0; k < pc; ++k)
+            {
+                if (nn >= GDI_RGN_WORK_CAP)
+                    return -1;
+                next[nn] = pieces[k];
+                ++nn;
+            }
+        }
+        for (int i = 0; i < nn; ++i)
+            cur[i] = next[i];
+        cn = nn;
+    }
+    if (cn > cap)
+        return -1;
+    for (int i = 0; i < cn; ++i)
+        out[i] = cur[i];
+    return cn;
+}
+
+/* Disjoint union: a followed by (b \ a). Returns the count written
+ * to `out`, or -1 on overflow. `out` must not alias `a` or `b`. */
+static inline int GdiRgnUnion(const GdiRgnRect* a, int an, const GdiRgnRect* b, int bn, GdiRgnRect* out, int cap)
+{
+    GdiRgnRect extra[GDI_RGN_WORK_CAP];
+    const int en = GdiRgnSubtract(b, bn, a, an, extra, GDI_RGN_WORK_CAP);
+    if (en < 0 || an + en > cap)
+        return -1;
+    for (int i = 0; i < an; ++i)
+        out[i] = a[i];
+    for (int i = 0; i < en; ++i)
+        out[an + i] = extra[i];
+    return an + en;
+}
+
+/* Symmetric difference: (a \ b) followed by (b \ a). Returns the
+ * count written to `out`, or -1 on overflow. `out` must not alias
+ * `a` or `b`. */
+static inline int GdiRgnXor(const GdiRgnRect* a, int an, const GdiRgnRect* b, int bn, GdiRgnRect* out, int cap)
+{
+    GdiRgnRect ab[GDI_RGN_WORK_CAP];
+    GdiRgnRect ba[GDI_RGN_WORK_CAP];
+    const int nab = GdiRgnSubtract(a, an, b, bn, ab, GDI_RGN_WORK_CAP);
+    const int nba = GdiRgnSubtract(b, bn, a, an, ba, GDI_RGN_WORK_CAP);
+    if (nab < 0 || nba < 0 || nab + nba > cap)
+        return -1;
+    for (int i = 0; i < nab; ++i)
+        out[i] = ab[i];
+    for (int i = 0; i < nba; ++i)
+        out[nab + i] = ba[i];
+    return nab + nba;
 }
 
 /* 1 if the two rect lists are identical (same count, same rects in
