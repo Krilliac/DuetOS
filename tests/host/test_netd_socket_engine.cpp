@@ -175,7 +175,10 @@ void TestInitializationAndFailClosedTransport()
                   &g_engines[2], reinterpret_cast<const NetdSocketEngineInstanceIdentity*>(g_engines[2].bytes), 1),
               NETD_SOCKET_ENGINE_ALIASED_STORAGE);
     EXPECT_STREQ(NetdSocketEngineStatusName(NETD_SOCKET_ENGINE_STALE_TRANSPORT), "stale-transport");
-    EXPECT_STREQ(NetdSocketEngineStatusName(static_cast<NetdSocketEngineStatus>(0x7fff)), "unknown");
+    // 63 is inside the unfixed C enum's value range (38 enumerators -> [0,63])
+    // but is not an enumerator; larger probes like 0x7fff are outside the
+    // range and the conversion is unspecified (-Werror=conversion under GCC).
+    EXPECT_STREQ(NetdSocketEngineStatusName(static_cast<NetdSocketEngineStatus>(63)), "unknown");
 }
 
 void TestExactPeerIdentityRightsAndQuota()
