@@ -991,6 +991,10 @@ add_host_test(omnibox_classify)
 # KMalloc small-allocation slab-routing decision logic (kernel/mm/kmalloc_route.h):
 # size-class boundaries, route-header encode/decode, KFree discrimination verdicts.
 add_host_test(kmalloc_route)
+# CPU-utilisation sample ring: freestanding header
+# (kernel/sched/sched_sample_ring.h), no kernel TU. Pins the ring's
+# Push/Read/Count semantics and wrap-around ordering.
+add_host_test(sched_sample_ring)
 
 # Autonomic-policy safety shield (kernel/env/policy_shield.h): ShieldConfig
 # defaults, the one-call master toggle, ShieldApply rule-floor passthrough,

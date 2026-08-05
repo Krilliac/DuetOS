@@ -62,6 +62,7 @@
 #include "log/klog_persist.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sched/sched_sample_ring.h"
 #include "security/auth.h"
 #include "security/broker.h"
 #include "security/login.h"
@@ -113,6 +114,24 @@ void UiTickerTask(void*)
         // the FAT32 write, so a stable session writes once
         // and then idles.
         duetos::core::SessionRestoreSave();
+        // Push one CPU-utilisation sample into the global ring.
+        // Same arithmetic as the heartbeat's cpu_busy_pct but
+        // sampled every second (not every 5 s) so the sparkline
+        // has 60 s of 1 Hz history. The ring is read by the
+        // compositor (gadget column + taskbar pill) under the
+        // same thread — no lock needed.
+        {
+            const auto ss = duetos::sched::SchedStatsRead();
+            duetos::u8 pct = 0;
+            if (ss.total_ticks > 0)
+            {
+                const duetos::u64 busy = (ss.total_ticks > ss.idle_ticks) ? (ss.total_ticks - ss.idle_ticks) : 0;
+                pct = static_cast<duetos::u8>((busy * 100u) / ss.total_ticks);
+                if (pct > 100)
+                    pct = 100;
+            }
+            duetos::sched::g_cpu_sample_ring.Push(pct);
+        }
         // Push one sample into Sysmon's rolling ring. Cheap —
         // a heap stats read + a registry walk. No-op when the
         // app hasn't been initialised yet.

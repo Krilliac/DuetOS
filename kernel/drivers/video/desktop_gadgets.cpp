@@ -8,7 +8,9 @@
 #include "drivers/video/render_stats.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
+#include "mm/frame_allocator.h"
 #include "sched/sched.h"
+#include "sched/sched_sample_ring.h"
 
 namespace duetos::drivers::video
 {
