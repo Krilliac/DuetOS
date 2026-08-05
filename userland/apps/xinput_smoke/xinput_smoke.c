@@ -1,7 +1,13 @@
 /*
  * xinput_smoke — exercise xinput1_4.dll's flat C API.
- * v0 reports zero connected controllers; we PASS if the call returned
- * (any DWORD code is fine — we just need the entry point to exist).
+ *
+ * The DLL queries the kernel's HID gamepad slot table over
+ * SYS_GAMEPAD_STATE, so under QEMU (no pad attached) every slot
+ * legitimately answers ERROR_DEVICE_NOT_CONNECTED — that is the real
+ * query result, not a hardcoded stub. Attaching a USB gamepad flips
+ * the answer, which is exactly what this fixture is pinning: the
+ * codes below prove the syscall round-trip works and reports the
+ * true connection state.
  */
 #include <windows.h>
 
