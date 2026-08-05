@@ -89,6 +89,22 @@ void HpetInit()
     core::Log(core::LogLevel::Info, "arch/hpet", "main counter enabled");
 }
 
+void HpetResume()
+{
+    // No HPET on this platform — nothing to resume.
+    if (g_mmio == nullptr)
+    {
+        return;
+    }
+
+    // The counter register was reset by the S3 power transition.
+    // Re-do the halt-zero-enable sequence without touching the MMIO
+    // mapping: g_mmio and g_period_fs survive in RAM.
+    Reg(kRegGeneralConfig) = Reg(kRegGeneralConfig) & ~kConfigEnableCnf;
+    Reg(kRegMainCounter) = 0;
+    Reg(kRegGeneralConfig) = Reg(kRegGeneralConfig) | kConfigEnableCnf;
+}
+
 void HpetSelfTest()
 {
     if (g_mmio == nullptr)

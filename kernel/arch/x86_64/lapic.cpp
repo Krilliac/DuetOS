@@ -242,6 +242,34 @@ void LapicInit()
     core::LogWithValue(core::LogLevel::Info, "arch/lapic", "version", LapicRead(kLapicRegVersion));
 }
 
+void LapicResume()
+{
+    // After S3 the APIC base MSR is reset: the enable bit, x2APIC
+    // bit, and the base address all need re-writing. The cached
+    // g_x2apic / g_lapic_mmio from the first boot are still in RAM
+    // and remain correct — no MMIO arena allocation is needed.
+    u64 apic_base_msr = ReadMsr(kIa32ApicBaseMsr);
+
+    if (g_x2apic)
+    {
+        WriteMsr(kIa32ApicBaseMsr, apic_base_msr | kApicBaseEnable | kApicBaseExtd);
+    }
+    else
+    {
+        if ((apic_base_msr & kApicBaseEnable) == 0)
+        {
+            apic_base_msr |= kApicBaseEnable;
+            WriteMsr(kIa32ApicBaseMsr, apic_base_msr);
+        }
+        // g_lapic_mmio is still valid — the PTE in the page table
+        // survived S3 because RAM is not lost. No MapMmio call.
+    }
+
+    // Re-program SVR + TPR (registers were reset by the platform).
+    LapicWrite(kLapicRegTpr, 0);
+    LapicWrite(kLapicRegSvr, kSvrSoftwareEnable | kSpuriousVector);
+}
+
 void ApicModeSelfTest()
 {
     const bool cpuid_x2 = arch::CpuHas(arch::kCpuFeatX2Apic);

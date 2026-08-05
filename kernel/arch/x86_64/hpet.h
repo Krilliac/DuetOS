@@ -43,6 +43,12 @@ namespace duetos::arch
 /// HPET table.
 void HpetInit();
 
+/// Re-enable the HPET main counter after an S3 resume WITHOUT
+/// re-mapping MMIO. The g_mmio pointer from HpetInit survives in
+/// RAM. The counter register is reset by the platform, so this
+/// halts, zeroes, and re-enables it.
+void HpetResume();
+
 /// Read the 64-bit main counter. Returns 0 if HpetInit wasn't
 /// called successfully.
 u64 HpetReadCounter();

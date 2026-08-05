@@ -60,6 +60,14 @@ inline constexpr u64 kLapicRegIsrBase = 0x100;
 /// the LAPIC is not present (shouldn't happen on x86_64).
 void LapicInit();
 
+/// Re-program the LAPIC after an S3 resume WITHOUT re-mapping MMIO.
+/// The MMIO window (xAPIC) or MSR interface (x2APIC) was set up by
+/// LapicInit at first boot and survives in RAM across the power
+/// transition. This function re-enables the APIC base MSR, re-sets
+/// the spurious vector and TPR — everything the hardware reset — but
+/// does not allocate from the MMIO arena.
+void LapicResume();
+
 /// Acknowledge the in-service interrupt. Must be called by the IRQ
 /// dispatcher — handlers should NOT call EOI themselves (see traps.h).
 void LapicEoi();

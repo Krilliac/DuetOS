@@ -40,6 +40,14 @@ namespace duetos::arch
 /// IOAPICs — every modern x86_64 machine has at least one.
 void IoApicInit();
 
+/// Re-mask every IOAPIC pin after an S3 resume WITHOUT re-mapping MMIO.
+/// The MMIO pointers from IoApicInit survive in RAM. The registers
+/// themselves are reset by the platform power transition, so this
+/// re-masks every pin the same way IoApicInit does on first boot.
+/// Downstream IoApicRoute calls from device resume callbacks will
+/// unmask pins as needed.
+void IoApicResume();
+
 /// Route a Global System Interrupt to `vector` delivered to `lapic_id`.
 /// Polarity + trigger mode come from the MADT ISA override for the
 /// corresponding ISA IRQ when `isa_irq < 16`; pass `isa_irq = 0xFF` to

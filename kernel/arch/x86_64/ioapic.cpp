@@ -168,6 +168,23 @@ void IoApicInit()
                        g_ioapic_count);
 }
 
+void IoApicResume()
+{
+    // Re-mask every pin on every IOAPIC. The g_ioapics[] array and
+    // its MMIO pointers survive S3 in RAM; only the register contents
+    // are lost (the platform resets the IOAPIC on wake). Re-masking
+    // mirrors what IoApicInit does on first boot; downstream device
+    // resume callbacks will re-route and unmask the pins they own.
+    for (u64 i = 0; i < g_ioapic_count; ++i)
+    {
+        IoApic& io = g_ioapics[i];
+        for (u32 e = 0; e < io.redir_count; ++e)
+        {
+            WriteRedir(io, e, static_cast<u64>(kRedirLowMask));
+        }
+    }
+}
+
 void IoApicRoute(u32 gsi, u8 vector, u8 lapic_id, u8 isa_irq)
 {
     IoApic* io = FindForGsi(gsi);

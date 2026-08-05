@@ -82,22 +82,17 @@ void ResumePs2Mouse()
 // with its power. Runs before any device resume callback: those may
 // log, and klog timestamps come from the tick.
 //
-// GAP: each of these Init functions both re-PROGRAMS its controller
-// (which the resume genuinely needs — the registers were reset) and
-// re-MAPS its MMIO window through mm::MapMmio, which the resume does
-// not need: RAM survives S3, so the original mappings are still valid.
-// The MMIO arena is a bump allocator with no free, so every cycle
-// leaks a few pages of arena and leaves any cached pointer to the
-// previous VA pointing at a now-stale alias. Observed downstream: a
-// `s3test=1` boot faults later in VirtIO PCI probe (#PF write,
-// not-present, inside the MMIO arena). Revisit by splitting a
-// re-program-only entry point out of each Init; until then the live
-// cycle is a self-test path only, never reached on a normal boot.
+// Each Resume variant re-PROGRAMS the controller registers (which
+// the platform reset wiped) WITHOUT calling mm::MapMmio: the MMIO
+// pointers cached at first boot survive S3 in RAM. This was the
+// arena-leak bug: the Init functions both mapped AND programmed,
+// so every S3 cycle leaked bump-allocator space and stranded the
+// old VA.
 void ResumePlatform()
 {
-    arch::LapicInit();
-    arch::IoApicInit();
-    arch::HpetInit();
+    arch::LapicResume();
+    arch::IoApicResume();
+    arch::HpetResume();
     arch::TimerInit();
     arch::LapicTimerStartOnCurrent();
 }
