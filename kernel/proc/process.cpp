@@ -3734,6 +3734,43 @@ i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap)
     return static_cast<i64>(to_copy_u32);
 }
 
+i64 ProcessPeekStdin(Process* proc, void* dst_user, u64 cap)
+{
+    if (proc == nullptr)
+        return -1;
+
+    // Same focus-claim as the blocking read: a consumer that polls
+    // before ever blocking (kbhit-style loops driving
+    // GetNumberOfConsoleInputEvents) must still register as the
+    // kbd-reader's destination, or the ring it polls stays empty
+    // forever.
+    StdinFocusClaimIfEmpty(proc);
+
+    Process::StdinRing& r = proc->stdin_ring;
+    u8 scratch[Process::StdinRing::kCap];
+    u32 available = 0;
+    u32 to_copy = 0;
+
+    {
+        sync::SpinLockGuard ring_guard(r.lock);
+        available = static_cast<u32>(r.head - r.tail);
+        if (dst_user != nullptr && cap != 0 && available != 0)
+        {
+            to_copy = (cap < available) ? static_cast<u32>(cap) : available;
+            for (u32 i = 0; i < to_copy; ++i)
+                scratch[i] = r.buf[(r.tail + i) & (Process::StdinRing::kCap - 1)];
+            // Tail deliberately NOT advanced — peek never consumes.
+        }
+    }
+
+    // User access may fault and therefore occurs after dropping the
+    // ring spinlock. A failed copy consumed nothing, so plain -1 is
+    // a complete rollback.
+    if (to_copy != 0 && !mm::CopyToUser(dst_user, scratch, to_copy))
+        return -1;
+    return static_cast<i64>(available);
+}
+
 void ProcessFeedStdinFocusChar(char c)
 {
     Process* process = nullptr;

@@ -2425,6 +2425,18 @@ void ProcessHandleLifetimeSelfTest();
 /// "fill the buffer," always returns as soon as any data is ready.
 i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap);
 
+/// Non-blocking probe of `proc`'s stdin ring. Returns the number of
+/// bytes currently buffered (0 when empty) without consuming any of
+/// them, or the kernel-side -1 on a bad user pointer. When `dst_user`
+/// is non-null and `cap` > 0, additionally copies up to
+/// min(cap, available) bytes into `dst_user` WITHOUT advancing the
+/// ring tail — a subsequent ProcessReadStdinBlocking returns the same
+/// bytes. `dst_user == nullptr` / `cap == 0` is the count-only form.
+/// Claims stdin focus exactly like the blocking read so that a
+/// poll-before-read consumer (kbhit loops) starts receiving bytes
+/// without ever having to block first. Never blocks.
+i64 ProcessPeekStdin(Process* proc, void* dst_user, u64 cap);
+
 /// Push one cooked byte into whatever process currently owns the
 /// stdin focus. The global focus owns a Process reference; this call
 /// takes a temporary pin under the focus lock and admits the mutable

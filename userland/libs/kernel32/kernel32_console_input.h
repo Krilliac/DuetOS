@@ -31,6 +31,45 @@ typedef struct duetos_key_stroke
     unsigned short ctrl_state; /* SHIFT / LEFT_CTRL bits above */
 } duetos_key_stroke;
 
+/* Prospective KEY_EVENT count for GetNumberOfConsoleInputEvents:
+ * records already queued in the userland ring plus a down+up pair per
+ * byte still parked in the kernel stdin ring (the translation core
+ * deterministically emits exactly 2 records per cooked byte, so the
+ * count is exact for our pipeline, and safely pessimistic only if a
+ * future overflow drop discards a pair). A negative `kernel_bytes`
+ * (probe syscall unavailable / failed) contributes zero, so callers
+ * degrade to the old already-drained-only behaviour. Saturates at
+ * DWORD max. */
+static inline unsigned duetos_console_prospective_events(unsigned queued_records, long long kernel_bytes)
+{
+    unsigned long long total = queued_records;
+    if (kernel_bytes > 0)
+        total += (unsigned long long)kernel_bytes * 2ull;
+    if (total > 0xFFFFFFFFull)
+        total = 0xFFFFFFFFull;
+    return (unsigned)total;
+}
+
+/* Chunk sizing for the never-blocking kernel-ring drain: how many
+ * bytes to request from the (normally blocking) SYS_STDIN_READ so
+ * that (a) only bytes already probed as available are requested — the
+ * read returns immediately, (b) translating them (2 records/byte)
+ * cannot overflow the free space in the record ring, and (c) the
+ * caller's raw scratch buffer is not overrun. Returns 0 when nothing
+ * should be drained (no bytes, probe failed, or < 1 whole pair of
+ * record slots free). */
+static inline unsigned duetos_console_drain_chunk(unsigned free_records, long long kernel_bytes, unsigned raw_cap)
+{
+    if (kernel_bytes <= 0 || free_records < 2u || raw_cap == 0u)
+        return 0;
+    unsigned want = free_records / 2u;
+    if ((unsigned long long)kernel_bytes < (unsigned long long)want)
+        want = (unsigned)kernel_bytes;
+    if (want > raw_cap)
+        want = raw_cap;
+    return want;
+}
+
 /* Map one cooked ASCII byte to the key stroke that would have
  * produced it on a US keyboard. Always fills `out` and returns 1
  * (unmappable bytes become vk=0 char-only strokes so no input is

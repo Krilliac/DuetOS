@@ -14,12 +14,14 @@
  * them in a small in-process queue so PeekConsoleInput /
  * GetNumberOfConsoleInputEvents can answer without consuming.
  *
- * // GAP: SYS_STDIN_READ has no non-blocking probe, so Peek /
- * GetNumberOfConsoleInputEvents only see records already drained
- * into this queue by a previous blocking read — bytes still in the
- * kernel ring are invisible until ReadConsoleInput/ReadConsole
- * blocks once. Needs a SYS_STDIN_PEEK (kernel/proc/process.cpp +
- * kernel/syscall dispatch) to close.
+ * SYS_STDIN_PEEK (231) is the non-blocking probe: it reports how
+ * many bytes are parked in the kernel ring (optionally copying them)
+ * WITHOUT consuming. Peek / GetNumberOfConsoleInputEvents /
+ * FlushConsoleInputBuffer combine the userland record queue with
+ * that probe, draining known-available bytes through the blocking
+ * read only when the probe guarantees it cannot block. A negative
+ * probe result (dispatch not yet wired -> -ENOSYS) degrades to the
+ * old already-drained-only behaviour instead of failing the call.
  *
  * // GAP: single-threaded model — no lock around the record queue /
  * byte carry, matching the anonymous-pipe ring precedent in
@@ -41,6 +43,22 @@ static long long stdin_read_blocking(void* buf, unsigned cap)
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)171), /* SYS_STDIN_READ */
+                       "D"((long long)buf), "S"((long long)cap)
+                     : "memory");
+    return rv;
+}
+
+/* Non-blocking probe of the kernel stdin ring: returns the byte
+ * count parked there (0 = empty) without consuming; buf/cap of 0/0
+ * is the count-only form. Negative on bad parameters or while the
+ * SYS_STDIN_PEEK dispatch is not wired (-ENOSYS) — callers treat
+ * any <= 0 result as "nothing visible". */
+static long long stdin_peek(void* buf, unsigned cap)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)231), /* SYS_STDIN_PEEK */
                        "D"((long long)buf), "S"((long long)cap)
                      : "memory");
     return rv;
@@ -185,6 +203,48 @@ static int rec_fill_blocking(void)
     return rec_count() != 0;
 }
 
+/* Move input toward the record queue WITHOUT ever blocking: first
+ * translate parked type-ahead bytes, then pull bytes already sitting
+ * in the kernel stdin ring. The kernel drain routes through the
+ * blocking SYS_STDIN_READ, but only for byte counts the probe just
+ * reported available — with this TU as the ring's sole consumer that
+ * read returns immediately. Chunks are sized so translation (down+up
+ * pair per byte) never overflows the record ring; whatever does not
+ * fit stays in the kernel ring and is folded into counts via
+ * duetos_console_prospective_events. Returns the residual kernel-ring
+ * byte count that was NOT drained (0 when fully drained or probe
+ * unavailable). */
+static long long rec_fill_nonblocking(void)
+{
+    unsigned char c;
+    while (carry_pop(&c))
+    {
+        duetos_key_stroke ks;
+        duetos_console_byte_to_stroke(c, &ks);
+        rec_push_stroke(&ks);
+    }
+
+    long long avail = stdin_peek((void*)0, 0);
+    while (avail > 0)
+    {
+        unsigned char raw[32];
+        const unsigned want = duetos_console_drain_chunk((unsigned)kRecCap - rec_count(), avail, (unsigned)sizeof raw);
+        if (want == 0)
+            break; /* record ring full — leave the rest in the kernel ring */
+        const long long got = stdin_read_blocking(raw, want);
+        if (got <= 0)
+            break;
+        for (long long i = 0; i < got; ++i)
+        {
+            duetos_key_stroke ks;
+            duetos_console_byte_to_stroke(raw[i], &ks);
+            rec_push_stroke(&ks);
+        }
+        avail -= got;
+    }
+    return avail > 0 ? avail : 0;
+}
+
 static void rec_copy_out(DUETOS_INPUT_RECORD* dst, DWORD max, DWORD* copied, int consume)
 {
     DWORD n = 0;
@@ -250,15 +310,9 @@ __declspec(dllexport) BOOL PeekConsoleInputW(HANDLE hConsoleInput, void* lpBuffe
             *lpNumberOfEventsRead = 0;
         return lpBuffer == (void*)0 ? 0 : 1;
     }
-    /* Translate any parked type-ahead bytes so Peek sees them, but
-     * never block — an empty queue reports zero events. */
-    unsigned char c;
-    while (carry_pop(&c))
-    {
-        duetos_key_stroke ks;
-        duetos_console_byte_to_stroke(c, &ks);
-        rec_push_stroke(&ks);
-    }
+    /* Surface parked type-ahead AND bytes still in the kernel ring,
+     * but never block — an empty pipeline reports zero events. */
+    rec_fill_nonblocking();
     DWORD copied = 0;
     rec_copy_out((DUETOS_INPUT_RECORD*)lpBuffer, nLength, &copied, 0);
     if (lpNumberOfEventsRead != (DWORD*)0)
@@ -277,17 +331,11 @@ __declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE hConsoleInput, D
     (void)hConsoleInput;
     if (lpNumberOfEvents == (DWORD*)0)
         return 0;
-    /* Fold parked type-ahead into the visible count. // GAP: bytes
-     * still in the kernel ring are not counted (no non-blocking
-     * stdin probe syscall yet). */
-    unsigned char c;
-    while (carry_pop(&c))
-    {
-        duetos_key_stroke ks;
-        duetos_console_byte_to_stroke(c, &ks);
-        rec_push_stroke(&ks);
-    }
-    *lpNumberOfEvents = rec_count();
+    /* Fold parked type-ahead and kernel-ring bytes into the visible
+     * count. Bytes the record ring could not hold stay in the kernel
+     * ring and are counted prospectively (down+up pair per byte). */
+    const long long residual = rec_fill_nonblocking();
+    *lpNumberOfEvents = duetos_console_prospective_events(rec_count(), residual);
     return 1;
 }
 
@@ -296,9 +344,23 @@ __declspec(dllexport) BOOL FlushConsoleInputBuffer(HANDLE hConsoleInput)
     (void)hConsoleInput;
     g_rec_tail = g_rec_head;
     g_carry_tail = g_carry_head;
-    /* // GAP: bytes already in the kernel stdin ring survive a flush
-     * — no kernel-side discard call. They surface on the next
-     * blocking read. */
+    /* Discard bytes already parked in the kernel stdin ring: snapshot
+     * the available count once, then drain exactly that many bytes
+     * through the blocking read (which cannot block for bytes the
+     * probe reported). The one-shot snapshot bounds the loop — bytes
+     * typed after the flush began are legitimately post-flush input. */
+    long long avail = stdin_peek((void*)0, 0);
+    while (avail > 0)
+    {
+        unsigned char discard[64];
+        unsigned want = (unsigned)sizeof discard;
+        if (avail < (long long)want)
+            want = (unsigned)avail;
+        const long long got = stdin_read_blocking(discard, want);
+        if (got <= 0)
+            break;
+        avail -= got;
+    }
     return 1;
 }
 
