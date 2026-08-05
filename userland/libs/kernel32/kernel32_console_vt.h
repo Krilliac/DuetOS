@@ -141,8 +141,8 @@ static inline void duetos_cvt_apply_sgr(duetos_cvt_state* st, unsigned count)
         else if (p == 39)
             st->attrs = (unsigned short)((st->attrs & ~0x07u) | 0x07u);
         else if (p >= 40 && p <= 47)
-            st->attrs =
-                (unsigned short)((st->attrs & ~0x70u) | (duetos_cvt_ansi_to_win3((unsigned short)(p - 40)) << 4));
+            st->attrs = (unsigned short)((st->attrs & ~0x70u) |
+                                         ((unsigned)duetos_cvt_ansi_to_win3((unsigned short)(p - 40)) << 4));
         else if (p == 49)
             st->attrs = (unsigned short)(st->attrs & ~0xF0u);
         else if (p >= 90 && p <= 97)
@@ -150,7 +150,7 @@ static inline void duetos_cvt_apply_sgr(duetos_cvt_state* st, unsigned count)
                 (unsigned short)((st->attrs & ~0x0Fu) | duetos_cvt_ansi_to_win3((unsigned short)(p - 90)) | 0x08u);
         else if (p >= 100 && p <= 107)
             st->attrs = (unsigned short)((st->attrs & ~0xF0u) |
-                                         (duetos_cvt_ansi_to_win3((unsigned short)(p - 100)) << 4) | 0x80u);
+                                         ((unsigned)duetos_cvt_ansi_to_win3((unsigned short)(p - 100)) << 4) | 0x80u);
         /* Other SGR codes (underline, reverse, ...) have no Win32
          * attribute-word representation at v0 — ignored. */
         ++i;

@@ -81,9 +81,7 @@ void __cdecl mainCRTStartup(void)
 
     /* 6. CoGetMalloc — verify the IMalloc interface works. */
     IMalloc* pMalloc = NULL;
-    void* pMallocRaw = NULL;
-    hr = CoGetMalloc(1, &pMallocRaw);
-    pMalloc = (IMalloc*)pMallocRaw;
+    hr = CoGetMalloc(1, &pMalloc);
     if (hr == S_OK && pMalloc != NULL)
     {
         void* p = pMalloc->lpVtbl->Alloc(pMalloc, 128);
