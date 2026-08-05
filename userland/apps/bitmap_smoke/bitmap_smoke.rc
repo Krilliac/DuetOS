@@ -1,0 +1,13 @@
+/*
+ * userland/apps/bitmap_smoke/bitmap_smoke.rc — the resource script
+ * compiled into bitmap_smoke.exe by windres.
+ *
+ * Defines a single 8x8 24bpp bitmap at id 1. The .bmp file is
+ * generated at build time by gen_bitmap.py (solid green with a red
+ * top-left marker pixel). windres strips the BITMAPFILEHEADER when it
+ * stores the RT_BITMAP resource, so the fixture's
+ * LoadBitmapW(hInst, MAKEINTRESOURCE(1)) proves the packed-DIB
+ * (BITMAPINFOHEADER-first) decoder works against windres output.
+ */
+
+1 BITMAP "bitmap_smoke.bmp"

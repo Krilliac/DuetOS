@@ -80,6 +80,7 @@
 #include "generated_pe32_rich_pe.h"
 #include "generated_pe32_window_pe.h"
 #include "generated_rsrc_pe_pe.h"
+#include "generated_bitmap_smoke_pe.h"
 #include "generated_icon_smoke_pe.h"
 #include "generated_shell32_32_dll.h"
 #include "generated_shlwapi_32_dll.h"
@@ -2320,6 +2321,11 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     //                RT_GROUP_ICON + RT_ICON resource. Proves the
     //                decoder + GDI bitmap creation works end-to-end.
     PE_COMPAT("ring3-icon-smoke", kBinIconSmokeBytes, Always, true),
+    //   bitmap_smoke — LoadBitmapW / LoadImageW(IMAGE_BITMAP) from a PE's
+    //                own windres-compiled .rsrc containing a genuine
+    //                RT_BITMAP packed DIB. Proves the decoder + GDI
+    //                bitmap creation works end-to-end.
+    PE_COMPAT("ring3-bitmap-smoke", kBinBitmapSmokeBytes, Always, true),
     // Side-by-side DLL loading. SXSTEST.EXE imports SxsAnswer/SxsDouble
     // from SXSLIB.DLL; both are staged on the FAT32 volume root by
     // tools/qemu/run.sh and NEITHER is embedded in the kernel. A PASS

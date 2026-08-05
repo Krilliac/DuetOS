@@ -2341,6 +2341,11 @@ static int user32_string_view(HANDLE h, DUET_RES_VIEW* view);
  * LoadCursorA/W are REAL for system cursors (IDC_*); for PE cursors
  * they decode RT_GROUP_CURSOR -> RT_CURSOR and register via
  * SYS_GDI_CREATE_CURSOR_RGBA.
+ * LoadBitmapA/W are REAL: decode RT_BITMAP (a packed DIB with no
+ * BITMAPFILEHEADER) from .rsrc via duet_res_decode_bitmap and upload
+ * through the same SYS_GDI_CREATE_COMPAT_BITMAP + SET_DIBITS path, so
+ * the returned HBITMAP behaves exactly like one from
+ * CreateCompatibleBitmap + SetDIBits.
  * LoadImageA/W dispatch by type to LoadIcon/LoadCursor/LoadBitmap.
  * LoadAcceleratorsA/W are REAL as of the VK-translation slice
  * (2026-07-29) -- defined below after pe_resources.h include. */
@@ -2351,20 +2356,75 @@ static int user32_string_view(HANDLE h, DUET_RES_VIEW* view);
 static HANDLE user32_load_accel(HANDLE h, unsigned int name_id);
 __declspec(dllexport) HANDLE LoadAcceleratorsA(HANDLE h, const char* name);
 __declspec(dllexport) HANDLE LoadAcceleratorsW(HANDLE h, const wchar_t16* name);
-// STUB: returns NULL - no off-screen surface for the decoded DIB to
-// live in (backlog item 12).
+
+/* LoadBitmap — decode RT_BITMAP from the module's .rsrc into BGRA and
+ * create a GDI bitmap. NULL on any failure: Win32 has no system-bitmap
+ * fallback the way LoadIcon/LoadCursor have system shapes, so failing
+ * closed with NULL is the documented contract. */
+static HANDLE user32_load_bitmap_impl(HANDLE h, unsigned long name_id)
+{
+    if (h == (HANDLE)0)
+        return (HANDLE)0; /* no module -> no .rsrc to decode */
+    /* GAP: named (string) RT_BITMAP resources unimplemented — integer
+     * ordinals only, same as LoadIcon/LoadCursor — revisit when a
+     * by-name caller appears. */
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HANDLE)0;
+    {
+        DUET_RES_VIEW view;
+        unsigned int bw = 0, bh = 0, bpp = 0;
+        if (!user32_string_view(h, &view))
+            return (HANDLE)0;
+        if (!duet_res_bitmap_info(&view, (unsigned int)name_id, &bw, &bh, &bpp))
+            return (HANDLE)0;
+        /* GAP: bitmaps larger than 128x128 rejected (static decode
+         * buffer, 64 KiB) — revisit when a caller ships bigger art. */
+        if (bw == 0 || bh == 0 || bw > 128 || bh > 128)
+            return (HANDLE)0;
+        {
+            static unsigned char bgra[128 * 128 * 4];
+            if (!duet_res_decode_bitmap(&view, (unsigned int)name_id, bgra, 128 * 128, (unsigned int*)0,
+                                        (unsigned int*)0))
+                return (HANDLE)0;
+            /* Create a GDI bitmap and upload the decoded pixels — the
+             * same two syscalls user32_load_icon_impl uses. */
+            {
+                long long bmp_handle;
+                asm volatile("syscall"
+                             : "=a"(bmp_handle)
+                             : "a"((long long)SYS_GDI_CREATE_COMPAT_BITMAP),
+                               "D"((long long)0), /* hdc — 0 for screen-compat */
+                               "S"((long long)bw), "d"((long long)bh)
+                             : "memory", "rcx", "r11");
+                if (bmp_handle == 0)
+                    return (HANDLE)0;
+                {
+                    long long set_r;
+                    unsigned long long stride = (unsigned long long)(bw * 4);
+                    register long long r10 asm("r10") = (long long)bh;
+                    register long long r8 asm("r8") = (long long)32;
+                    register long long r9 asm("r9") = (long long)stride;
+                    asm volatile("syscall"
+                                 : "=a"(set_r)
+                                 : "a"((long long)SYS_GDI_SET_DIBITS), "D"((long long)(unsigned long long)bmp_handle),
+                                   "S"((long long)(unsigned long long)bgra), "d"((long long)bw), "r"(r10), "r"(r8),
+                                   "r"(r9)
+                                 : "memory", "rcx", "r11");
+                    (void)set_r;
+                }
+                return (HANDLE)(unsigned long long)bmp_handle;
+            }
+        }
+    }
+}
+
 __declspec(dllexport) HANDLE LoadBitmapA(HANDLE h, const char* name)
 {
-    (void)h;
-    (void)name;
-    return (HANDLE)0;
+    return user32_load_bitmap_impl(h, (unsigned long)(unsigned long long)name);
 }
-// STUB: returns NULL - see LoadBitmapA.
 __declspec(dllexport) HANDLE LoadBitmapW(HANDLE h, const wchar_t16* name)
 {
-    (void)h;
-    (void)name;
-    return (HANDLE)0;
+    return user32_load_bitmap_impl(h, (unsigned long)(unsigned long long)name);
 }
 /* LoadCursor — for NULL hInstance, return the IDC_* sentinel as the
  * HCURSOR so a subsequent SetCursor can decode which shape was requested.
@@ -2520,7 +2580,7 @@ __declspec(dllexport) HANDLE LoadImageA(HANDLE h, const char* name, UINT t, int 
         return LoadIconA(h, name);
     if (t == IMAGE_CURSOR)
         return LoadCursorA(h, name);
-    /* IMAGE_BITMAP falls through to LoadBitmap stub. */
+    /* IMAGE_BITMAP dispatches to the real RT_BITMAP decoder. */
     return LoadBitmapA(h, name);
 }
 

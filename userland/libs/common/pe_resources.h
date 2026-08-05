@@ -700,6 +700,66 @@ DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int t
     return 1;
 }
 
+/* Decode one DIB scanline into BGRA output pixels.
+ *
+ * `palette` points to the DIB colour table (BGRX quads) and may be NULL
+ * when `palette_entries` is 0 (bpp > 8). When `opaque_alpha` is
+ * non-zero the output alpha is forced to 255 for every bpp including
+ * 32 — RT_BITMAP semantics, where the 4th source byte is padding, not
+ * alpha. When zero, 32bpp alpha passes through and lower depths get
+ * 255 — RT_ICON semantics, where the AND mask (applied by the caller)
+ * carries transparency.
+ *
+ * The caller has already validated that `row` spans a full stride and
+ * that `dst` spans `width * 4` writable bytes. Shared by
+ * duet_res_decode_icon and duet_res_decode_bitmap so the per-bpp pixel
+ * unpacking lives in exactly one place. */
+DUET_RES_INLINE void duet_res_decode_dib_row(const unsigned char* row, const unsigned char* palette,
+                                             unsigned int palette_entries, unsigned int bpp, unsigned int width,
+                                             int opaque_alpha, unsigned char* dst)
+{
+    unsigned int x;
+    for (x = 0; x < width; ++x)
+    {
+        unsigned char b = 0, g = 0, r = 0, a = 255;
+
+        if (bpp == 32u)
+        {
+            b = row[x * 4u];
+            g = row[x * 4u + 1u];
+            r = row[x * 4u + 2u];
+            a = opaque_alpha ? (unsigned char)255 : row[x * 4u + 3u];
+        }
+        else if (bpp == 24u)
+        {
+            b = row[x * 3u];
+            g = row[x * 3u + 1u];
+            r = row[x * 3u + 2u];
+        }
+        else
+        {
+            unsigned int idx;
+            if (bpp == 8u)
+                idx = row[x];
+            else if (bpp == 4u)
+                idx = (row[x / 2u] >> (4u * (1u - (x & 1u)))) & 0xFu;
+            else /* bpp == 1 */
+                idx = (row[x / 8u] >> (7u - (x & 7u))) & 1u;
+            if (idx < palette_entries)
+            {
+                b = palette[idx * 4u];
+                g = palette[idx * 4u + 1u];
+                r = palette[idx * 4u + 2u];
+            }
+        }
+
+        dst[x * 4u + 0u] = b;
+        dst[x * 4u + 1u] = g;
+        dst[x * 4u + 2u] = r;
+        dst[x * 4u + 3u] = a;
+    }
+}
+
 /* Decode an RT_ICON (or RT_CURSOR) DIB body into caller-provided BGRA
  * pixels. The AND mask (1bpp, bottom-up, DWORD-aligned) sets alpha=0
  * for transparent pixels.
@@ -829,70 +889,183 @@ DUET_RES_INLINE int duet_res_decode_icon(const DUET_RES_VIEW* view, unsigned int
         const unsigned char* palette = bih + bih_size;
         unsigned int x;
 
+        /* Decode colour from the XOR bitmap (32bpp alpha passes through). */
+        duet_res_decode_dib_row(xor_row, palette, color_table_entries, bpp, bmp_w, 0, dst_row);
+
+        /* AND mask: bit=1 means transparent. For 32bpp icons with
+         * per-pixel alpha, the AND mask is usually all zeros and the
+         * alpha channel carries transparency; we honour both. */
         for (x = 0; x < bmp_w; ++x)
         {
-            unsigned char b = 0, g = 0, r = 0, a = 255;
-
-            /* Decode colour from the XOR bitmap. */
-            if (bpp == 32u)
-            {
-                b = xor_row[x * 4u];
-                g = xor_row[x * 4u + 1u];
-                r = xor_row[x * 4u + 2u];
-                a = xor_row[x * 4u + 3u];
-            }
-            else if (bpp == 24u)
-            {
-                b = xor_row[x * 3u];
-                g = xor_row[x * 3u + 1u];
-                r = xor_row[x * 3u + 2u];
-            }
-            else if (bpp == 8u)
-            {
-                unsigned int idx = xor_row[x];
-                if (idx < color_table_entries)
-                {
-                    b = palette[idx * 4u];
-                    g = palette[idx * 4u + 1u];
-                    r = palette[idx * 4u + 2u];
-                }
-            }
-            else if (bpp == 4u)
-            {
-                unsigned int idx = (xor_row[x / 2u] >> (4u * (1u - (x & 1u)))) & 0xFu;
-                if (idx < color_table_entries)
-                {
-                    b = palette[idx * 4u];
-                    g = palette[idx * 4u + 1u];
-                    r = palette[idx * 4u + 2u];
-                }
-            }
-            else /* bpp == 1 */
-            {
-                unsigned int idx = (xor_row[x / 8u] >> (7u - (x & 7u))) & 1u;
-                if (idx < color_table_entries)
-                {
-                    b = palette[idx * 4u];
-                    g = palette[idx * 4u + 1u];
-                    r = palette[idx * 4u + 2u];
-                }
-            }
-
-            /* AND mask: bit=1 means transparent. For 32bpp icons with
-             * per-pixel alpha, the AND mask is usually all zeros and the
-             * alpha channel carries transparency; we honour both. */
-            {
-                unsigned int and_bit = (and_row[x / 8u] >> (7u - (x & 7u))) & 1u;
-                if (and_bit)
-                    a = 0;
-            }
-
-            dst_row[x * 4u + 0u] = b;
-            dst_row[x * 4u + 1u] = g;
-            dst_row[x * 4u + 2u] = r;
-            dst_row[x * 4u + 3u] = a;
+            const unsigned int and_bit = (and_row[x / 8u] >> (7u - (x & 7u))) & 1u;
+            if (and_bit)
+                dst_row[x * 4u + 3u] = 0;
         }
     }
+    return 1;
+}
+
+/* ---- RT_BITMAP resource decoding ----
+ *
+ * RT_BITMAP (2) contains a packed DIB: a BITMAPINFOHEADER (>= 40
+ * bytes), then the colour table (bpp <= 8 only, BGRX quads), then the
+ * pixel rows (DWORD-aligned strides) — exactly a `.bmp` file with the
+ * 14-byte BITMAPFILEHEADER stripped, which is what the resource
+ * compiler stores. Unlike RT_ICON there is no AND mask and biHeight is
+ * the real pixel height: positive = bottom-up rows, negative =
+ * top-down rows.
+ *
+ * Provenance: MSDN LoadBitmap / BITMAPINFOHEADER documentation.
+ * Added 2026-08-05 for the RT_BITMAP decode slice. */
+
+/* Dimension bound applied to both axes before any stride math. Keeps
+ * every intermediate product comfortably inside u32 (16384 * 32bpp
+ * stride and 16384 rows are each < 2^20) so a hostile header cannot
+ * wrap the truncation check. */
+#define DUET_RES_BITMAP_MAX_DIM 16384u
+
+/* Internal: locate + validate the RT_BITMAP body for integer id
+ * `bitmap_id`. On success writes the body pointer, the parsed geometry
+ * and the colour-table entry count; the body has already been proven
+ * to hold the header, the colour table and every pixel row. Fails
+ * closed (returns 0) on any malformed or unsupported header. */
+DUET_RES_INLINE int duet_res_bitmap_locate(const DUET_RES_VIEW* view, unsigned int bitmap_id,
+                                           const unsigned char** out_body, unsigned int* out_header_bytes,
+                                           unsigned int* out_w, unsigned int* out_h, int* out_top_down,
+                                           unsigned int* out_bpp, unsigned int* out_palette_entries)
+{
+    DUET_RES_KEY type;
+    DUET_RES_KEY name;
+    unsigned int rva;
+    unsigned int size;
+    const unsigned char* body;
+    unsigned int bih_size;
+    unsigned int bmp_w;
+    int bmp_h_raw;
+    unsigned int bmp_h;
+    unsigned int bpp;
+    unsigned int palette_entries;
+    unsigned int stride;
+    unsigned long long needed;
+
+    type.by_name = 0;
+    type.id = DUET_RES_TYPE_BITMAP;
+    type.name = (const unsigned short*)0;
+    type.name_len = 0u;
+    name.by_name = 0;
+    name.id = bitmap_id;
+    name.name = (const unsigned short*)0;
+    name.name_len = 0u;
+
+    if (!duet_res_find(view, &type, &name, 0, 0, &rva, &size))
+        return 0;
+    body = duet_res_at(view, rva, size);
+    if (body == (const unsigned char*)0 || size < 40u)
+        return 0;
+
+    bih_size = duet_res_u32(body);
+    if (bih_size < 40u || bih_size > size)
+        return 0;
+
+    bmp_w = duet_res_u32(body + 4u);
+    bmp_h_raw = (int)duet_res_u32(body + 8u);
+    bmp_h = bmp_h_raw < 0 ? (unsigned int)(-(long long)bmp_h_raw) : (unsigned int)bmp_h_raw;
+    bpp = duet_res_u16(body + 14u);
+    if (bmp_w == 0u || bmp_h == 0u || bmp_w > DUET_RES_BITMAP_MAX_DIM || bmp_h > DUET_RES_BITMAP_MAX_DIM)
+        return 0;
+    if (bpp != 32u && bpp != 24u && bpp != 8u && bpp != 4u && bpp != 1u)
+        return 0;
+    if (duet_res_u32(body + 16u) != 0u) /* BI_RGB only */
+        return 0;
+
+    if (bpp <= 8u)
+    {
+        const unsigned int clr_used = duet_res_u32(body + 32u);
+        palette_entries = clr_used != 0u ? clr_used : (1u << bpp);
+        if (palette_entries > (1u << bpp))
+            palette_entries = (1u << bpp);
+    }
+    else
+    {
+        palette_entries = 0u;
+    }
+
+    stride = ((bmp_w * bpp + 31u) / 32u) * 4u;
+    needed = (unsigned long long)bih_size + (unsigned long long)palette_entries * 4u +
+             (unsigned long long)stride * (unsigned long long)bmp_h;
+    if (needed > (unsigned long long)size)
+        return 0; /* truncated */
+
+    if (out_body != (const unsigned char**)0)
+        *out_body = body;
+    if (out_header_bytes != (unsigned int*)0)
+        *out_header_bytes = bih_size;
+    if (out_w != (unsigned int*)0)
+        *out_w = bmp_w;
+    if (out_h != (unsigned int*)0)
+        *out_h = bmp_h;
+    if (out_top_down != (int*)0)
+        *out_top_down = bmp_h_raw < 0;
+    if (out_bpp != (unsigned int*)0)
+        *out_bpp = bpp;
+    if (out_palette_entries != (unsigned int*)0)
+        *out_palette_entries = palette_entries;
+    return 1;
+}
+
+/* Query an RT_BITMAP resource's geometry without decoding it, so a
+ * caller can size its pixel buffer first. Returns 1 on hit. */
+DUET_RES_INLINE int duet_res_bitmap_info(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned int* out_w,
+                                         unsigned int* out_h, unsigned int* out_bpp)
+{
+    return duet_res_bitmap_locate(view, bitmap_id, (const unsigned char**)0, (unsigned int*)0, out_w, out_h, (int*)0,
+                                  out_bpp, (unsigned int*)0);
+}
+
+/* Decode the RT_BITMAP with integer id `bitmap_id` into caller-provided
+ * top-down BGRA pixels. `out_bgra` must point to `max_pixels * 4`
+ * writable bytes; the decode is refused (0) when `w * h > max_pixels`.
+ * Output alpha is always 255 — GDI treats a DIB's 4th byte as padding,
+ * so a bitmap authored with zeroed pad bytes must not come out
+ * invisible on an alpha-honouring compositor. On success writes the
+ * dimensions to `*out_w` / `*out_h` (when non-NULL) and returns 1. */
+DUET_RES_INLINE int duet_res_decode_bitmap(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned char* out_bgra,
+                                           unsigned int max_pixels, unsigned int* out_w, unsigned int* out_h)
+{
+    const unsigned char* body;
+    unsigned int header_bytes;
+    unsigned int bmp_w;
+    unsigned int bmp_h;
+    int top_down;
+    unsigned int bpp;
+    unsigned int palette_entries;
+    unsigned int stride;
+    const unsigned char* palette;
+    const unsigned char* pixels;
+    unsigned int y;
+
+    if (out_bgra == (unsigned char*)0)
+        return 0;
+    if (!duet_res_bitmap_locate(view, bitmap_id, &body, &header_bytes, &bmp_w, &bmp_h, &top_down, &bpp,
+                                &palette_entries))
+        return 0;
+    if ((unsigned long long)bmp_w * (unsigned long long)bmp_h > (unsigned long long)max_pixels)
+        return 0;
+
+    stride = ((bmp_w * bpp + 31u) / 32u) * 4u;
+    palette = body + header_bytes;
+    pixels = palette + palette_entries * 4u;
+
+    for (y = 0; y < bmp_h; ++y)
+    {
+        const unsigned int dst_y = top_down ? y : bmp_h - 1u - y;
+        duet_res_decode_dib_row(pixels + y * stride, palette, palette_entries, bpp, bmp_w, 1,
+                                out_bgra + dst_y * bmp_w * 4u);
+    }
+    if (out_w != (unsigned int*)0)
+        *out_w = bmp_w;
+    if (out_h != (unsigned int*)0)
+        *out_h = bmp_h;
     return 1;
 }
 

@@ -663,18 +663,59 @@ __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_
 #define IMAGE_ICON_32 1
 #define IMAGE_CURSOR_32 2
 
-// STUB: returns NULL - RT_BITMAP not decoded yet.
+/* LoadBitmap — decode RT_BITMAP (a packed DIB with no BITMAPFILEHEADER)
+ * from the module's .rsrc into BGRA and create a GDI bitmap via the same
+ * SYS_GDI_CREATE_COMPAT_BITMAP + SET_DIBITS pair user32_32_load_icon_impl
+ * uses. NULL on any failure: Win32 has no system-bitmap fallback the way
+ * LoadIcon/LoadCursor have system shapes, so failing closed with NULL is
+ * the documented contract. See userland/libs/user32/user32.c for the
+ * matching 64-bit impl. */
+static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, unsigned long name_id)
+{
+    if (inst == (HINSTANCE)0)
+        return (HANDLE)0; /* no module -> no .rsrc to decode */
+    /* GAP: named (string) RT_BITMAP resources unimplemented — integer
+     * ordinals only, same as LoadIcon/LoadCursor — revisit when a
+     * by-name caller appears. */
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HANDLE)0;
+    {
+        DUET_RES_VIEW view;
+        unsigned int bw = 0, bh = 0, bpp = 0;
+        const void* base = (const void*)inst;
+        if (!duet_res_init(base, &view))
+            return (HANDLE)0;
+        if (!duet_res_bitmap_info(&view, (unsigned int)name_id, &bw, &bh, &bpp))
+            return (HANDLE)0;
+        /* GAP: bitmaps larger than 128x128 rejected (static decode
+         * buffer, 64 KiB) — revisit when a caller ships bigger art. */
+        if (bw == 0 || bh == 0 || bw > 128 || bh > 128)
+            return (HANDLE)0;
+        {
+            static unsigned char bgra[128 * 128 * 4];
+            if (!duet_res_decode_bitmap(&view, (unsigned int)name_id, bgra, 128 * 128, (unsigned int*)0,
+                                        (unsigned int*)0))
+                return (HANDLE)0;
+            /* Create a GDI bitmap and upload the decoded pixels — the
+             * same two syscalls user32_32_load_icon_impl uses. */
+            {
+                int bmp_h = duet_syscall3(SYS_GDI_CREATE_COMPAT_BITMAP, 0, bw, bh);
+                if (bmp_h == 0)
+                    return (HANDLE)0;
+                duet_syscall6(SYS_GDI_SET_DIBITS, (unsigned)bmp_h, (unsigned)(unsigned long)bgra, bw, bh, 32, bw * 4);
+                return (HANDLE)(unsigned long)bmp_h;
+            }
+        }
+    }
+}
+
 __declspec(dllexport) HANDLE __stdcall LoadBitmapA(HINSTANCE inst, const char* name)
 {
-    (void)inst;
-    (void)name;
-    return (HANDLE)0;
+    return user32_32_load_bitmap_impl(inst, (unsigned long)(unsigned long)name);
 }
 __declspec(dllexport) HANDLE __stdcall LoadBitmapW(HINSTANCE inst, const wchar_t16* name)
 {
-    (void)inst;
-    (void)name;
-    return (HANDLE)0;
+    return user32_32_load_bitmap_impl(inst, (unsigned long)(unsigned long)name);
 }
 // STUB: returns NULL - RT_ACCELERATOR needs KeyCode->VK translation.
 __declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)
