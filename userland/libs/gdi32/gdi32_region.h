@@ -114,6 +114,104 @@ static inline void GdiRgnOffset(GdiRgnRect* rects, int count, int dx, int dy)
     }
 }
 
+/* Integer square-root (floor). Used by the ellipse scan-line
+ * decomposition -- no floating point in this freestanding header. */
+static inline int GdiRgnISqrt(long long v)
+{
+    if (v <= 0)
+        return 0;
+    long long r = 0;
+    long long bit = 1LL << 30;
+    while (bit > v)
+        bit >>= 2;
+    while (bit > 0)
+    {
+        long long t = r + bit;
+        if (t * t <= v)
+            r = t;
+        bit >>= 2;
+    }
+    return (int)r;
+}
+
+/* Decompose an axis-aligned ellipse (given by its bounding rect
+ * [left, right) x [top, bottom)) into horizontal scan-line
+ * rectangles, writing at most `max_rects` entries into `out`.
+ *
+ * When the ellipse height exceeds `max_rects` the vertical span is
+ * split into `max_rects` equal-height bands; each band uses the
+ * x-extent at the INNER (narrowest) scanline to stay inside the
+ * ellipse. Returns the number of rects written (0 for empty). */
+static inline int GdiRgnEllipseRects(int left, int top, int right, int bottom, GdiRgnRect* out, int max_rects)
+{
+    if (right < left)
+    {
+        int t = left;
+        left = right;
+        right = t;
+    }
+    if (bottom < top)
+    {
+        int t = top;
+        top = bottom;
+        bottom = t;
+    }
+    int w = right - left;
+    int h = bottom - top;
+    if (w <= 0 || h <= 0 || max_rects <= 0)
+        return 0;
+
+    /* Work in doubled coordinates so the centre is at integer
+     * position (cx2, cy2) without half-pixel rounding. Semi-axes
+     * in doubled coords: a2 = w, b2 = h. Ellipse equation in 2x:
+     *   (2x+1 - cx2)^2 / a2^2 + (2y+1 - cy2)^2 / b2^2 <= 1
+     * x-extent at scanline y: solve for x. */
+    int cx2 = left + right; /* 2 * centre_x */
+    int cy2 = top + bottom; /* 2 * centre_y */
+    long long a2 = (long long)w;
+    long long b2 = (long long)h;
+    long long b2sq = b2 * b2;
+
+    int bands = h < max_rects ? h : max_rects;
+    int written = 0;
+
+    for (int i = 0; i < bands; ++i)
+    {
+        int y0 = top + (i * h) / bands;
+        int y1 = top + ((i + 1) * h) / bands;
+        if (y1 <= y0)
+            continue;
+
+        /* Pick the scanline in this band farthest from the centre
+         * (narrowest x-extent) so the rect stays inside the ellipse. */
+        long long dy_top2 = (long long)(2 * y0 + 1 - cy2);
+        long long dy_bot2 = (long long)(2 * (y1 - 1) + 1 - cy2);
+        long long adt = dy_top2 * dy_top2;
+        long long adb = dy_bot2 * dy_bot2;
+        long long dy2 = adt > adb ? adt : adb;
+
+        long long num = a2 * a2 * (b2sq - dy2);
+        if (num <= 0)
+            continue;
+        int half_w2 = GdiRgnISqrt(num / b2sq);
+        int xl = (cx2 - half_w2) / 2;
+        int xr = (cx2 + half_w2 + 1) / 2;
+        if (xl < left)
+            xl = left;
+        if (xr > right)
+            xr = right;
+        if (xr <= xl)
+            continue;
+
+        out[written].left = xl;
+        out[written].top = y0;
+        out[written].right = xr;
+        out[written].bottom = y1;
+        ++written;
+    }
+    return written;
+}
+
 /* 1 if the two rect lists are identical (same count, same rects in
  * the same order). gdi32 stores single-rect and bounding-box regions
  * in a canonical order, so order-sensitive comparison is correct for

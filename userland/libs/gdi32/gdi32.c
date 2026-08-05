@@ -1372,7 +1372,22 @@ __declspec(dllexport) COLORREF GetPixel(HDC dc, INT x, INT y)
     return (COLORREF)-1;
 }
 
-/* --- DC state setters (route to kernel where the syscall exists) --- */
+/* --- DC state setters / getters ---
+ *
+ * The kernel stores bk_color, bk_mode per DC but exposes only Set
+ * syscalls (which return the *previous* value). To implement the
+ * Get* queries without adding new syscalls, we keep a user-side
+ * shadow that the Set wrappers maintain. Initialised to the GDI
+ * defaults (white background, OPAQUE). Per-DC state would require
+ * a DC table here; v0 uses a single module-global — same pattern
+ * as g_cur_x/g_cur_y, same single-DC-at-a-time limitation.
+ *
+ * PolyFillMode is purely user-side (the kernel has no polygon-fill
+ * primitive yet), so it lives only in the shadow. */
+static COLORREF g_bk_color = 0x00FFFFFF; /* RGB white — GDI default */
+static INT g_bk_mode = 2;                /* OPAQUE (2) — GDI default */
+static INT g_poly_fill_mode = 1;         /* ALTERNATE (1) — GDI default */
+
 __declspec(dllexport) COLORREF SetBkColor(HDC dc, COLORREF clr)
 {
     long long rv;
@@ -1380,7 +1395,14 @@ __declspec(dllexport) COLORREF SetBkColor(HDC dc, COLORREF clr)
                      : "=a"(rv)
                      : "a"((long long)SYS_GDI_SET_BK_COLOR), "D"((long long)(unsigned long long)dc), "S"((long long)clr)
                      : "memory");
-    return (COLORREF)rv;
+    COLORREF prev = g_bk_color;
+    g_bk_color = clr;
+    return prev;
+}
+__declspec(dllexport) COLORREF GetBkColor(HDC dc)
+{
+    (void)dc;
+    return g_bk_color;
 }
 __declspec(dllexport) INT SetBkMode(HDC dc, INT mode)
 {
@@ -1389,7 +1411,28 @@ __declspec(dllexport) INT SetBkMode(HDC dc, INT mode)
                      : "=a"(rv)
                      : "a"((long long)SYS_GDI_SET_BK_MODE), "D"((long long)(unsigned long long)dc), "S"((long long)mode)
                      : "memory");
-    return (INT)rv;
+    INT prev = g_bk_mode;
+    g_bk_mode = mode;
+    return prev;
+}
+__declspec(dllexport) INT GetBkMode(HDC dc)
+{
+    (void)dc;
+    return g_bk_mode;
+}
+__declspec(dllexport) INT SetPolyFillMode(HDC dc, INT mode)
+{
+    (void)dc;
+    if (mode != 1 && mode != 2)
+        return 0;
+    INT prev = g_poly_fill_mode;
+    g_poly_fill_mode = mode;
+    return prev;
+}
+__declspec(dllexport) INT GetPolyFillMode(HDC dc)
+{
+    (void)dc;
+    return g_poly_fill_mode;
 }
 __declspec(dllexport) INT SetMapMode(HDC dc, INT mode)
 {
@@ -1761,6 +1804,117 @@ __declspec(dllexport) BOOL FillPath(HDC dc)
      * primitive). Revisit when SYS_GDI gains a fill-region call. */
     return gdi32_path_replay(hwnd, p, 1);
 }
+
+/* StrokeAndFillPath — stroke every subpath outline then close and
+ * fill every subpath. In v0 both operations reduce to the same line
+ * replay (the kernel has no polygon-fill), so this is FillPath with
+ * the close flag set (matching real GDI's documented behaviour of
+ * closing all open figures). */
+__declspec(dllexport) BOOL StrokeAndFillPath(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p || !p->closed)
+        return 0;
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+    {
+        p->dc = (HDC)0;
+        p->closed = 0;
+        p->pt_count = 0;
+        p->sub_count = 0;
+        return 1;
+    }
+    return gdi32_path_replay(hwnd, p, 1);
+}
+
+/* FlattenPath — convert curves to line segments. v0 paths contain
+ * only straight-line data (no Bezier/arc recording), so flattening
+ * is a no-op. */
+__declspec(dllexport) BOOL FlattenPath(HDC dc)
+{
+    // STUB: no curves in v0 path data — nothing to flatten.
+    GdiPath* p = gdi32_path_find(dc);
+    return p && p->closed ? 1 : 0;
+}
+
+/* WidenPath — expand the path outline by the pen width. The kernel
+ * has no pen-width-aware path expansion primitive, so this is a
+ * stub that succeeds without modifying the path data. */
+__declspec(dllexport) BOOL WidenPath(HDC dc)
+{
+    // STUB: no pen-width expansion in v0 — path data unchanged.
+    GdiPath* p = gdi32_path_find(dc);
+    return p && p->closed ? 1 : 0;
+}
+
+/* AbortPath — discard a path (recording or closed) without replaying.
+ * Matches GDI's AbortPath, which resets the DC's path state. */
+__declspec(dllexport) BOOL AbortPath(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p)
+        return 0;
+    p->dc = (HDC)0;
+    p->recording = 0;
+    p->closed = 0;
+    p->pt_count = 0;
+    p->sub_count = 0;
+    return 1;
+}
+
+/* GetPath — retrieve the recorded path points and types.
+ *
+ * If `pts` is NULL, returns the point count (so the caller can
+ * allocate). Otherwise fills `pts` (array of POINT) and `types`
+ * (array of BYTE: PT_MOVETO=6, PT_LINETO=2, PT_CLOSEFIGURE=1 flag).
+ * `buf_count` is the size of both arrays; if the path has more
+ * points than that, the call fails. Returns -1 on error. */
+#define PT_MOVETO 0x06
+#define PT_LINETO 0x02
+#define PT_CLOSEFIGURE 0x01
+
+__declspec(dllexport) INT GetPath(HDC dc, void* pts, unsigned char* types, INT buf_count)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p || !p->closed)
+        return -1;
+    if (!pts || !types)
+        return p->pt_count; /* query mode */
+    if (buf_count < p->pt_count)
+        return -1;
+
+    POINT* out = (POINT*)pts;
+    for (INT i = 0; i < p->pt_count; ++i)
+    {
+        out[i].x = p->pts_x[i];
+        out[i].y = p->pts_y[i];
+        /* Determine the type: is this point the start of a subpath? */
+        int is_moveto = 0;
+        for (INT s = 0; s < p->sub_count; ++s)
+        {
+            if (p->sub_start[s] == i)
+            {
+                is_moveto = 1;
+                break;
+            }
+        }
+        types[i] = is_moveto ? PT_MOVETO : PT_LINETO;
+    }
+    /* Mark the last point of each closed subpath with PT_CLOSEFIGURE. */
+    for (INT s = 0; s < p->sub_count; ++s)
+    {
+        if (p->sub_closed[s])
+        {
+            INT end = (s + 1 < p->sub_count) ? p->sub_start[s + 1] - 1 : p->pt_count - 1;
+            if (end >= 0 && end < p->pt_count)
+                types[end] |= PT_CLOSEFIGURE;
+        }
+    }
+    return p->pt_count;
+}
+
+/* PathToRegion is defined after the Region API section (it needs
+ * GdiRegion / HRGN / gdi32_rgn_alloc which are declared below). */
 
 /* --- Region API ---
  *
@@ -2154,4 +2308,139 @@ __declspec(dllexport) BOOL EqualRgn(HRGN h1, HRGN h2)
     const int na = gdi32_rgn_copy_rects(a, ba);
     const int nb = gdi32_rgn_copy_rects(b, bb);
     return GdiRgnEqual(ba, na, bb, nb) ? 1 : 0;
+}
+
+/* CreateEllipticRgn — build a region approximating an axis-aligned
+ * ellipse. Uses the scan-line decomposition in gdi32_region.h,
+ * bounded to GDI_RGN_MAX_RECTS bands. */
+__declspec(dllexport) HRGN CreateEllipticRgn(INT l, INT t, INT r, INT b)
+{
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    int n = GdiRgnEllipseRects(l, t, r, b, buf, GDI_RGN_MAX_RECTS);
+    if (n <= 0)
+    {
+        /* Degenerate — return an empty region (matching GDI). */
+        return CreateRectRgn(0, 0, 0, 0);
+    }
+    unsigned idx;
+    GdiRegion* rg = gdi32_rgn_alloc(&idx);
+    if (!rg)
+        return (HRGN)0;
+    rg->count = n;
+    for (int i = 0; i < n; ++i)
+    {
+        rg->rects[i].left = buf[i].left;
+        rg->rects[i].top = buf[i].top;
+        rg->rects[i].right = buf[i].right;
+        rg->rects[i].bottom = buf[i].bottom;
+    }
+    return gdi32_rgn_handle(idx);
+}
+
+/* SelectClipRgn — set a clipping region on a DC. The kernel has no
+ * clip-region enforcement path, so this records the handle but does
+ * not affect drawing. Returns the region complexity. */
+__declspec(dllexport) INT SelectClipRgn(HDC dc, HRGN hrgn)
+{
+    // STUB: clip region stored but not enforced by kernel draw calls.
+    (void)dc;
+    if (!hrgn)
+        return RGN_SIMPLEREGION; /* NULL = reset to no clip */
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg)
+        return RGN_ERROR;
+    return gdi32_rgn_complexity(rg);
+}
+
+/* ExtSelectClipRgn — combine a region with the DC's current clip. */
+__declspec(dllexport) INT ExtSelectClipRgn(HDC dc, HRGN hrgn, INT mode)
+{
+    // STUB: clip region stored but not enforced by kernel draw calls.
+    (void)dc;
+    (void)mode;
+    if (!hrgn)
+        return RGN_SIMPLEREGION;
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg)
+        return RGN_ERROR;
+    return gdi32_rgn_complexity(rg);
+}
+
+/* GetClipRgn — retrieve the DC's current clip region. Returns 0 if
+ * no clip region is set, 1 if one is set (copied into hrgn), -1 on
+ * error. v0 never sets a clip, so this always returns 0. */
+__declspec(dllexport) INT GetClipRgn(HDC dc, HRGN hrgn)
+{
+    // STUB: no clip region tracking in v0 — always "not set".
+    (void)dc;
+    (void)hrgn;
+    return 0;
+}
+
+/* PathToRegion — convert the closed path into a region. Each subpath
+ * contributes its bounding box as one rect in the region (up to
+ * GDI_RGN_MAX_RECTS). Consumes the path (matching GDI). */
+__declspec(dllexport) HRGN PathToRegion(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p || !p->closed || p->sub_count == 0)
+    {
+        if (p)
+        {
+            p->dc = (HDC)0;
+            p->closed = 0;
+            p->pt_count = 0;
+            p->sub_count = 0;
+        }
+        return (HRGN)0;
+    }
+
+    unsigned idx;
+    GdiRegion* rg = gdi32_rgn_alloc(&idx);
+    if (!rg)
+    {
+        p->dc = (HDC)0;
+        p->closed = 0;
+        p->pt_count = 0;
+        p->sub_count = 0;
+        return (HRGN)0;
+    }
+
+    rg->count = 0;
+    for (INT s = 0; s < p->sub_count && rg->count < (INT)GDI_RGN_MAX_RECTS; ++s)
+    {
+        INT start = p->sub_start[s];
+        INT end = (s + 1 < p->sub_count) ? p->sub_start[s + 1] : p->pt_count;
+        if (end <= start)
+            continue;
+        INT minx = p->pts_x[start], maxx = minx;
+        INT miny = p->pts_y[start], maxy = miny;
+        for (INT i = start + 1; i < end; ++i)
+        {
+            if (p->pts_x[i] < minx)
+                minx = p->pts_x[i];
+            if (p->pts_x[i] > maxx)
+                maxx = p->pts_x[i];
+            if (p->pts_y[i] < miny)
+                miny = p->pts_y[i];
+            if (p->pts_y[i] > maxy)
+                maxy = p->pts_y[i];
+        }
+        if (maxx > minx && maxy > miny)
+        {
+            rg->rects[rg->count].left = minx;
+            rg->rects[rg->count].top = miny;
+            rg->rects[rg->count].right = maxx;
+            rg->rects[rg->count].bottom = maxy;
+            ++rg->count;
+        }
+    }
+
+    /* Consume the path. */
+    p->dc = (HDC)0;
+    p->closed = 0;
+    p->pt_count = 0;
+    p->sub_count = 0;
+
+    return gdi32_rgn_handle(idx);
 }

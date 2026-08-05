@@ -103,5 +103,89 @@ int main()
         EXPECT_TRUE(GdiRgnEqual(nullptr, 0, nullptr, 0)); // both empty
     }
 
+    // --- ISqrt ---
+    {
+        EXPECT_EQ(GdiRgnISqrt(0), 0);
+        EXPECT_EQ(GdiRgnISqrt(1), 1);
+        EXPECT_EQ(GdiRgnISqrt(4), 2);
+        EXPECT_EQ(GdiRgnISqrt(9), 3);
+        EXPECT_EQ(GdiRgnISqrt(15), 3); // floor(sqrt(15)) = 3
+        EXPECT_EQ(GdiRgnISqrt(16), 4);
+        EXPECT_EQ(GdiRgnISqrt(100), 10);
+        EXPECT_EQ(GdiRgnISqrt(10000), 100);
+        EXPECT_EQ(GdiRgnISqrt(-5), 0); // negative -> 0
+    }
+
+    // --- EllipseRects (degenerate cases) ---
+    {
+        GdiRgnRect buf[8];
+        // Zero-width
+        EXPECT_EQ(GdiRgnEllipseRects(10, 10, 10, 20, buf, 8), 0);
+        // Zero-height
+        EXPECT_EQ(GdiRgnEllipseRects(10, 10, 20, 10, buf, 8), 0);
+        // Inverted coords (should normalise internally)
+        int n = GdiRgnEllipseRects(20, 20, 10, 10, buf, 8);
+        EXPECT_TRUE(n > 0);
+        // max_rects = 0
+        EXPECT_EQ(GdiRgnEllipseRects(0, 0, 10, 10, buf, 0), 0);
+    }
+
+    // --- EllipseRects (small: 4x4, height fits in max_rects) ---
+    {
+        GdiRgnRect buf[8];
+        int n = GdiRgnEllipseRects(0, 0, 4, 4, buf, 8);
+        EXPECT_TRUE(n > 0);
+        EXPECT_TRUE(n <= 4); // height=4, at most 4 bands
+
+        for (int i = 0; i < n; ++i)
+        {
+            EXPECT_TRUE(buf[i].left >= 0);
+            EXPECT_TRUE(buf[i].right <= 4);
+            EXPECT_TRUE(buf[i].top >= 0);
+            EXPECT_TRUE(buf[i].bottom <= 4);
+            EXPECT_TRUE(buf[i].right > buf[i].left);
+            EXPECT_TRUE(buf[i].bottom > buf[i].top);
+        }
+        // Bands must be vertically non-overlapping
+        for (int i = 1; i < n; ++i)
+        {
+            EXPECT_TRUE(buf[i].top >= buf[i - 1].bottom);
+        }
+    }
+
+    // --- EllipseRects (large: 100x100, banded to max_rects=8) ---
+    {
+        GdiRgnRect buf[8];
+        int n = GdiRgnEllipseRects(0, 0, 100, 100, buf, 8);
+        EXPECT_TRUE(n > 0);
+        EXPECT_TRUE(n <= 8);
+
+        // Middle bands should be at least as wide as top/bottom
+        if (n >= 3)
+        {
+            int mid = n / 2;
+            int mid_w = buf[mid].right - buf[mid].left;
+            int top_w = buf[0].right - buf[0].left;
+            EXPECT_TRUE(mid_w >= top_w);
+        }
+        // Symmetry: each rect's horizontal centre should be near 50
+        for (int i = 0; i < n; ++i)
+        {
+            int cx = (buf[i].left + buf[i].right) / 2;
+            EXPECT_TRUE(cx >= 45 && cx <= 55);
+        }
+    }
+
+    // --- EllipseRects (PtIn: centre inside, corner outside) ---
+    {
+        GdiRgnRect buf[8];
+        int n = GdiRgnEllipseRects(10, 20, 50, 60, buf, 8);
+        EXPECT_TRUE(n > 0);
+        // Centre of bounding rect (30, 40) must be inside
+        EXPECT_TRUE(GdiRgnPtIn(buf, n, 30, 40));
+        // Corner of bounding rect must be outside (ellipse inscribed)
+        EXPECT_FALSE(GdiRgnPtIn(buf, n, 10, 20));
+    }
+
     return finish_main("gdi32_region");
 }
