@@ -44,7 +44,10 @@ void CaptureHidReportDescriptorLength(const u8* desc, u8 len, HidInterfaceRecord
     for (u8 i = 0; i < descriptorCount && off + 3 <= len; ++i, off = u8(off + 3))
     {
         const u8 descriptorType = desc[off];
-        const u16 descriptorLength = u16(desc[off + 1]) | (u16(desc[off + 2]) << 8);
+        // Both halves promote to int through the shift and the or, so the
+        // narrowing back to u16 has to be explicit: the host-test build
+        // compiles this TU under clang -Werror -Wimplicit-int-conversion.
+        const u16 descriptorLength = u16(u16(desc[off + 1]) | u16(u16(desc[off + 2]) << 8));
         if (descriptorType == kDescTypeReport && descriptorLength != 0)
         {
             iface.report_desc_length = descriptorLength;
@@ -412,7 +415,7 @@ bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
         {
             const u8 bEndpointAddress = buf[off + 2];
             const u8 bmAttributes = buf[off + 3];
-            const u16 wMaxPacketSize = u16(buf[off + 4]) | (u16(buf[off + 5]) << 8);
+            const u16 wMaxPacketSize = u16(u16(buf[off + 4]) | u16(u16(buf[off + 5]) << 8));
             const u8 bInterval = buf[off + 6];
             if ((bmAttributes & kEpAttrTypeMask) == kEpAttrTypeInterrupt && (bEndpointAddress & kEpAddrDirIn))
             {
