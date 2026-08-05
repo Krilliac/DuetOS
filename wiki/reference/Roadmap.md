@@ -1702,12 +1702,33 @@ done, it is merely written.
     recorder: Begin/End/Close/Stroke/Fill/StrokeAndFill/Abort/GetPath/
     PathToRegion); regions (exact `CombineRgn` rect-list algebra +
     the clip-selection family) and transfer modes (`SetROP2` via
-    `SYS_GDI_SET_ROP2`) landed 2026-08-05. Residue: the 11 R2 codes
-    beyond BLACK/NOT/XORPEN/COPYPEN/WHITE (fall back to COPYPEN),
-    window-DC ROP2 (only R2_BLACK/R2_WHITE via colour transform),
-    clip enforcement for outlines/lines/text (bounding-box reject,
-    not per-pixel), path curves + scan-line interior fill,
-    `FlattenPath`/`WidenPath`.
+    `SYS_GDI_SET_ROP2`) landed 2026-08-05. Raster ops completed the
+    same day: all 16 `R2_*` codes now apply per-pixel on memory DCs
+    through `Rop2Apply`
+    (`kernel/subsystems/win32/gdi_surface_math.h`), honoured by the
+    line, rect-fill, rect-outline, `PatBlt` and ellipse paths and
+    host-tested code-by-code in `tests/host/test_gdi32_rop2.cpp`.
+    Scan-line interior fill also landed: `FillPath` /
+    `StrokeAndFillPath` scan-convert the recorded path and emit
+    horizontal spans, with ALTERNATE (even-odd) and WINDING
+    (nonzero) rules, in `userland/libs/gdi32/gdi32_fill.h`
+    (host-tested by `tests/host/test_gdi32_fill.cpp`). Residue:
+    - Window-DC ROP2 honours only `R2_BLACK` / `R2_WHITE`, applied
+      as a colour transform — the compositor display list carries
+      a colour but no raster-op channel.
+    - Clip enforcement for outlines, lines and text is whole-shape
+      / whole-run bounding-box reject rather than per-pixel; a
+      partially clipped segment draws in full. `FillRect` is the
+      exception and does clip per-piece.
+    - No curve recording: `PolyBezier` / `Arc` / `ArcTo` are not
+      path-aware, so `FlattenPath` has nothing to flatten and
+      succeeds trivially on a closed path. `WidenPath` remains a
+      STUB — no pen-width tracking, no outline offsetting.
+    - Fixed pools bound the surface: `GDI_PATH_SLOTS` open paths,
+      `GDI_PATH_MAX_PTS` points, `GDI_RGN_SLOTS` regions and
+      `GDI_RGN_MAX_RECTS` rects each, with exhaustion surfacing as
+      a failed call and an over-cap `CombineRgn` collapsing to the
+      bounding box.
 15. **D3D9.** Large back catalogue; simpler than 11/12.
 16. **D3D11 completeness** and **D3D12** beyond the current thunk layer.
 17. **DirectWrite / Direct2D.** [dep: 13]
@@ -1716,16 +1737,31 @@ done, it is merely written.
 20. **XAudio2 / WASAPI real mixing.** [dep: 21]
 21. **Audio depth** — USB audio class, HDMI/DP audio, per-stream volume,
     resampling.
-22. **DirectInput / XInput** bound to real HID devices. Groundwork
-    landed 2026-08-05: the `hid_gamepad` driver is wired end-to-end —
-    xHCI descriptor parse claims non-boot HID interfaces as gamepad
-    candidates, Report-descriptor layout extraction binds confirmed
+22. **DirectInput / XInput** bound to real HID devices. **The
+    XInput half is REAL end-to-end as of 2026-08-05.** The
+    `hid_gamepad` driver is wired through xHCI — descriptor parse
+    claims non-boot HID interfaces as gamepad candidates,
+    Report-descriptor layout extraction binds confirmed
     Gamepad/Joystick devices into the 4-slot XInput-shaped state
-    table, and the poll task injects interrupt-IN reports (host test
-    `tests/host/test_hid_gamepad.cpp` + the gamepad arm of
-    `XhciDescriptorSelfTest` at boot). Remaining:
-    the `SYS_GAMEPAD_STATE` syscall + the userland XInput DLL
-    binding.
+    table, and the poll task injects interrupt-IN reports;
+    `SYS_GAMEPAD_STATE` (230) copies a fixed 44-byte wire snapshot
+    out under a static `kCapInput` gate; `xinput1_4.dll` maps that
+    wire to `XINPUT_STATE` / `XINPUT_CAPABILITIES`. Covered by
+    `tests/host/test_hid_gamepad.cpp`, the gamepad arm of
+    `XhciDescriptorSelfTest` at boot, and the `xinput_smoke` PE
+    fixture in the ring-3 battery. Remaining:
+    - **Rumble.** `XInputSetState` accepts and drops vibration
+      requests; the HID driver needs an interrupt-OUT report
+      writer before it can do otherwise.
+    - **Battery plumbing.** Every pad reports wired/full because
+      no battery level reaches the slot table.
+    - **`XInputGetKeystroke`** needs a `VK_PAD_*` keystroke queue,
+      and `XInputEnable`'s "mute while unfocused" latch is not
+      tracked at all.
+    - **DirectInput8 proper.** Joystick/gamepad enumeration and
+      force-feedback effects in `dinput8.dll` are still STUBs;
+      the slot table they would enumerate now exists, so this is
+      wiring rather than new driver work.
 
 ### Tier 3 — hardware needed to be a daily driver
 

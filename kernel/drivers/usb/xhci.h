@@ -62,6 +62,44 @@ namespace duetos::drivers::usb::xhci
 
 inline constexpr u32 kMaxXhciPortsPerController = 16;
 
+/// How many HID interfaces one USB device (one port, one xHCI slot)
+/// may claim. Real composite HID hardware — gaming keyboards with a
+/// consumer-control interface, headsets with a telephony interface,
+/// keyboard+mouse dongles — ships two or three; four covers every
+/// device we have seen with headroom. The cap is deliberate: port
+/// records live in a `constinit` per-controller table, so this array
+/// is BSS with no allocator on the enumeration path. Interfaces past
+/// the cap are counted in `hid_ifaces_dropped` and logged, never
+/// silently discarded.
+inline constexpr u32 kMaxHidInterfacesPerPort = 4;
+
+/// What a claimed HID interface was classified as by the
+/// Configuration-descriptor walk. `GamepadCandidate` is a claim the
+/// descriptor tree alone cannot confirm — a non-boot HID interface
+/// might be a gamepad, a consumer-control block, or a digitizer, and
+/// only GET_DESCRIPTOR(Report) at bring-up time decides.
+enum class HidIfaceKind : u8
+{
+    None = 0,
+    BootKeyboard = 1,
+    BootMouse = 2,
+    GamepadCandidate = 3,
+};
+
+/// One HID interface on a device, with the first interrupt-IN
+/// endpoint found inside it. A composite device contributes several
+/// of these from a single Configuration descriptor.
+struct HidInterfaceRecord
+{
+    HidIfaceKind kind;
+    u8 interface_num;
+    u8 ep_addr;             // bEndpointAddress: bit 7 = IN direction
+    u16 ep_max_packet;      // wMaxPacketSize of the interrupt-IN endpoint
+    u8 ep_interval;         // bInterval, raw (USB units)
+    u16 report_desc_length; // HID class descriptor's Report descriptor byte count
+    bool bound;             // bring-up completed; the poll task is driving this endpoint
+};
+
 /// One slot's worth of per-port state captured at port-scan time
 /// + what enumeration learned about the attached device.
 struct PortRecord
@@ -92,6 +130,11 @@ struct PortRecord
     bool config_desc_ok;
     u16 config_desc_bytes;
     u8 hid_config_value; // bConfigurationValue from top-level Config desc
+    // Aggregates over hid_ifaces[]: true iff at least one claimed
+    // interface on this port is of that kind. Consumers that only
+    // want "is there a keyboard behind this port" (the device
+    // manager's per-port label) read these; anything that has to
+    // reach an endpoint walks hid_ifaces[] instead.
     bool hid_keyboard;
     bool hid_mouse;
     // Non-boot HID interface claimed as a gamepad CANDIDATE. Unlike
@@ -102,11 +145,13 @@ struct PortRecord
     // Gamepad/Joystick. A candidate that fails that parse is simply
     // not bound; no state leaks.
     bool hid_gamepad;
-    u8 hid_interface_num;
-    u8 hid_ep_addr;             // bEndpointAddress: bit 7 = IN direction
-    u16 hid_ep_max_packet;      // wMaxPacketSize of the HID int-IN endpoint
-    u8 hid_ep_interval;         // bInterval, raw (USB units)
-    u16 hid_report_desc_length; // HID class descriptor's Report descriptor byte count
+    // Every HID interface the Configuration tree yielded that has a
+    // usable interrupt-IN endpoint, in descriptor order. A composite
+    // device fills several entries; the common single-interface
+    // keyboard or mouse fills exactly one.
+    u8 hid_iface_count;
+    u8 hid_ifaces_dropped; // interfaces past kMaxHidInterfacesPerPort
+    HidInterfaceRecord hid_ifaces[kMaxHidInterfacesPerPort];
 };
 
 /// Per-controller stats. One slot per discovered xHCI; populated

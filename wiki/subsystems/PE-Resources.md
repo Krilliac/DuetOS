@@ -124,6 +124,31 @@ returns the wrong string rather than nothing.
 is treated as an `LPWSTR*` and receives a read-only pointer to the
 resource itself, with the character count as the return value.
 
+## Name keys — ordinals and strings never cross
+
+A level-2 directory entry is keyed either by an integer ordinal or by
+an `IMAGE_RESOURCE_DIR_STRING_U`, a *counted, unterminated* UTF-16
+string. `DUET_RES_KEY` carries both shapes, and the two constructors
+(`duet_res_key_id`, `duet_res_key_name`) exist because every field
+must be initialised — comparing a hand-built key would otherwise read
+an uninitialised `name_len`. A caller holding a NUL-terminated
+`LPCWSTR` measures it with `duet_res_name_len` first, which caps the
+scan at `0xFFFF` because that is the widest `Length` the format can
+express; a longer string can never match anything, so the cap costs no
+matches and bounds the scan of a buffer that may not be terminated.
+
+Matching is the ASCII case-insensitive fold the resource compiler
+applies. The two key kinds deliberately never match each other: the
+string `"7"` does not resolve ordinal 7, and ordinal 7 does not
+resolve a named entry. Name comparison is bounded by the same section
+extent as the rest of the tree (see above), so a `Length` that runs
+past the section, an offset past the directory extent, and a name that
+sits inside the host allocation but outside the mapped section all
+fail closed. `tests/host/test_pe_named_resources.cpp` pins each of
+those, including the last one specifically — it is the case a bound
+computed from the host buffer rather than the mapped extent would
+wrongly accept.
+
 ## Language selection
 
 `FindResourceExW` tries the requested `LANGID`, then `LANG_NEUTRAL`
@@ -145,7 +170,9 @@ gained their sinks and landed:
   real image bits. `LoadBitmapA/W` (landed 2026-08-05) decodes
   RT_BITMAP packed DIBs via `duet_res_decode_bitmap`; the per-bpp
   DIB row unpack is shared with the icon decoder
-  (`duet_res_decode_dib_row`). See
+  (`duet_res_decode_dib_row`). All five entry points take a
+  `DUET_RES_KEY`, so a resource declared by name resolves as readily
+  as a `MAKEINTRESOURCE` ordinal. See
   [`Win32-Surface-Status.md`](../reference/Win32-Surface-Status.md#user32dll)
   for the per-export GAPs.
 - **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) —
@@ -153,10 +180,17 @@ gained their sinks and landed:
   landed on the kernel side of the message post
   (`kernel/subsystems/win32/keycode_vk.h`), so `WM_KEYDOWN`'s
   `wParam` now carries Win32 VKs and `FVIRTKEY` entries compare
-  correctly.
+  correctly. `LoadAcceleratorsA/W` take a `DUET_RES_KEY` too, so a
+  named `RT_ACCELERATOR` table resolves.
 
 ## Proof
 
+- **Hosted:** `tests/host/test_pe_named_resources.cpp` — the
+  key-taking half: both key constructors, named `RT_GROUP_ICON` and
+  `RT_BITMAP` lookup with pixels checked against the authored
+  palette, ordinals still resolving in a directory that also holds
+  named entries, the two key kinds never crossing, and three hostile
+  `IMAGE_RESOURCE_DIR_STRING_U` forms failing closed.
 - **Hosted:** `tests/host/test_pe_resources.cpp` — the three-level walk,
   named vs integer entries with the ASCII case fold, language fallback,
   the `(id/16)+1` bundling across two bundles, and eight malformed

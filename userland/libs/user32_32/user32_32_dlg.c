@@ -196,15 +196,19 @@ __declspec(dllexport) UINT __stdcall GetDlgItemInt(HWND dlg, int id, BOOL* trans
 }
 
 /* ------------------------------------------------------------------
- * Dialog templates — blocked on a .rsrc parser
+ * Dialog templates — blocked on an RT_DIALOG template decoder
  * ------------------------------------------------------------------ */
 
-// STUB: no PE resource (.rsrc) parser exists anywhere in the tree, so
-// a dialog template cannot be read and no controls can be
-// instantiated. Returning -1 is the Win32 failure contract for
-// DialogBoxParam and lets a caller take its error path instead of
-// waiting forever on a modal loop that never runs. Unblocked by: a
-// resource-directory walker over IMAGE_DIRECTORY_ENTRY_RESOURCE.
+// STUB: a dialog template cannot be read, so no controls can be
+// instantiated. The rationale that used to sit here -- "no PE resource
+// (.rsrc) parser exists anywhere in the tree" -- is stale: the walker
+// landed in userland/libs/common/pe_resources.h and this DLL already
+// uses it for LoadString / LoadIcon / LoadCursor / LoadBitmap. What is
+// still missing is the layer above it: a DLGTEMPLATE / DLGITEMTEMPLATE
+// decoder and the control instantiation it drives. Returning -1 is the
+// Win32 failure contract for DialogBoxParam and lets a caller take its
+// error path instead of waiting forever on a modal loop that never
+// runs.
 __declspec(dllexport) INT __stdcall DialogBoxParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc,
                                                     LPARAM param)
 {
@@ -227,7 +231,7 @@ __declspec(dllexport) INT __stdcall DialogBoxParamW(HINSTANCE inst, const wchar_
     return -1;
 }
 
-// STUB: same missing .rsrc parser. NULL is the Win32 failure return.
+// STUB: same missing template decoder. NULL is the Win32 failure return.
 __declspec(dllexport) HWND __stdcall CreateDialogParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc,
                                                         LPARAM param)
 {
@@ -261,11 +265,14 @@ __declspec(dllexport) BOOL __stdcall EndDialog(HWND dlg, INT result)
     return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)dlg) ? 1 : 0;
 }
 
-// STUB: accelerator tables live in .rsrc too, so there is no table to
-// translate against and no message is ever consumed. Returning 0
-// ("not translated") keeps the caller's pump correct — it just
-// dispatches the message normally, which is what happens on Windows
-// when no accelerator matches.
+// STUB: no table is ever translated against, so no message is ever
+// consumed. The blocker is not the .rsrc walker -- that exists -- but
+// this DLL's LoadAcceleratorsA/W, which still return NULL because
+// RT_ACCELERATOR needs the KeyCode->VK translation the x86_64 sibling
+// has (user32_load_accel in userland/libs/user32/user32.c) and this
+// half does not. Returning 0 ("not translated") keeps the caller's pump
+// correct — it just dispatches the message normally, which is what
+// happens on Windows when no accelerator matches.
 __declspec(dllexport) INT __stdcall TranslateAcceleratorA(HWND h, HANDLE accel, void* msg)
 {
     (void)h;
@@ -378,10 +385,14 @@ __declspec(dllexport) BOOL __stdcall SystemParametersInfoW(UINT action, UINT par
  * Icon / cursor lifetime + monitors
  * ------------------------------------------------------------------ */
 
-// STUB: LoadIcon / LoadCursor hand back non-null sentinels because
-// there is no icon or cursor resource pipeline (.rsrc again), so
-// there is nothing allocated for Destroy* to release. TRUE keeps a
-// caller's cleanup path quiet; it is not evidence anything was freed.
+// STUB: these report success without releasing anything. The rationale
+// that used to sit here -- "LoadIcon / LoadCursor hand back non-null
+// sentinels, so there is nothing allocated" -- is stale: LoadIcon and
+// LoadCursor now decode .rsrc and return a real GDI bitmap / cursor
+// handle for a PE hInstance (see user32_32_misc.c), so a caller that
+// loads in a loop leaks one kernel object per call. Retiring this needs
+// a GDI object-delete syscall these DLLs do not import yet. TRUE keeps
+// a caller's cleanup path quiet; it is not evidence anything was freed.
 __declspec(dllexport) BOOL __stdcall DestroyIcon(HICON icon)
 {
     (void)icon;

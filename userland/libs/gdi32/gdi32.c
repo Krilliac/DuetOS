@@ -772,10 +772,36 @@ __declspec(dllexport) HGDIOBJ GetStockObject(INT idx)
     }
     return (HGDIOBJ)(unsigned long long)(0xD000 + idx);
 }
+/* Current-brush shadow for the user-side fill paths.
+ *
+ * The kernel tracks a selected brush per memory DC, but window DCs
+ * have no in-kernel brush state (SelectObject hands back a sentinel
+ * for them — see below), and FillPath scan-converts the interior on
+ * the user side, so it needs the colour here. Module-global for the
+ * same reason g_cur_x / g_cur_y are: v0 programs paint on one DC at
+ * a time.
+ *
+ * GAP: stock brushes (GetStockObject) carry no colour in their
+ * sentinel handle, so selecting one leaves the shadow unchanged and
+ * a subsequent FillPath uses the last real brush — or black, the
+ * same colour the outline replay already draws in, if there was
+ * none. Revisit when GetStockObject returns kernel brush handles. */
+static HBRUSH g_cur_brush = (HBRUSH)0;
+
 __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
 {
     if (obj == (HGDIOBJ)0)
         return (HGDIOBJ)0;
+    /* Record solid brushes — both the kernel-backed handles in the
+     * side table and the 0xB<COLORREF> fallback sentinels — so the
+     * user-side fill paths know what colour to paint. */
+    {
+        COLORREF brush_col = 0;
+        const unsigned long long obj_bits = (unsigned long long)obj;
+        if ((obj_bits & 0xF0000000ULL) == 0xB0000000ULL || gdi32_brush_lookup((HBRUSH)obj, &brush_col))
+            g_cur_brush = (HBRUSH)obj;
+        (void)brush_col;
+    }
     /* GDI_TAG-wrapped HDCs (window DCs) don't have an in-kernel DC
      * table entry for most object types — return a sentinel. But font
      * handles (tag 0x05) must route through the kernel so the per-
@@ -1242,9 +1268,10 @@ static BOOL gdi32_line_core(HANDLE hwnd, INT x0, INT y0, INT x1, INT y1, COLORRE
  * GDI_PATH_MAX_SUBPATHS subpaths — overflow drops the excess
  * (Stroke/Fill still replay what fit). Revisit if a real PE drives
  * a path larger than this.
- * GAP: no Bezier/arc curve flattening — only the straight-line
- * primitives wired to the recorder (MoveTo/LineTo/Polyline/Polygon)
- * are path-aware; PolyBezier is not.
+ * GAP: no curve recording — only the straight-line primitives wired
+ * to the recorder (MoveTo/LineTo/Polyline/Polygon) are path-aware;
+ * PolyBezier is not. A path slot therefore always holds flat data,
+ * which is why FlattenPath is the identity (see below).
  */
 #define GDI_PATH_SLOTS 4
 #define GDI_PATH_MAX_PTS 256
@@ -1504,7 +1531,9 @@ __declspec(dllexport) COLORREF GetPixel(HDC dc, INT x, INT y)
  * as g_cur_x/g_cur_y, same single-DC-at-a-time limitation.
  *
  * PolyFillMode is purely user-side (the kernel has no polygon-fill
- * primitive yet), so it lives only in the shadow. */
+ * primitive), so it lives only in the shadow — and it is read there:
+ * FillPath / StrokeAndFillPath scan-convert against it, ALTERNATE
+ * selecting the even-odd rule and WINDING the nonzero rule. */
 static COLORREF g_bk_color = 0x00FFFFFF; /* RGB white — GDI default */
 static INT g_bk_mode = 2;                /* OPAQUE (2) — GDI default */
 static INT g_poly_fill_mode = 1;         /* ALTERNATE (1) — GDI default */
@@ -1797,9 +1826,127 @@ __declspec(dllexport) INT GetStretchBltMode(HDC dc)
  * LineTo / Polyline / Polygon append to the path instead of
  * painting (see the recorder hooks above). EndPath closes the
  * bracket. StrokePath replays each recorded segment as a line;
- * FillPath replays each subpath's outline and closes it (no scan-
- * line interior fill — the kernel has no polygon-fill primitive).
+ * FillPath scan-converts the path's interior and paints it with the
+ * current brush; StrokeAndFillPath does both.
+ *
+ * The kernel exposes no polygon-fill primitive, so the interior fill
+ * is scan-converted here and emitted as horizontal spans through
+ * SYS_GDI_FILL_RECT. The geometry (edge list, active-edge scan,
+ * ALTERNATE / WINDING rules) lives in gdi32_fill.h so it can be
+ * unit-tested on the host (tests/host/test_gdi32_fill.cpp) — the
+ * same split gdi32_region.h uses for the HRGN math.
  */
+#include "gdi32_fill.h"
+
+/* Span sink for the scan converter: turns each run of interior
+ * pixels into a clipped kernel fill.
+ *
+ * Consecutive scanlines with identical x extents are coalesced into
+ * one taller rect before the syscall. Every SYS_GDI_FILL_RECT drives
+ * a full desktop recompose in the kernel, so collapsing an axis-
+ * aligned shape from one call per scanline down to one call total is
+ * the difference between a usable FillPath and a visible stall. */
+typedef struct
+{
+    HDC dc;
+    HANDLE hwnd;
+    COLORREF col;
+    INT px0; /* pending run: x in [px0, px1), y in [py, py + ph) */
+    INT px1;
+    INT py;
+    INT ph;
+    int pending;
+} GdiFillSink;
+
+static void gdi32_fill_flush(GdiFillSink* s)
+{
+    if (!s->pending)
+        return;
+    s->pending = 0;
+    /* Clip enforcement matches FillRect: the run decomposes exactly,
+     * one kernel fill per surviving clip piece. */
+    RECT pieces[8];
+    const int np = gdi32_clip_fill_pieces(s->dc, s->px0, s->py, s->px1, s->py + s->ph, pieces, 8);
+    if (np < 0)
+    {
+        (void)gdi32_rect_core(SYS_GDI_FILL_RECT, s->hwnd, s->px0, s->py, s->px1 - s->px0, s->ph, s->col);
+        return;
+    }
+    for (int i = 0; i < np; ++i)
+    {
+        (void)gdi32_rect_core(SYS_GDI_FILL_RECT, s->hwnd, pieces[i].left, pieces[i].top,
+                              pieces[i].right - pieces[i].left, pieces[i].bottom - pieces[i].top, s->col);
+    }
+}
+
+static void gdi32_fill_span(void* ctx, int y, int x0, int x1)
+{
+    GdiFillSink* s = (GdiFillSink*)ctx;
+    /* Directly below the pending run and the same width — grow it. */
+    if (s->pending && x0 == s->px0 && x1 == s->px1 && y == s->py + s->ph)
+    {
+        ++s->ph;
+        return;
+    }
+    gdi32_fill_flush(s);
+    s->px0 = x0;
+    s->px1 = x1;
+    s->py = y;
+    s->ph = 1;
+    s->pending = 1;
+}
+
+/* Scan-convert the recorded path's interior and paint it with the
+ * current brush colour, honouring the DC's polygon fill mode.
+ *
+ * Returns 1 if the interior was scanned (a path enclosing no area
+ * legitimately paints nothing), 0 if the geometry could not be
+ * scanned — a coordinate outside the arithmetic-safe range, more
+ * edges than the path can hold, or a scanline crossed by more than
+ * GDI_FILL_MAX_CROSSINGS edges. */
+static BOOL gdi32_path_fill_interior(HDC dc, HANDLE hwnd, GdiPath* p)
+{
+    /* One edge per recorded point is the worst case (every point
+     * contributes exactly one closing edge). At ~5 KB that frame is over
+     * the 4 KB threshold where the Windows ABI makes the compiler emit a
+     * __chkstk stack probe -- a symbol this freestanding -nostdlib DLL has
+     * no provider for, so the link fails outright (the i386 __chkstk in
+     * msvcrt_32/chkstk.S is the wrong architecture). Static keeps it out of
+     * the frame entirely. The path recorder it reads from is already
+     * module-global (GDI_PATH_SLOTS, g_poly_fill_mode, g_cur_brush), so
+     * this adds no reentrancy limit that was not already there.
+     * GAP: not reentrant -- one thread may fill one path at a time. */
+    static GdiFillEdge edges[GDI_PATH_MAX_PTS];
+    GdiFillSink sink;
+    sink.dc = dc;
+    sink.hwnd = hwnd;
+    sink.col = g_cur_brush ? gdi32_brush_colour(g_cur_brush) : 0;
+    sink.px0 = 0;
+    sink.px1 = 0;
+    sink.py = 0;
+    sink.ph = 0;
+    sink.pending = 0;
+
+    const int mode = (g_poly_fill_mode == 2) ? GDI_FILL_WINDING : GDI_FILL_ALTERNATE;
+    const int spans = GdiFillPathSpans(p->pts_x, p->pts_y, p->pt_count, p->sub_start, p->sub_count, mode, edges,
+                                       GDI_PATH_MAX_PTS, gdi32_fill_span, &sink);
+    if (spans < 0)
+        return 0;
+    gdi32_fill_flush(&sink);
+    return 1;
+}
+
+/* Release a path slot without replaying it. Shared by the non-window
+ * DC early-outs below, which consume the path and report success. */
+static BOOL gdi32_path_discard(GdiPath* p)
+{
+    p->dc = (HDC)0;
+    p->recording = 0;
+    p->closed = 0;
+    p->pt_count = 0;
+    p->sub_count = 0;
+    return 1;
+}
 
 /* Replay one path slot via the per-segment line core; if `close`,
  * also draw the closing edge of every subpath. Resets the slot to
@@ -1874,15 +2021,15 @@ __declspec(dllexport) BOOL StrokePath(HDC dc)
     {
         /* Non-window DC has no line primitive — discard and report
          * success (the path was consumed). */
-        p->dc = (HDC)0;
-        p->closed = 0;
-        p->pt_count = 0;
-        p->sub_count = 0;
-        return 1;
+        return gdi32_path_discard(p);
     }
     return gdi32_path_replay(hwnd, p, 0);
 }
 
+/* FillPath — fill the path's interior with the current brush, then
+ * discard the path. All open figures are closed implicitly, as GDI
+ * specifies. The outline is NOT stroked; that is StrokeAndFillPath's
+ * job. */
 __declspec(dllexport) BOOL FillPath(HDC dc)
 {
     GdiPath* p = gdi32_path_find(dc);
@@ -1891,23 +2038,18 @@ __declspec(dllexport) BOOL FillPath(HDC dc)
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
     {
-        p->dc = (HDC)0;
-        p->closed = 0;
-        p->pt_count = 0;
-        p->sub_count = 0;
-        return 1;
+        /* Non-window DC has no fill primitive — discard and report
+         * success (the path was consumed). */
+        return gdi32_path_discard(p);
     }
-    /* GAP: no scanline interior fill — FillPath strokes each
-     * subpath's closed outline (the kernel exposes no polygon-fill
-     * primitive). Revisit when SYS_GDI gains a fill-region call. */
-    return gdi32_path_replay(hwnd, p, 1);
+    const BOOL ok = gdi32_path_fill_interior(dc, hwnd, p);
+    (void)gdi32_path_discard(p);
+    return ok;
 }
 
-/* StrokeAndFillPath — stroke every subpath outline then close and
- * fill every subpath. In v0 both operations reduce to the same line
- * replay (the kernel has no polygon-fill), so this is FillPath with
- * the close flag set (matching real GDI's documented behaviour of
- * closing all open figures). */
+/* StrokeAndFillPath — fill the interior with the current brush and
+ * stroke every (implicitly closed) outline with the current pen.
+ * Fill first so the outline lands on top, matching GDI. */
 __declspec(dllexport) BOOL StrokeAndFillPath(HDC dc)
 {
     GdiPath* p = gdi32_path_find(dc);
@@ -1916,31 +2058,51 @@ __declspec(dllexport) BOOL StrokeAndFillPath(HDC dc)
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
     {
-        p->dc = (HDC)0;
-        p->closed = 0;
-        p->pt_count = 0;
-        p->sub_count = 0;
-        return 1;
+        return gdi32_path_discard(p);
     }
-    return gdi32_path_replay(hwnd, p, 1);
+    const BOOL ok = gdi32_path_fill_interior(dc, hwnd, p);
+    /* gdi32_path_replay resets the slot on its way out. */
+    (void)gdi32_path_replay(hwnd, p, 1);
+    return ok;
 }
 
-/* FlattenPath — convert curves to line segments. v0 paths contain
- * only straight-line data (no Bezier/arc recording), so flattening
- * is a no-op. */
+/* FlattenPath — convert every curve in the path to a sequence of line
+ * segments.
+ *
+ * The recorder only ever stores straight-line data: the primitives
+ * wired into the path bracket (MoveToEx / LineTo / Polyline /
+ * Polygon) are all line lists, and PolyBezier is not path-aware, so
+ * no curve record can reach a path slot. Flattening an already-flat
+ * path is the identity, which is exactly what GDI's FlattenPath does
+ * to a curve-free path — so this is REAL, not a stub: the point list
+ * it leaves behind is the correct flattened path, and GetPath after
+ * FlattenPath returns what Windows would return.
+ *
+ * GAP: when curve recording lands (PolyBezier / Arc / ArcTo inside a
+ * path bracket), this must grow the actual subdivision. The pin is
+ * the curve recorder, not this call. */
 __declspec(dllexport) BOOL FlattenPath(HDC dc)
 {
-    // STUB: no curves in v0 path data — nothing to flatten.
     GdiPath* p = gdi32_path_find(dc);
     return p && p->closed ? 1 : 0;
 }
 
-/* WidenPath — expand the path outline by the pen width. The kernel
- * has no pen-width-aware path expansion primitive, so this is a
- * stub that succeeds without modifying the path data. */
+/* WidenPath — replace the path with the outline that StrokePath
+ * would paint with the currently selected pen, so a subsequent
+ * FillPath paints the stroke as an area.
+ *
+ * Unlike FlattenPath this is a genuine omission, not an identity:
+ * a correct implementation needs two things this DLL does not have
+ * yet — a user-side record of the selected pen's width (CreatePen
+ * hands its width straight to the kernel and keeps nothing, so
+ * there is no width to widen BY), and polygon offsetting with join
+ * and cap handling to turn each subpath into a closed ribbon. Both
+ * are more than a marker's worth of work; until they land the path
+ * is left exactly as recorded, so FillPath after WidenPath fills the
+ * path's interior rather than its stroke. */
 __declspec(dllexport) BOOL WidenPath(HDC dc)
 {
-    // STUB: no pen-width expansion in v0 — path data unchanged.
+    // STUB: path data unchanged — no pen-width tracking, no outline offsetting.
     GdiPath* p = gdi32_path_find(dc);
     return p && p->closed ? 1 : 0;
 }
@@ -1952,12 +2114,7 @@ __declspec(dllexport) BOOL AbortPath(HDC dc)
     GdiPath* p = gdi32_path_find(dc);
     if (!p)
         return 0;
-    p->dc = (HDC)0;
-    p->recording = 0;
-    p->closed = 0;
-    p->pt_count = 0;
-    p->sub_count = 0;
-    return 1;
+    return gdi32_path_discard(p);
 }
 
 /* GetPath — retrieve the recorded path points and types.

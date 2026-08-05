@@ -19,6 +19,7 @@ extern DWORD XInputGetState(DWORD idx, void* state);
 extern DWORD XInputSetState(DWORD idx, void* vibration);
 extern DWORD XInputGetCapabilities(DWORD idx, DWORD flags, void* caps);
 extern DWORD XInputGetBatteryInformation(DWORD idx, BYTE type, void* battery);
+extern DWORD XInputGetKeystroke(DWORD idx, DWORD reserved, void* keystroke);
 extern void XInputEnable(BOOL enable);
 
 static void Out(const char* s)

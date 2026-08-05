@@ -430,7 +430,21 @@ syscall routing shows up immediately.
   return CRLF-terminated lines; the `*ConsoleInput*` family
   translates stdin bytes into `KEY_EVENT` `INPUT_RECORD` down/up
   pairs (VK + `uChar` + SHIFT/CTRL control-key state) in a userland
-  record queue. With `ENABLE_VIRTUAL_TERMINAL_PROCESSING` set on
+  record queue. `GetNumberOfConsoleInputEvents`,
+  `PeekConsoleInputA/W` and `FlushConsoleInputBuffer` no longer see
+  only already-drained records: each first probes the kernel stdin
+  ring with the non-blocking `SYS_STDIN_PEEK` (231), which reports
+  the buffered byte count (and optionally copies) *without*
+  advancing the ring tail. Peek and the event count fold parked
+  type-ahead together with ring bytes the record queue could not
+  hold, counting the residue prospectively at one down/up pair per
+  byte; flush snapshots the available count once and drains exactly
+  that many bytes through the blocking read, so bytes typed after
+  the flush began are correctly treated as post-flush input. The
+  probe is host-tested by
+  `tests/host/test_kernel32_console_peek.cpp`. GAP: none of these
+  block, so a caller polling an empty pipeline legitimately sees
+  zero events. With `ENABLE_VIRTUAL_TERMINAL_PROCESSING` set on
   stdout/stderr, written bytes feed a VT tracker that keeps the
   `GetConsoleScreenBufferInfo` mirror (cursor position + attribute
   word) coherent while the bytes still pass unmodified to the
@@ -1704,17 +1718,37 @@ WinDbg client API, `SymLoadModuleEx`.
   returned HBITMAP behaves exactly like one from
   `CreateCompatibleBitmap` + `SetDIBits`. The i386 `user32_32`
   implementation follows the same decode + syscall pair. NULL on any
-  failure (Win32 has no system-bitmap fallback). GAP: integer
-  ordinals only (no string resource names); bitmaps larger than
-  128x128 are rejected (static decode buffer).
+  failure (Win32 has no system-bitmap fallback). Resources may be
+  named as well as numbered — see the named-resource note below.
+  GAP: bitmaps larger than 128x128 are rejected (static decode
+  buffer).
 - `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — REAL.
   The kernel now posts Win32 VK codes in `WM_KEYDOWN`/`WM_KEYUP`
   `wParam` (translated from DuetOS `KeyCode` via
   `kernel/subsystems/win32/keycode_vk.h`). `LoadAcceleratorsA/W`
   parse `RT_ACCELERATOR` from the PE's `.rsrc` section via
   `duet_res_find`; `TranslateAcceleratorA/W` match VK + modifier
-  state and post `WM_COMMAND`. GAP: named (string) accelerator
-  tables are unsupported (only `MAKEINTRESOURCE` ordinals).
+  state and post `WM_COMMAND`. GAP: a fixed pool of 4 accelerator
+  tables per process, never reclaimed.
+- **Named (string) resources — REAL on both bitnesses.**
+  `LoadBitmapA/W`, `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W`
+  and `LoadAcceleratorsA/W` accept a `.rc` resource declared by
+  name, not just a `MAKEINTRESOURCE` ordinal. A pointer at or below
+  `0xFFFF` is an ordinal; anything above is a string, which the `A`
+  entry points widen before lookup. The comparison is the ASCII
+  case-insensitive fold the resource compiler applies, and the two
+  key kinds never cross — the string `"7"` does not match ordinal
+  7, and ordinal 7 does not match a named entry. Hostile
+  `IMAGE_RESOURCE_DIR_STRING_U` forms fail closed: a `Length`
+  running past the resource section, a string offset past the
+  directory extent, and a name inside the host buffer but outside
+  the mapped section extent are all rejected. Host-tested by
+  `tests/host/test_pe_named_resources.cpp`. GAP: an `A`-entry name
+  longer than 255 characters is truncated at the widening step, so
+  it simply finds nothing — length is part of the comparison, so a
+  truncated name cannot alias a longer one. GAP: the `A`-to-`W`
+  widening is byte-to-code-point, so names outside Latin-1 in the
+  caller's code page will not match.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
@@ -1874,13 +1908,20 @@ WinDbg client API, `SymLoadModuleEx`.
 - State: `SetBkColor`, `SetBkMode`, `SetMapMode`,
   `SetTextColor`, `SetTextAlign`
 - Transfer mode: `SetROP2` / `GetROP2` — REAL. ROP2 is kernel per-DC
-  state set via `SYS_GDI_SET_ROP2` (229); memory-DC drawing honours
-  `R2_BLACK` / `R2_NOT` / `R2_XORPEN` / `R2_COPYPEN` / `R2_WHITE`
-  per-pixel in the kernel (pixel core host-tested by
-  `tests/host/test_gdi32_rop2.cpp`). GAP: the other 11 R2 codes fall
-  back to `R2_COPYPEN`. GAP: window DCs honour only `R2_BLACK` /
-  `R2_WHITE`, applied as a colour transform rather than a
-  read-modify-write against the framebuffer.
+  state set via `SYS_GDI_SET_ROP2` (229). All 16 `R2_*` codes are
+  implemented per-pixel on memory DCs by `Rop2Apply`
+  (`kernel/subsystems/win32/gdi_surface_math.h`) and honoured by the
+  line, rect-fill, rect-outline, `PatBlt` and ellipse paths; the
+  truth table is host-tested code-by-code in
+  `tests/host/test_gdi32_rop2.cpp`. `Rop2NeedsDst` lets the four
+  destination-independent codes (`R2_BLACK`, `R2_NOTCOPYPEN`,
+  `R2_COPYPEN`, `R2_WHITE`) fill flat instead of
+  read-modify-writing, and `R2_NOP` short-circuits to no store at
+  all. GAP: window DCs still honour only `R2_BLACK` / `R2_WHITE`,
+  applied as a colour transform rather than a read-modify-write
+  against the framebuffer — the compositor display list carries a
+  colour but no raster-op channel (`// GAP:` markers on the
+  window-DC `PatBlt` and `Ellipse` arms of `gdi_objects.cpp`).
 - Region API (rect-list): `CreateRectRgn`, `CreateRectRgnIndirect`,
   `CombineRgn`, `SetRectRgn`, `GetRgnBox`, `PtInRegion`,
   `RectInRegion`, `OffsetRgn`, `EqualRgn` — REAL. `CombineRgn` runs
@@ -1916,10 +1957,21 @@ WinDbg client API, `SymLoadModuleEx`.
 - Path API: gdi32.c carries a real per-DC path recorder —
   `BeginPath`, `EndPath`, `CloseFigure`, `StrokePath`, `FillPath`,
   `StrokeAndFillPath`, `AbortPath`, `GetPath`, `PathToRegion` record
-  MoveTo/LineTo segments inside the bracket and replay them. GAP: no
-  curve segments (arcs/béziers are not recorded) and no scan-line
-  interior fill — `FillPath` strokes each closed subpath's outline.
-  `FlattenPath`, `WidenPath` — STUB.
+  MoveTo/LineTo segments inside the bracket and replay them.
+  `FillPath` / `StrokeAndFillPath` are REAL: the geometry in
+  `userland/libs/gdi32/gdi32_fill.h` builds one shared edge list
+  across every implicitly-closed subpath, scan-converts it with the
+  DC's polygon fill mode (ALTERNATE even-odd / WINDING nonzero),
+  and emits horizontal spans — so overlapping subpaths interact
+  through the fill rule instead of each filling independently.
+  Sampling is half-open (`ytop <= y < ybot`, pixel centre at
+  `y + 0.5`), so a vertex shared by two edges counts once.
+  Host-tested by `tests/host/test_gdi32_fill.cpp`. GAP: no curve
+  segments — arcs and béziers are not recorded inside the bracket,
+  so `FlattenPath` has nothing to flatten and simply succeeds on a
+  closed path. `WidenPath` — STUB (no pen-width tracking, no
+  outline offsetting). GAP: fixed pools (`GDI_PATH_SLOTS` open
+  paths, `GDI_PATH_MAX_PTS` points) fail the call on exhaustion.
 - Shape regions: `CreateRoundRectRgn`, `CreatePolygonRgn` — STUB
   (`CreateEllipticRgn` is REAL, see above).
 - Metafiles: `CreateMetaFile`, `PlayMetaFile` — STUB
@@ -2741,13 +2793,57 @@ SetDataFormat (recognises mouse / keyboard formats), Acquire,
 Unacquire, GetDeviceState (routes to SYS_WIN_GET_KEYSTATE /
 SYS_WIN_GET_CURSOR / SYS_WIN_GET_MOUSE_DELTA). STUB: joystick /
 gamepad enumeration, force-feedback effects, polling on
-unacquired devices.
+unacquired devices. The gamepad STUB is no longer blocked on a
+driver: the 4-slot HID table `dinput8` would enumerate exists and
+is readable via `SYS_GAMEPAD_STATE` (230) — see `xinput1_4.dll`
+below — it simply has not been wired to this front-end.
 
-### xinput1_4.dll  (~85 LOC) — `XInputGetState`, `XInputSetState`, `XInputGetCapabilities`, `XInputGetBatteryInformation`, `XInputGetKeystroke`, `XInputEnable`
+### xinput1_4.dll  (~127 LOC) — `XInputGetState`, `XInputSetState`, `XInputGetCapabilities`, `XInputGetBatteryInformation`, `XInputGetKeystroke`, `XInputEnable`
 
-REAL for "no controllers connected" — every slot returns
-ERROR_DEVICE_NOT_CONNECTED. Real gamepad support depends on
-the USB HID stack.
+**Bound to real hardware since 2026-08-05.** Every export issues
+`SYS_GAMEPAD_STATE` (230) with a slot index (0..3) and receives a
+44-byte kernel-owned wire snapshot of the `hid_gamepad` driver's
+slot table. The DLL never hands the kernel report data — the
+kernel is the only writer of gamepad state, and the syscall has no
+write arm. The userland wire twin (`xinput_wire.h`) mirrors the
+kernel twin in `kernel/subsystems/win32/input_syscall.h`; both
+sides `static_assert` the 44-byte size, and the kernel rejects any
+`rdx` that is not exactly that.
+
+- `XInputGetState` — REAL. Maps the wire snapshot to
+  `XINPUT_STATE`: packet number, button mask, both triggers, both
+  thumbsticks. A disconnected slot, an out-of-range slot index, or
+  a failed syscall all yield `ERROR_DEVICE_NOT_CONNECTED` (1167)
+  with a zeroed state.
+- `XInputGetCapabilities` — REAL. Maps the wire capability fields
+  to `XINPUT_CAPABILITIES`. Motor strengths scale from the
+  kernel's 8-bit values to XInput's 16-bit range by `* 257`, so
+  `0xFF` maps exactly to `0xFFFF`. The flags filter argument is
+  ignored because every DuetOS slot is a gamepad.
+- `XInputSetState` — STUB. Validates the slot (an empty one
+  returns `ERROR_DEVICE_NOT_CONNECTED`), then accepts the
+  vibration request and drops it, returning `ERROR_SUCCESS`. There
+  is no rumble output path: the HID driver has no interrupt-OUT
+  report writer yet.
+- `XInputGetBatteryInformation` — GAP: the connection state is
+  real, but every connected pad is reported `BATTERY_TYPE_WIRED` /
+  `BATTERY_LEVEL_FULL`. No battery level is plumbed through the
+  HID driver. Revisit with wireless receivers.
+- `XInputGetKeystroke` — GAP: no `VK_PAD_*` keystroke queue. A
+  connected pad always returns `ERROR_EMPTY` (4306) with a zeroed
+  `XINPUT_KEYSTROKE`; a disconnected one returns
+  `ERROR_DEVICE_NOT_CONNECTED`.
+- `XInputEnable` — GAP: a no-op. The `enable=FALSE` "mute input
+  while unfocused" latch is not tracked, so state reads stay live
+  regardless of focus.
+
+The kernel side is host-tested by `tests/host/test_hid_gamepad.cpp`
+and the gamepad arm of `XhciDescriptorSelfTest` at boot; the
+`xinput_smoke` PE fixture exercises the DLL in the ring-3 battery,
+where the codes it checks are the real connection state. GAP: the
+userland wire twin has no host test of its own pinning it against
+the kernel twin — the `static_assert` pair catches a size change
+but not a field reorder.
 
 ### xaudio2_8.dll  (~315 LOC) — `XAudio2Create`, `CreateAudioReverb`, `CreateAudioVolumeMeter`
 

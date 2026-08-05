@@ -555,6 +555,10 @@ __declspec(dllexport) INT __stdcall MessageBoxW(HWND owner, const wchar_t16* tex
 /* LoadIcon/LoadCursor — REAL for system resources (NULL hInstance
  * returns sentinel); REAL for PE resources (decode .rsrc, register
  * icon as GDI bitmap or cursor via SYS_GDI_CREATE_CURSOR_RGBA).
+ * Both a MAKEINTRESOURCE ordinal and a name-STRING resource are
+ * accepted; a string is folded ASCII-case-insensitively against the
+ * IMAGE_RESOURCE_DIR_STRING_U entries, which is what the resource
+ * compiler and the Win32 loader both do.
  * See userland/libs/user32/user32.c for the matching 64-bit impl. */
 
 #define IDC_ARROW_32 32512
@@ -566,11 +570,57 @@ __declspec(dllexport) INT __stdcall MessageBoxW(HWND owner, const wchar_t16* tex
 #define SYS_GDI_SET_DIBITS 214
 #define SYS_GDI_CREATE_CURSOR_RGBA 224
 
-static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, unsigned long name_id)
+/* --- MAKEINTRESOURCE / named-resource key construction ---
+ *
+ * Same contract as the x86_64 sibling in userland/libs/user32/user32.c,
+ * duplicated for the reason kernel32_32_resource.c states: on i386 a
+ * pointer is 32 bits, so IS_INTRESOURCE's high-half test is a different
+ * expression and sharing the translation layer would leak a 64-bit
+ * shape into a `_32` DLL. Both halves accept a name-STRING resource as
+ * well as a MAKEINTRESOURCE ordinal. */
+#define USER32_32_RES_NAME_MAX 255u
+
+static int user32_32_res_is_int(const void* p)
+{
+    return ((unsigned long)p >> 16) == 0ul;
+}
+
+static DUET_RES_KEY user32_32_res_key_from_wide(const wchar_t16* p)
+{
+    if (p == (const wchar_t16*)0 || user32_32_res_is_int((const void*)p))
+        return duet_res_key_id((unsigned int)(unsigned long)(const void*)p);
+    return duet_res_key_name((const unsigned short*)p, duet_res_name_len((const unsigned short*)p));
+}
+
+/* `buf` must stay live for as long as the returned key is used. A name
+ * longer than `cap - 1` is truncated, which cannot alias a longer
+ * resource name because the length is part of the comparison. */
+static DUET_RES_KEY user32_32_res_key_from_ansi(const char* s, wchar_t16* buf, unsigned int cap)
+{
+    unsigned int i = 0;
+    if (s == (const char*)0 || user32_32_res_is_int((const void*)s))
+        return duet_res_key_id((unsigned int)(unsigned long)(const void*)s);
+    while (s[i] != 0 && i + 1u < cap)
+    {
+        buf[i] = (wchar_t16)(unsigned char)s[i];
+        ++i;
+    }
+    buf[i] = 0;
+    return duet_res_key_name((const unsigned short*)buf, i);
+}
+
+static int user32_32_res_key_usable(const DUET_RES_KEY* key)
+{
+    if (key->by_name)
+        return key->name_len != 0u;
+    return key->id != 0u && key->id <= 0xFFFFu;
+}
+
+static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, const DUET_RES_KEY* name)
 {
     if (inst == (HINSTANCE)0)
         return (HICON)1; /* system icon sentinel */
-    if (name_id == 0 || name_id > 0xFFFF)
+    if (!user32_32_res_key_usable(name))
         return (HICON)1;
     {
         DUET_RES_VIEW view;
@@ -579,7 +629,7 @@ static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, unsigned long na
         const void* base = (const void*)inst;
         if (!duet_res_init(base, &view))
             return (HICON)1;
-        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_ICON, name_id, 32, 32, &icon_id, &iw, &ih))
+        if (!duet_res_pick_icon_key(&view, DUET_RES_TYPE_GROUP_ICON, name, 32, 32, &icon_id, &iw, &ih))
             return (HICON)1;
         if (iw == 0 || ih == 0 || iw > 64 || ih > 64)
             return (HICON)1;
@@ -601,23 +651,27 @@ static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, unsigned long na
 
 __declspec(dllexport) HICON __stdcall LoadIconA(HINSTANCE inst, const char* name)
 {
-    return user32_32_load_icon_impl(inst, (unsigned long)(unsigned long)name);
+    wchar_t16 wide[USER32_32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = user32_32_res_key_from_ansi(name, wide, USER32_32_RES_NAME_MAX + 1u);
+    return user32_32_load_icon_impl(inst, &key);
 }
 
 __declspec(dllexport) HICON __stdcall LoadIconW(HINSTANCE inst, const wchar_t16* name)
 {
-    return user32_32_load_icon_impl(inst, (unsigned long)(unsigned long)name);
+    const DUET_RES_KEY key = user32_32_res_key_from_wide(name);
+    return user32_32_load_icon_impl(inst, &key);
 }
 
-static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, unsigned long name_id)
+static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, const DUET_RES_KEY* name)
 {
+    /* A string name has no system shape, so it falls back to IDC_ARROW. */
     if (inst == (HINSTANCE)0)
     {
-        if (name_id == 0 || name_id > 0xFFFF)
+        if (name->by_name || !user32_32_res_key_usable(name))
             return (HCURSOR)IDC_ARROW_32;
-        return (HCURSOR)name_id;
+        return (HCURSOR)name->id;
     }
-    if (name_id == 0 || name_id > 0xFFFF)
+    if (!user32_32_res_key_usable(name))
         return (HCURSOR)IDC_ARROW_32;
     {
         DUET_RES_VIEW view;
@@ -626,7 +680,7 @@ static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, unsigned lon
         const void* base = (const void*)inst;
         if (!duet_res_init(base, &view))
             return (HCURSOR)IDC_ARROW_32;
-        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_CURSOR, name_id, 32, 32, &cursor_id, &cw, &ch))
+        if (!duet_res_pick_icon_key(&view, DUET_RES_TYPE_GROUP_CURSOR, name, 32, 32, &cursor_id, &cw, &ch))
             return (HCURSOR)IDC_ARROW_32;
         if (cw == 0 || ch == 0 || cw > 64 || ch > 64)
             return (HCURSOR)IDC_ARROW_32;
@@ -650,12 +704,15 @@ static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, unsigned lon
 
 __declspec(dllexport) HCURSOR __stdcall LoadCursorA(HINSTANCE inst, const char* name)
 {
-    return user32_32_load_cursor_impl(inst, (unsigned long)(unsigned long)name);
+    wchar_t16 wide[USER32_32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = user32_32_res_key_from_ansi(name, wide, USER32_32_RES_NAME_MAX + 1u);
+    return user32_32_load_cursor_impl(inst, &key);
 }
 
 __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_t16* name)
 {
-    return user32_32_load_cursor_impl(inst, (unsigned long)(unsigned long)name);
+    const DUET_RES_KEY key = user32_32_res_key_from_wide(name);
+    return user32_32_load_cursor_impl(inst, &key);
 }
 
 /* LoadImage — unified loader for IMAGE_ICON, IMAGE_CURSOR, IMAGE_BITMAP. */
@@ -670,14 +727,11 @@ __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_
  * LoadIcon/LoadCursor have system shapes, so failing closed with NULL is
  * the documented contract. See userland/libs/user32/user32.c for the
  * matching 64-bit impl. */
-static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, unsigned long name_id)
+static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, const DUET_RES_KEY* name)
 {
     if (inst == (HINSTANCE)0)
         return (HANDLE)0; /* no module -> no .rsrc to decode */
-    /* GAP: named (string) RT_BITMAP resources unimplemented — integer
-     * ordinals only, same as LoadIcon/LoadCursor — revisit when a
-     * by-name caller appears. */
-    if (name_id == 0 || name_id > 0xFFFF)
+    if (!user32_32_res_key_usable(name))
         return (HANDLE)0;
     {
         DUET_RES_VIEW view;
@@ -685,7 +739,7 @@ static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, unsigned long
         const void* base = (const void*)inst;
         if (!duet_res_init(base, &view))
             return (HANDLE)0;
-        if (!duet_res_bitmap_info(&view, (unsigned int)name_id, &bw, &bh, &bpp))
+        if (!duet_res_bitmap_info_key(&view, name, &bw, &bh, &bpp))
             return (HANDLE)0;
         /* GAP: bitmaps larger than 128x128 rejected (static decode
          * buffer, 64 KiB) — revisit when a caller ships bigger art. */
@@ -693,8 +747,7 @@ static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, unsigned long
             return (HANDLE)0;
         {
             static unsigned char bgra[128 * 128 * 4];
-            if (!duet_res_decode_bitmap(&view, (unsigned int)name_id, bgra, 128 * 128, (unsigned int*)0,
-                                        (unsigned int*)0))
+            if (!duet_res_decode_bitmap_key(&view, name, bgra, 128 * 128, (unsigned int*)0, (unsigned int*)0))
                 return (HANDLE)0;
             /* Create a GDI bitmap and upload the decoded pixels — the
              * same two syscalls user32_32_load_icon_impl uses. */
@@ -711,11 +764,14 @@ static HANDLE __stdcall user32_32_load_bitmap_impl(HINSTANCE inst, unsigned long
 
 __declspec(dllexport) HANDLE __stdcall LoadBitmapA(HINSTANCE inst, const char* name)
 {
-    return user32_32_load_bitmap_impl(inst, (unsigned long)(unsigned long)name);
+    wchar_t16 wide[USER32_32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = user32_32_res_key_from_ansi(name, wide, USER32_32_RES_NAME_MAX + 1u);
+    return user32_32_load_bitmap_impl(inst, &key);
 }
 __declspec(dllexport) HANDLE __stdcall LoadBitmapW(HINSTANCE inst, const wchar_t16* name)
 {
-    return user32_32_load_bitmap_impl(inst, (unsigned long)(unsigned long)name);
+    const DUET_RES_KEY key = user32_32_res_key_from_wide(name);
+    return user32_32_load_bitmap_impl(inst, &key);
 }
 // STUB: returns NULL - RT_ACCELERATOR needs KeyCode->VK translation.
 __declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)

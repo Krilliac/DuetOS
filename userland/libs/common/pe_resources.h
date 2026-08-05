@@ -401,6 +401,88 @@ DUET_RES_INLINE int duet_res_key_equal(const DUET_RES_KEY* a, const DUET_RES_KEY
     return 1;
 }
 
+/* ---- Named (string) resource lookup ----
+ *
+ * A directory entry's NameOffsetOrId field is a discriminated union.
+ * High bit SET: the low 31 bits are a directory-relative offset to an
+ * IMAGE_RESOURCE_DIR_STRING_U — a u16 Length followed by exactly
+ * Length UTF-16 code units, with NO NUL terminator. High bit CLEAR:
+ * the field is an integer ordinal. Both shapes are legal at the Type
+ * and Name levels, and `.rc` sources use both.
+ *
+ * The icon / cursor / bitmap decoders below therefore come in two
+ * forms. The `_key` form takes a DUET_RES_KEY and accepts either shape:
+ *   duet_res_pick_icon_key, duet_res_bitmap_info_key,
+ *   duet_res_decode_bitmap_key
+ * The original integer-only names are kept as thin wrappers that build
+ * an ordinal key, so every existing ordinal caller is unaffected.
+ * Keys are built with duet_res_key_id / duet_res_key_name, and a
+ * caller holding a NUL-terminated LPCWSTR measures it first with
+ * duet_res_name_len.
+ *
+ * Only the Name level (level 2) is variable in practice for these
+ * callers: the Type level is a fixed RT_* ordinal, and the RT_ICON /
+ * RT_CURSOR members an RT_GROUP_ICON / RT_GROUP_CURSOR directory
+ * points at are integer nIDs by format definition.
+ *
+ * Comparison is ASCII case-insensitive (a-z folded to A-Z), which is
+ * what the resource compiler and the Windows loader both do.
+ *
+ * A DUET_RES_KEY BORROWS its characters — it never copies them — so
+ * the buffer must outlive the key.
+ *
+ * Bounds: the string offset and the Length*2 byte span are both
+ * validated against the mapped resource-section extent (duet_res_dir_at
+ * over duet_res_at) BEFORE any code unit is read, in duet_res_dir_entry.
+ * A hostile directory therefore cannot steer a read outside the mapped
+ * image; a failed validation makes the lookup report "not found"
+ * without having dereferenced anything.
+ */
+
+/* Key constructors.
+ *
+ * Every caller that builds a DUET_RES_KEY by hand has to zero all four
+ * fields or the comparison above reads an uninitialised `name_len`, so
+ * the two legal shapes get one constructor each. `duet_res_key_name`
+ * takes a counted string because IMAGE_RESOURCE_DIR_STRING_U is counted
+ * and unterminated; a caller holding a NUL-terminated LPCWSTR measures
+ * it with duet_res_name_len first. */
+DUET_RES_INLINE DUET_RES_KEY duet_res_key_id(unsigned int id)
+{
+    DUET_RES_KEY k;
+    k.by_name = 0;
+    k.id = id;
+    k.name = (const unsigned short*)0;
+    k.name_len = 0u;
+    return k;
+}
+
+DUET_RES_INLINE DUET_RES_KEY duet_res_key_name(const unsigned short* name, unsigned int len)
+{
+    DUET_RES_KEY k;
+    k.by_name = 1;
+    k.id = 0u;
+    k.name = name;
+    k.name_len = len;
+    if (name == (const unsigned short*)0)
+        k.name_len = 0u;
+    return k;
+}
+
+/* Length of a NUL-terminated UTF-16 string, capped at 0xFFFF because
+ * that is the widest IMAGE_RESOURCE_DIR_STRING_U a Length field can
+ * describe — a longer caller string can never match anything, so the
+ * cap costs no matches and bounds the scan of a non-terminated buffer. */
+DUET_RES_INLINE unsigned int duet_res_name_len(const unsigned short* s)
+{
+    unsigned int n = 0u;
+    if (s == (const unsigned short*)0)
+        return 0u;
+    while (s[n] != 0u && n < 0xFFFFu)
+        ++n;
+    return n;
+}
+
 /* Find the child offset of the entry matching `key` in the directory at
  * `dir_off`. Returns 1 on hit. */
 DUET_RES_INLINE int duet_res_lookup(const DUET_RES_VIEW* view, unsigned int dir_off, const DUET_RES_KEY* key,
@@ -620,14 +702,19 @@ DUET_RES_INLINE int duet_res_find_string(const DUET_RES_VIEW* view, unsigned int
  * ID into `*out_icon_id`. Returns 1 on hit, 0 if the group is empty
  * or malformed.
  *
+ * `name_key` is the level-2 key, so the group may be named either by an
+ * integer ordinal or by a UTF-16 string (`.rc` `MYICON ICON "x.ico"`).
+ * The level-1 type stays an integer because RT_GROUP_ICON /
+ * RT_GROUP_CURSOR are fixed ordinals, and the RT_ICON members the group
+ * points at are always integer nIDs by format definition.
+ *
  * Selection heuristic: prefer exact match, then the next larger, then
  * the largest available. Ties break on higher bit depth. */
-DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int type_id, unsigned int name_id,
-                                       unsigned int desired_w, unsigned int desired_h, unsigned int* out_icon_id,
-                                       unsigned int* out_width, unsigned int* out_height)
+DUET_RES_INLINE int duet_res_pick_icon_key(const DUET_RES_VIEW* view, unsigned int type_id,
+                                           const DUET_RES_KEY* name_key, unsigned int desired_w, unsigned int desired_h,
+                                           unsigned int* out_icon_id, unsigned int* out_width, unsigned int* out_height)
 {
     DUET_RES_KEY type;
-    DUET_RES_KEY name;
     unsigned int rva;
     unsigned int size;
     const unsigned char* data;
@@ -638,19 +725,12 @@ DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int t
     unsigned int best_w;
     unsigned int best_h;
 
-    if (out_icon_id == (unsigned int*)0)
+    if (out_icon_id == (unsigned int*)0 || name_key == (const DUET_RES_KEY*)0)
         return 0;
 
-    type.by_name = 0;
-    type.id = type_id;
-    type.name = (const unsigned short*)0;
-    type.name_len = 0u;
-    name.by_name = 0;
-    name.id = name_id;
-    name.name = (const unsigned short*)0;
-    name.name_len = 0u;
+    type = duet_res_key_id(type_id);
 
-    if (!duet_res_find(view, &type, &name, 0, 0, &rva, &size))
+    if (!duet_res_find(view, &type, name_key, 0, 0, &rva, &size))
         return 0;
     data = duet_res_at(view, rva, size);
     if (data == (const unsigned char*)0 || size < DUET_RES_GRPICON_HEADER_SIZE)
@@ -700,6 +780,15 @@ DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int t
     return 1;
 }
 
+/* Integer-ordinal form of duet_res_pick_icon_key. */
+DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int type_id, unsigned int name_id,
+                                       unsigned int desired_w, unsigned int desired_h, unsigned int* out_icon_id,
+                                       unsigned int* out_width, unsigned int* out_height)
+{
+    const DUET_RES_KEY name = duet_res_key_id(name_id);
+    return duet_res_pick_icon_key(view, type_id, &name, desired_w, desired_h, out_icon_id, out_width, out_height);
+}
+
 /* Decode one DIB scanline into BGRA output pixels.
  *
  * `palette` points to the DIB colour table (BGRX quads) and may be NULL
@@ -742,9 +831,9 @@ DUET_RES_INLINE void duet_res_decode_dib_row(const unsigned char* row, const uns
             if (bpp == 8u)
                 idx = row[x];
             else if (bpp == 4u)
-                idx = (row[x / 2u] >> (4u * (1u - (x & 1u)))) & 0xFu;
+                idx = ((unsigned int)row[x / 2u] >> (4u * (1u - (x & 1u)))) & 0xFu;
             else /* bpp == 1 */
-                idx = (row[x / 8u] >> (7u - (x & 7u))) & 1u;
+                idx = ((unsigned int)row[x / 8u] >> (7u - (x & 7u))) & 1u;
             if (idx < palette_entries)
             {
                 b = palette[idx * 4u];
@@ -897,7 +986,7 @@ DUET_RES_INLINE int duet_res_decode_icon(const DUET_RES_VIEW* view, unsigned int
          * alpha channel carries transparency; we honour both. */
         for (x = 0; x < bmp_w; ++x)
         {
-            const unsigned int and_bit = (and_row[x / 8u] >> (7u - (x & 7u))) & 1u;
+            const unsigned int and_bit = ((unsigned int)and_row[x / 8u] >> (7u - (x & 7u))) & 1u;
             if (and_bit)
                 dst_row[x * 4u + 3u] = 0;
         }
@@ -924,18 +1013,18 @@ DUET_RES_INLINE int duet_res_decode_icon(const DUET_RES_VIEW* view, unsigned int
  * wrap the truncation check. */
 #define DUET_RES_BITMAP_MAX_DIM 16384u
 
-/* Internal: locate + validate the RT_BITMAP body for integer id
- * `bitmap_id`. On success writes the body pointer, the parsed geometry
- * and the colour-table entry count; the body has already been proven
- * to hold the header, the colour table and every pixel row. Fails
- * closed (returns 0) on any malformed or unsupported header. */
-DUET_RES_INLINE int duet_res_bitmap_locate(const DUET_RES_VIEW* view, unsigned int bitmap_id,
+/* Internal: locate + validate the RT_BITMAP body named by `name_key`
+ * (integer ordinal or UTF-16 string). On success writes the body
+ * pointer, the parsed geometry and the colour-table entry count; the
+ * body has already been proven to hold the header, the colour table and
+ * every pixel row. Fails closed (returns 0) on any malformed or
+ * unsupported header. */
+DUET_RES_INLINE int duet_res_bitmap_locate(const DUET_RES_VIEW* view, const DUET_RES_KEY* name_key,
                                            const unsigned char** out_body, unsigned int* out_header_bytes,
                                            unsigned int* out_w, unsigned int* out_h, int* out_top_down,
                                            unsigned int* out_bpp, unsigned int* out_palette_entries)
 {
     DUET_RES_KEY type;
-    DUET_RES_KEY name;
     unsigned int rva;
     unsigned int size;
     const unsigned char* body;
@@ -948,16 +1037,11 @@ DUET_RES_INLINE int duet_res_bitmap_locate(const DUET_RES_VIEW* view, unsigned i
     unsigned int stride;
     unsigned long long needed;
 
-    type.by_name = 0;
-    type.id = DUET_RES_TYPE_BITMAP;
-    type.name = (const unsigned short*)0;
-    type.name_len = 0u;
-    name.by_name = 0;
-    name.id = bitmap_id;
-    name.name = (const unsigned short*)0;
-    name.name_len = 0u;
+    if (name_key == (const DUET_RES_KEY*)0)
+        return 0;
+    type = duet_res_key_id(DUET_RES_TYPE_BITMAP);
 
-    if (!duet_res_find(view, &type, &name, 0, 0, &rva, &size))
+    if (!duet_res_find(view, &type, name_key, 0, 0, &rva, &size))
         return 0;
     body = duet_res_at(view, rva, size);
     if (body == (const unsigned char*)0 || size < 40u)
@@ -1015,22 +1099,32 @@ DUET_RES_INLINE int duet_res_bitmap_locate(const DUET_RES_VIEW* view, unsigned i
 
 /* Query an RT_BITMAP resource's geometry without decoding it, so a
  * caller can size its pixel buffer first. Returns 1 on hit. */
-DUET_RES_INLINE int duet_res_bitmap_info(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned int* out_w,
-                                         unsigned int* out_h, unsigned int* out_bpp)
+DUET_RES_INLINE int duet_res_bitmap_info_key(const DUET_RES_VIEW* view, const DUET_RES_KEY* name_key,
+                                             unsigned int* out_w, unsigned int* out_h, unsigned int* out_bpp)
 {
-    return duet_res_bitmap_locate(view, bitmap_id, (const unsigned char**)0, (unsigned int*)0, out_w, out_h, (int*)0,
+    return duet_res_bitmap_locate(view, name_key, (const unsigned char**)0, (unsigned int*)0, out_w, out_h, (int*)0,
                                   out_bpp, (unsigned int*)0);
 }
 
-/* Decode the RT_BITMAP with integer id `bitmap_id` into caller-provided
- * top-down BGRA pixels. `out_bgra` must point to `max_pixels * 4`
- * writable bytes; the decode is refused (0) when `w * h > max_pixels`.
- * Output alpha is always 255 — GDI treats a DIB's 4th byte as padding,
- * so a bitmap authored with zeroed pad bytes must not come out
- * invisible on an alpha-honouring compositor. On success writes the
- * dimensions to `*out_w` / `*out_h` (when non-NULL) and returns 1. */
-DUET_RES_INLINE int duet_res_decode_bitmap(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned char* out_bgra,
-                                           unsigned int max_pixels, unsigned int* out_w, unsigned int* out_h)
+/* Integer-ordinal form of duet_res_bitmap_info_key. */
+DUET_RES_INLINE int duet_res_bitmap_info(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned int* out_w,
+                                         unsigned int* out_h, unsigned int* out_bpp)
+{
+    const DUET_RES_KEY name = duet_res_key_id(bitmap_id);
+    return duet_res_bitmap_info_key(view, &name, out_w, out_h, out_bpp);
+}
+
+/* Decode the RT_BITMAP named by `name_key` (integer ordinal or UTF-16
+ * string) into caller-provided top-down BGRA pixels. `out_bgra` must
+ * point to `max_pixels * 4` writable bytes; the decode is refused (0)
+ * when `w * h > max_pixels`. Output alpha is always 255 — GDI treats a
+ * DIB's 4th byte as padding, so a bitmap authored with zeroed pad bytes
+ * must not come out invisible on an alpha-honouring compositor. On
+ * success writes the dimensions to `*out_w` / `*out_h` (when non-NULL)
+ * and returns 1. */
+DUET_RES_INLINE int duet_res_decode_bitmap_key(const DUET_RES_VIEW* view, const DUET_RES_KEY* name_key,
+                                               unsigned char* out_bgra, unsigned int max_pixels, unsigned int* out_w,
+                                               unsigned int* out_h)
 {
     const unsigned char* body;
     unsigned int header_bytes;
@@ -1046,7 +1140,7 @@ DUET_RES_INLINE int duet_res_decode_bitmap(const DUET_RES_VIEW* view, unsigned i
 
     if (out_bgra == (unsigned char*)0)
         return 0;
-    if (!duet_res_bitmap_locate(view, bitmap_id, &body, &header_bytes, &bmp_w, &bmp_h, &top_down, &bpp,
+    if (!duet_res_bitmap_locate(view, name_key, &body, &header_bytes, &bmp_w, &bmp_h, &top_down, &bpp,
                                 &palette_entries))
         return 0;
     if ((unsigned long long)bmp_w * (unsigned long long)bmp_h > (unsigned long long)max_pixels)
@@ -1067,6 +1161,14 @@ DUET_RES_INLINE int duet_res_decode_bitmap(const DUET_RES_VIEW* view, unsigned i
     if (out_h != (unsigned int*)0)
         *out_h = bmp_h;
     return 1;
+}
+
+/* Integer-ordinal form of duet_res_decode_bitmap_key. */
+DUET_RES_INLINE int duet_res_decode_bitmap(const DUET_RES_VIEW* view, unsigned int bitmap_id, unsigned char* out_bgra,
+                                           unsigned int max_pixels, unsigned int* out_w, unsigned int* out_h)
+{
+    const DUET_RES_KEY name = duet_res_key_id(bitmap_id);
+    return duet_res_decode_bitmap_key(view, &name, out_bgra, max_pixels, out_w, out_h);
 }
 
 #endif /* DUETOS_USERLAND_PE_RESOURCES_H */

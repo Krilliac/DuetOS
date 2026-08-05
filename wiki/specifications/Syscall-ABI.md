@@ -1279,6 +1279,9 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 226 | `SYS_GDI_GET_TEXT_METRICS` |
 | 227 | `SYS_SERVICE_ENDPOINT_OP` |
 | 228 | `SYS_SERVICE_CONTROL` |
+| 229 | `SYS_GDI_SET_ROP2` |
+| 230 | `SYS_GAMEPAD_STATE` |
+| 231 | `SYS_STDIN_PEEK` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1518,4 +1521,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 213 | `SYS_IOCP_POST` | `rdi` = u64 IOCP handle (kWin32IocpBase range; `rsi` = u64 dwNumberOfBytesTransferred rdx = u64 dwCompletionKey ... | — |
 | 214 | `SYS_GDI_SET_DIBITS` | `rdi` = HBITMAP (owner-checked; `rsi` = user pointer to the DIB pixel array rdx = width in pixels...; `r8` = bits per pixel (16 / 24 / 32 only) r9  = size in bytes of... | — |
 | 215 | `SYS_GDI_GET_DIBITS` | — | — |
+| 229 | `SYS_GDI_SET_ROP2` | `rdi` = HDC; `rsi` = `R2_*` mode (1..16) | the PREVIOUS mode (Win32 `SetROP2` semantics), 0 for an out-of-range mode; ec... |
+| 230 | `SYS_GAMEPAD_STATE` | `rdi` = slot index (0..3); `rsi` = user pointer to a `GamepadStateWire`; `rdx` = wire size, which must equal 44 exactly | 0 on success, u64(-1) on bad slot / wrong size / copy fault. A disconnected s... |
+| 231 | `SYS_STDIN_PEEK` | `rdi` = user destination buffer, or 0 for the count-only form; `rsi` = capacity in bytes (0 = count-only) | total bytes currently buffered (0 when empty), u64(-1) on a bad user pointer;... |
 <!-- /AUTO:syscall_args -->

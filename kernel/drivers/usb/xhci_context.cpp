@@ -67,12 +67,30 @@ void BuildAddressDeviceInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port
 // it's already in Running state from Address Device. Marking A1
 // here would try to reconfigure a live EP0 and the controller
 // rejects it as TRB Error.
+//
+// The slot context's Context Entries field names the LAST valid
+// Endpoint Context on the slot, so it must never shrink while an
+// endpoint above the new one is running — a composite HID device
+// whose second interface sits on a lower DCI than its first would
+// otherwise disable the first endpoint mid-flight. `ctx_entries_high_water`
+// carries the highest DCI already configured; the published value is
+// the max of it and the endpoint being added (floored at 1 for EP0).
 void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u8 new_dci,
-                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys)
+                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys,
+                                        u8 ctx_entries_high_water)
 {
     auto* base = static_cast<volatile u8*>(input_ctx_virt);
-    // Zero the range we'll touch (Input Control + Slot + up to new_dci endpoint ctx).
-    const u32 end = (new_dci + 1) * ctx_bytes;
+    u32 ctx_entries = new_dci;
+    if (ctx_entries_high_water > ctx_entries)
+        ctx_entries = ctx_entries_high_water;
+    if (ctx_entries < 1)
+        ctx_entries = 1; // EP0 is always present
+
+    // Zero the range we'll touch (Input Control + Slot + every
+    // endpoint context up to the published high-water mark, so a
+    // stale byte from an earlier, deeper build can't leak into a
+    // context the controller will now re-read).
+    const u32 end = (ctx_entries + 1) * ctx_bytes;
     for (u32 i = 0; i < end; ++i)
         base[i] = 0;
 
@@ -82,9 +100,11 @@ void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 
     // A1 deliberately NOT set: re-flagging a running EP0 fails.
     icc[1] = (1u << 0) | (1u << new_dci);
 
-    // Slot Context — context-entries high-water raised to new_dci.
+    // Slot Context — context-entries high-water. Endpoints already
+    // configured below this mark and not flagged in Add or Drop are
+    // left untouched by the controller (xHCI 1.2 §4.6.6).
     volatile u32* slot = reinterpret_cast<volatile u32*>(base + 1 * ctx_bytes);
-    slot[0] = (u32(speed) << 20) | (u32(new_dci) << 27);
+    slot[0] = (u32(speed) << 20) | (ctx_entries << 27);
     slot[1] = u32(port_num) << 16;
 
     // New endpoint context at index new_dci.

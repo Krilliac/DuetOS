@@ -849,6 +849,15 @@ target_include_directories(test_xinput_wire PRIVATE "${CMAKE_SOURCE_DIR}/../../u
 add_host_test(hid_gamepad)
 target_compile_definitions(test_hid_gamepad PRIVATE DUETOS_HOSTED_TEST=1)
 target_sources(test_hid_gamepad PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/drivers/input/hid_gamepad.cpp")
+# Composite-HID descriptor parse: a device whose non-boot interface precedes
+# its boot keyboard must bind both. Links the real parser TU.
+add_host_test(xhci_hid_composite)
+target_compile_definitions(test_xhci_hid_composite PRIVATE DUETOS_HOSTED_TEST=1)
+target_sources(test_xhci_hid_composite PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/drivers/usb/xhci_descparse.cpp")
+# GDI path scanline interior fill: freestanding header
+# (userland/libs/gdi32/gdi32_fill.h). Pins ALTERNATE (even-odd) against
+# WINDING (nonzero) on a self-intersecting star, where they genuinely differ.
+add_host_test(gdi32_fill)
 # Off-screen GDI surface arithmetic: freestanding header
 # (kernel/subsystems/win32/gdi_surface_math.h). Pins the guest-controlled
 # allocation math (32-bit pixel-count wrap, DIB DWORD row padding,
@@ -992,6 +1001,11 @@ add_host_test(pe_resources)
 if(NOT MSVC)
     target_compile_options(test_pe_resources PRIVATE -Wno-conversion -Wno-sign-conversion)
 endif()
+# Named (UTF-16 string) .rsrc lookup for the Load* family, plus the hostile
+# cases: an unterminated name, a Length overrunning the section extent, and an
+# offset outside the mapping. Written clean under the full warning set, so
+# unlike its siblings above it takes no -Wno-conversion exemption.
+add_host_test(pe_named_resources)
 
 # Icon / cursor decoder (duet_res_pick_icon, duet_res_decode_icon).
 # Synthetic PE with hand-crafted RT_GROUP_ICON + RT_ICON resources.

@@ -94,6 +94,69 @@ bool XhciBindMsix(Runtime& rt, const HostControllerInfo& h, u32 ctrlr_idx, u8* o
     return true;
 }
 
+// Decode ONE completed interrupt-IN report and hand it to the right
+// consumer, then re-arm the endpoint. Routing is by endpoint record,
+// never by a per-device kind: a composite HID device runs a keyboard
+// and a gamepad behind the same slot, and each one's completions
+// must land in its own injector. `residual` is the untransferred
+// byte count from the Transfer Event; actual length is
+// `requested - residual` per xHCI completion-code semantics.
+void HidRouteCompletion(Runtime& rt, DeviceState& dev, HidEndpoint& ep, u32 residual)
+{
+    if (ep.is_gamepad)
+    {
+        // Route into the drivers/input gamepad slot; the layout
+        // stored there at GamepadConnect time does the per-field
+        // decode. Clamp at 64 bytes — the largest interrupt-IN report
+        // a HID gamepad ships (Report-ID prefix + axes + buttons).
+        u32 actual = ep.ep_max_packet;
+        if (residual <= actual)
+            actual -= residual;
+        if (actual > 64)
+            actual = 64;
+        duetos::drivers::input::GamepadInjectReport(ep.gamepad_slot, ep.buf_virt, actual);
+    }
+    else if (ep.is_mouse)
+    {
+        // Mice skip the diff state — each report is a standalone
+        // delta + button snapshot, so we push the packet as-is.
+        u32 actual = ep.ep_max_packet;
+        if (residual <= actual)
+            actual -= residual;
+        // Layout-aware path supports 16-bit XY for high-DPI mice;
+        // clamp at 16 bytes (typical max-packet for an interrupt-IN
+        // HID endpoint) so reports up to that length flow through
+        // without truncation. Boot-protocol fallback caps at 8.
+        if (ep.mouse_layout_valid)
+        {
+            if (actual > 16)
+                actual = 16;
+            HidMouseInjectWithLayout(ep.buf_virt, actual, &ep.mouse_layout);
+        }
+        else
+        {
+            if (actual > 8)
+                actual = 8;
+            HidMouseInjectN(ep.buf_virt, actual);
+        }
+    }
+    else
+    {
+        u8 curr[8] = {};
+        for (u32 b = 0; b < 8; ++b)
+            curr[b] = ep.buf_virt[b];
+        HidDiffAndInject(ep.prev, curr);
+        for (u32 b = 0; b < 8; ++b)
+            ep.prev[b] = curr[b];
+    }
+
+    // Re-queue a Normal TRB + ring this endpoint's doorbell.
+    const u64 trb = HidEnqueueNormalTrb(&ep, ep.buf_phys, ep.ep_max_packet);
+    ep.outstanding_phys = trb;
+    if (trb != 0)
+        RingDoorbell(rt, dev.slot_id, ep.ep_xhci_idx);
+}
+
 void HidPollEntry(void* raw)
 {
     auto* arg = static_cast<PollTaskArg*>(raw);
@@ -120,74 +183,26 @@ void HidPollEntry(void* raw)
             const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
             const u32 completion_code = (e.status >> 24) & 0xFF;
             const u32 residual = e.status & 0x00FFFFFF;
-            // Find which HID device this TRB belongs to.
+            // Find which HID ENDPOINT this TRB belongs to. A composite
+            // device has several live interrupt-IN endpoints behind
+            // one slot, so the match is per-endpoint — matching on the
+            // device alone would deliver a gamepad's report to the
+            // keyboard injector.
             bool consumed_by_hid = false;
-            for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+            for (u32 i = 0; i < kMaxDevicesTotal && !consumed_by_hid; ++i)
             {
                 DeviceState& dev = g_devices[i];
-                if (!dev.in_use || !dev.hid_ready)
+                if (!dev.in_use)
                     continue;
-                if (dev.hid_outstanding_phys == 0 || dev.hid_outstanding_phys != ptr)
-                    continue;
-                consumed_by_hid = true;
-                // Parse + inject. Mice skip the diff state — each
-                // report is a standalone delta + button snapshot,
-                // so we push the packet as-is. Actual report length
-                // is `requested - residual` per xHCI completion-code
-                // semantics (kCompletionCodeShortPacket / Success).
-                // Cap at 8 bytes to match the HID buffer page slice.
-                if (dev.hid_is_gamepad)
+                for (u32 ei = 0; ei < dev.hid_ep_count; ++ei)
                 {
-                    // Route into the drivers/input gamepad slot; the
-                    // layout stored there at GamepadConnect time does
-                    // the per-field decode. Clamp at 64 bytes — the
-                    // largest interrupt-IN report a HID gamepad ships
-                    // (Report-ID prefix + axes + button block).
-                    u32 actual = dev.hid_ep_max_packet;
-                    if (residual <= actual)
-                        actual -= residual;
-                    if (actual > 64)
-                        actual = 64;
-                    duetos::drivers::input::GamepadInjectReport(dev.hid_gamepad_slot, dev.hid_buf_virt, actual);
+                    HidEndpoint& ep = dev.hid_eps[ei];
+                    if (!ep.ready || ep.outstanding_phys == 0 || ep.outstanding_phys != ptr)
+                        continue;
+                    consumed_by_hid = true;
+                    HidRouteCompletion(rt, dev, ep, residual);
+                    break;
                 }
-                else if (dev.hid_is_mouse)
-                {
-                    u32 actual = dev.hid_ep_max_packet;
-                    if (residual <= actual)
-                        actual -= residual;
-                    // Layout-aware path supports 16-bit XY for high-
-                    // DPI mice; clamp at 16 bytes (typical max-packet
-                    // for an interrupt-IN HID endpoint) so reports up
-                    // to that length flow through without truncation.
-                    // Boot-protocol fallback still caps at 8 bytes.
-                    if (dev.hid_mouse_layout_valid)
-                    {
-                        if (actual > 16)
-                            actual = 16;
-                        HidMouseInjectWithLayout(dev.hid_buf_virt, actual, &dev.hid_mouse_layout);
-                    }
-                    else
-                    {
-                        if (actual > 8)
-                            actual = 8;
-                        HidMouseInjectN(dev.hid_buf_virt, actual);
-                    }
-                }
-                else
-                {
-                    u8 curr[8] = {};
-                    for (u32 b = 0; b < 8; ++b)
-                        curr[b] = dev.hid_buf_virt[b];
-                    HidDiffAndInject(dev.hid_prev, curr);
-                    for (u32 b = 0; b < 8; ++b)
-                        dev.hid_prev[b] = curr[b];
-                }
-                // Re-queue a Normal TRB + ring the endpoint doorbell.
-                const u64 trb = HidEnqueueNormalTrb(&dev, dev.hid_buf_phys, dev.hid_ep_max_packet);
-                dev.hid_outstanding_phys = trb;
-                if (trb != 0)
-                    RingDoorbell(rt, dev.slot_id, dev.hid_ep_xhci_idx);
-                break;
             }
             if (!consumed_by_hid)
                 TrbEventCacheStash(ptr, completion_code, residual, /*trb_len=*/0);
@@ -585,64 +600,79 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
         {
             ++out.configs_parsed;
         }
-        if (rec.hid_keyboard || rec.hid_mouse)
+        // Bring up EVERY claimed HID interface on this port, not just
+        // the first. A composite gaming keyboard enumerates its
+        // consumer-control interface ahead of its boot keyboard; a
+        // first-match loop would leave the keyboard dark.
+        if (rec.hid_ifaces_dropped != 0)
         {
-            const char* kind_tag = rec.hid_mouse ? "HID-BOOT-MOUSE" : "HID-BOOT-KEYBOARD";
-            if (rec.hid_keyboard)
+            KLOG_WARN_V("drivers/usb/xhci", "HID interfaces past the per-port cap were not bound",
+                        rec.hid_ifaces_dropped);
+            arch::SerialWrite("[xhci]   HID interfaces over cap dropped=");
+            arch::SerialWriteHex(rec.hid_ifaces_dropped);
+            arch::SerialWrite(" port=");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite("\n");
+        }
+        for (u8 f = 0; f < rec.hid_iface_count; ++f)
+        {
+            HidInterfaceRecord& iface = rec.hid_ifaces[f];
+            const bool is_pad = (iface.kind == HidIfaceKind::GamepadCandidate);
+            const char* kind_tag = is_pad                                  ? "HID-GAMEPAD-CANDIDATE"
+                                   : iface.kind == HidIfaceKind::BootMouse ? "HID-BOOT-MOUSE"
+                                                                           : "HID-BOOT-KEYBOARD";
+            switch (iface.kind)
+            {
+            case HidIfaceKind::BootKeyboard:
                 ++out.hid_keyboards_found;
-            if (rec.hid_mouse)
+                break;
+            case HidIfaceKind::BootMouse:
                 ++out.hid_mice_found;
+                break;
+            case HidIfaceKind::GamepadCandidate:
+                ++out.hid_gamepads_found;
+                break;
+            case HidIfaceKind::None:
+                continue;
+            }
             arch::SerialWrite("[xhci]   ");
             arch::SerialWrite(kind_tag);
             arch::SerialWrite(" port=");
             arch::SerialWriteHex(rec.port_num);
             arch::SerialWrite(" iface=");
-            arch::SerialWriteHex(rec.hid_interface_num);
+            arch::SerialWriteHex(iface.interface_num);
             arch::SerialWrite(" ep=");
-            arch::SerialWriteHex(rec.hid_ep_addr);
+            arch::SerialWriteHex(iface.ep_addr);
             arch::SerialWrite(" mps=");
-            arch::SerialWriteHex(rec.hid_ep_max_packet);
+            arch::SerialWriteHex(iface.ep_max_packet);
             arch::SerialWrite(" interval=");
-            arch::SerialWriteHex(rec.hid_ep_interval);
+            arch::SerialWriteHex(iface.ep_interval);
             arch::SerialWrite(" config=");
             arch::SerialWriteHex(rec.hid_config_value);
             arch::SerialWrite("\n");
-            if (BringUpHidKeyboard(rt, rec))
+
+            const bool bound = is_pad ? BringUpHidGamepad(rt, rec, iface) : BringUpHidKeyboard(rt, rec, iface);
+            if (!bound)
+                continue;
+            switch (iface.kind)
             {
-                if (rec.hid_keyboard)
-                    ++out.hid_keyboards_bound;
-                if (rec.hid_mouse)
-                    ++out.hid_mice_bound;
-                arch::SerialWrite("[xhci]   ");
-                arch::SerialWrite(kind_tag);
-                arch::SerialWrite(" bound; polling task will pick up slot=");
-                arch::SerialWriteHex(rec.slot_id);
-                arch::SerialWrite("\n");
-            }
-        }
-        else if (rec.hid_gamepad)
-        {
-            ++out.hid_gamepads_found;
-            arch::SerialWrite("[xhci]   HID-GAMEPAD-CANDIDATE port=");
-            arch::SerialWriteHex(rec.port_num);
-            arch::SerialWrite(" iface=");
-            arch::SerialWriteHex(rec.hid_interface_num);
-            arch::SerialWrite(" ep=");
-            arch::SerialWriteHex(rec.hid_ep_addr);
-            arch::SerialWrite(" mps=");
-            arch::SerialWriteHex(rec.hid_ep_max_packet);
-            arch::SerialWrite(" interval=");
-            arch::SerialWriteHex(rec.hid_ep_interval);
-            arch::SerialWrite(" config=");
-            arch::SerialWriteHex(rec.hid_config_value);
-            arch::SerialWrite("\n");
-            if (BringUpHidGamepad(rt, rec))
-            {
+            case HidIfaceKind::BootKeyboard:
+                ++out.hid_keyboards_bound;
+                break;
+            case HidIfaceKind::BootMouse:
+                ++out.hid_mice_bound;
+                break;
+            case HidIfaceKind::GamepadCandidate:
                 ++out.hid_gamepads_bound;
-                arch::SerialWrite("[xhci]   HID-GAMEPAD bound; polling task will pick up slot=");
-                arch::SerialWriteHex(rec.slot_id);
-                arch::SerialWrite("\n");
+                break;
+            case HidIfaceKind::None:
+                break;
             }
+            arch::SerialWrite("[xhci]   ");
+            arch::SerialWrite(kind_tag);
+            arch::SerialWrite(" bound; polling task will pick up slot=");
+            arch::SerialWriteHex(rec.slot_id);
+            arch::SerialWrite("\n");
         }
     }
     arch::SerialWrite("[xhci] enumeration: addressed=");
@@ -850,8 +880,16 @@ void XhciInit()
     // advertising a pad whose endpoint is gone.
     for (u32 i = 0; i < kMaxDevicesTotal; ++i)
     {
-        if (g_devices[i].in_use && g_devices[i].hid_is_gamepad)
-            duetos::drivers::input::GamepadDisconnect(g_devices[i].hid_gamepad_slot);
+        if (g_devices[i].in_use)
+        {
+            // Every gamepad endpoint on the device, not just the
+            // first — a composite can register more than one.
+            for (u32 e = 0; e < g_devices[i].hid_ep_count; ++e)
+            {
+                if (g_devices[i].hid_eps[e].is_gamepad)
+                    duetos::drivers::input::GamepadDisconnect(g_devices[i].hid_eps[e].gamepad_slot);
+            }
+        }
         ZeroBytes(&g_devices[i], sizeof(DeviceState));
     }
     g_device_count = 0;

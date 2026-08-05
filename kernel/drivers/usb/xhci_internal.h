@@ -251,6 +251,36 @@ struct Runtime
 // box with every port populated still fits.
 inline constexpr u32 kMaxDevicesTotal = 32;
 
+// One live HID interrupt-IN endpoint. A composite HID device (a
+// gaming keyboard with a consumer-control interface, a headset with
+// a telephony interface) presents several HID interfaces behind ONE
+// xHCI slot, so the per-device record carries an array of these
+// rather than a single endpoint. Each entry owns its own transfer
+// ring, report buffer and outstanding-TRB cursor, which is what lets
+// the poll task route a completion by endpoint instead of guessing a
+// single per-device kind.
+struct HidEndpoint
+{
+    bool ready;      // Configure Endpoint succeeded and a TRB is primed
+    bool is_mouse;   // route completions through the mouse injector
+    bool is_gamepad; // route completions into drivers/input gamepad slot
+    u8 ep_addr;      // e.g. 0x81 = EP1 IN
+    u8 ep_xhci_idx;  // DCI for Input Context + doorbell target
+    u16 ep_max_packet;
+    mm::PhysAddr ring_phys;
+    Trb* ring;
+    u32 ring_slots;
+    u32 ring_idx;
+    u32 ring_cycle;
+    mm::PhysAddr buf_phys;
+    u8* buf_virt;         // report buffer (8 bytes keyboard, 3+ bytes mouse)
+    u8 prev[8];           // keyboard: previous report (mouse is stateless on keys)
+    u64 outstanding_phys; // TRB phys addr we're waiting on, or 0
+    u32 gamepad_slot;     // drivers/input slot index, valid iff is_gamepad
+    bool mouse_layout_valid;
+    hid::HidMouseLayout mouse_layout;
+};
+
 struct DeviceState
 {
     bool in_use;
@@ -268,40 +298,33 @@ struct DeviceState
     u32 ep0_cycle;
     mm::PhysAddr scratch_phys;
     u8* scratch_virt;
-    // HID boot state — set once the HID bring-up finishes
-    // (SET_CONFIGURATION + Configure Endpoint succeeded).
-    bool hid_ready;
-    bool hid_is_mouse;
-    u8 hid_ep_addr;        // e.g. 0x81 = EP1 IN
-    u8 hid_ep_xhci_idx;    // DCI for Input Context + doorbell target
-    u16 hid_ep_max_packet; // from the endpoint descriptor
-    mm::PhysAddr hid_ring_phys;
-    Trb* hid_ring;
-    u32 hid_ring_slots;
-    u32 hid_ring_idx;
-    u32 hid_ring_cycle;
-    mm::PhysAddr hid_buf_phys;
-    u8* hid_buf_virt;         // report buffer (8 bytes keyboard, 3 bytes mouse)
-    u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
-    u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
+    // HID state — one entry per brought-up HID interrupt-IN
+    // endpoint. Entry [0] is the only one a simple single-interface
+    // keyboard or mouse ever uses; a composite device fills more.
+    // Each entry's `mouse_layout` is populated from
+    // GET_DESCRIPTOR(Report) during mouse bring-up when the
+    // Configuration tree advertises a Report descriptor length; when
+    // `mouse_layout_valid` stays false the poll loop falls back to
+    // `HidMouseInjectN` (boot-protocol assumptions). `gamepad_slot`
+    // is the drivers/input slot index [0..3] GamepadConnect assigned
+    // — the extracted layout lives inside that slot (copied at
+    // connect time), so the poll loop only needs the index.
+    HidEndpoint hid_eps[kMaxHidInterfacesPerPort];
+    u32 hid_ep_count;
 
-    // Mouse-layout cache. Populated from GET_DESCRIPTOR(Report)
-    // during HID mouse bring-up when the Configuration tree's HID
-    // class descriptor advertises a Report descriptor length. When
-    // `hid_mouse_layout_valid == false` the polling loop falls back
-    // to `HidMouseInjectN` (boot-protocol assumptions).
-    bool hid_mouse_layout_valid;
-    hid::HidMouseLayout hid_mouse_layout;
+    // Set once SET_CONFIGURATION has been issued for this device.
+    // A composite brings up several interfaces off one Configuration,
+    // and the device must be configured exactly once.
+    bool config_set;
 
-    // Gamepad routing. When BringUpHidGamepad confirmed the device
-    // (report descriptor classified Gamepad/Joystick + endpoint came
-    // up), `hid_is_gamepad` flips true and `hid_gamepad_slot` holds
-    // the drivers/input gamepad slot index [0..3] that
-    // GamepadConnect assigned. The extracted layout lives inside
-    // that slot (copied at connect time), so the poll loop only
-    // needs the slot index to route reports.
-    bool hid_is_gamepad;
-    u32 hid_gamepad_slot;
+    // Highest Device Context Index configured on this slot so far.
+    // The Configure Endpoint Input Context republishes the slot
+    // context's Context Entries field on every call; feeding it a
+    // value lower than an already-running endpoint's DCI would
+    // implicitly disable that endpoint. Carrying the high-water mark
+    // here keeps a later low-DCI endpoint from tearing down an
+    // earlier high-DCI one. Seeded to 1 (EP0) at Address Device time.
+    u8 ctx_entries_high_water;
 
     // Bulk endpoint state. One pair (IN + OUT) per device is enough
     // for every v0 USB-net class (CDC-ECM, RTL8150, AX88xxx).
@@ -458,8 +481,15 @@ void BuildAddressDeviceInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port
 // Address Device time. Only the slot context (A0) and the new
 // endpoint (A_dci) are flagged; A1 stays clear so the running EP0
 // isn't reconfigured.
+//
+// `ctx_entries_high_water` is the highest DCI already configured on
+// this slot. The slot context's Context Entries field is published
+// as max(new_dci, ctx_entries_high_water), so adding a LOW-DCI
+// endpoint after a high-DCI one does not implicitly disable the
+// high one. Callers pass DeviceState::ctx_entries_high_water.
 void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u8 new_dci,
-                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys);
+                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys,
+                                        u8 ctx_entries_high_water);
 
 // =====================================================================
 // Control transfers on EP0 (xhci_control.cpp)
@@ -497,10 +527,10 @@ DeviceState* DeviceForSlot(u8 slot_id);
 // EP0 occupies DCI 1 regardless of direction.
 u8 EndpointDci(u8 ep_addr);
 
-// Enqueue one Normal TRB on the device's HID interrupt-IN ring.
+// Enqueue one Normal TRB on ONE HID interrupt-IN endpoint's ring.
 // IOC bit set so the completion lands as a Transfer Event the
-// HID poll task can match against the previous report.
-u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len);
+// HID poll task can match against that endpoint's outstanding TRB.
+u64 HidEnqueueNormalTrb(HidEndpoint* ep, u64 buf_phys, u32 len);
 
 // =====================================================================
 // Device enumeration pipeline (xhci_enum.cpp)
@@ -532,15 +562,23 @@ bool FetchAndParseConfig(Runtime& rt, PortRecord& port);
 // USB SET_CONFIGURATION on EP0.
 bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value);
 
-// Stand up the HID Boot endpoint: allocate ring + buffer, issue
-// Configure Endpoint, prime the first IN TRB, mark dev->hid_ready.
-bool BringUpHidKeyboard(Runtime& rt, PortRecord& port);
+// Issue SET_CONFIGURATION once per device. A composite brings up
+// several interfaces off one Configuration; repeat calls are a no-op
+// that still report success.
+bool EnsureConfigured(Runtime& rt, DeviceState* dev, u8 config_value);
 
-// Stand up a report-protocol HID gamepad candidate: SET_CONFIGURATION,
-// fetch + parse the Report descriptor (GamepadExtractLayout — this is
-// the step that CONFIRMS the candidate; failure is a clean decline),
-// register a drivers/input gamepad slot, then the same interrupt-IN
-// ring + Configure Endpoint + first-TRB priming as the keyboard path.
-bool BringUpHidGamepad(Runtime& rt, PortRecord& port);
+// Stand up ONE HID Boot Keyboard / Mouse interface: allocate ring +
+// buffer, issue Configure Endpoint, prime the first IN TRB, mark the
+// endpoint ready. `iface` selects which interface of a (possibly
+// composite) device is being brought up.
+bool BringUpHidKeyboard(Runtime& rt, PortRecord& port, HidInterfaceRecord& iface);
+
+// Stand up ONE report-protocol HID gamepad candidate interface:
+// SET_CONFIGURATION, fetch + parse the Report descriptor
+// (GamepadExtractLayout — this is the step that CONFIRMS the
+// candidate; failure is a clean decline), register a drivers/input
+// gamepad slot, then the same interrupt-IN ring + Configure Endpoint
+// + first-TRB priming as the keyboard path.
+bool BringUpHidGamepad(Runtime& rt, PortRecord& port, HidInterfaceRecord& iface);
 
 } // namespace duetos::drivers::usb::xhci::internal

@@ -58,14 +58,16 @@ u8 EndpointDci(u8 ep_addr)
     return u8((ep_num * 2) + (is_in ? 1 : 0));
 }
 
-// Enqueue one Normal TRB on the HID transfer ring. The controller
-// reads `len` bytes into the buffer at `buf_phys`; we set IOC so
-// the completion lands as a Transfer Event we can diff against the
-// previous report.
-u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len)
+// Enqueue one Normal TRB on ONE HID endpoint's transfer ring. The
+// controller reads `len` bytes into the buffer at `buf_phys`; we set
+// IOC so the completion lands as a Transfer Event the poll task can
+// match against that endpoint's outstanding TRB.
+u64 HidEnqueueNormalTrb(HidEndpoint* ep, u64 buf_phys, u32 len)
 {
-    return EnqueueRingTrb(dev->hid_ring, dev->hid_ring_phys, dev->hid_ring_slots, dev->hid_ring_idx,
-                          dev->hid_ring_cycle, kTrbTypeNormal, u32(buf_phys), u32(buf_phys >> 32), len, kTrbCtlIoc);
+    if (ep == nullptr || ep->ring == nullptr)
+        return 0;
+    return EnqueueRingTrb(ep->ring, ep->ring_phys, ep->ring_slots, ep->ring_idx, ep->ring_cycle, kTrbTypeNormal,
+                          u32(buf_phys), u32(buf_phys >> 32), len, kTrbCtlIoc);
 }
 
 } // namespace internal
@@ -177,8 +179,10 @@ bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet)
     const u32 interval = 0; // bulk endpoints don't use the interval field
 
     Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    if (dci > dev->ctx_entries_high_water)
+        dev->ctx_entries_high_water = dci;
     BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, dci, ep_type,
-                                       max_packet, interval, ring_phys);
+                                       max_packet, interval, ring_phys, dev->ctx_entries_high_water);
     const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
                                    u32(dev->input_ctx_phys >> 32), 0, u32(slot_id) << 24);
     if (cmd_phys == 0)
@@ -367,8 +371,11 @@ bool XhciConfigureInterruptInEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet, u8
 
     const u8 dci = EndpointDci(ep_addr);
     Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    if (dci > dev->ctx_entries_high_water)
+        dev->ctx_entries_high_water = dci;
     BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, dci,
-                                       kEpTypeInterruptIn, max_packet, xhci_interval, ring_phys);
+                                       kEpTypeInterruptIn, max_packet, xhci_interval, ring_phys,
+                                       dev->ctx_entries_high_water);
     const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
                                    u32(dev->input_ctx_phys >> 32), 0, u32(slot_id) << 24);
     if (cmd_phys == 0)

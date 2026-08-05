@@ -112,13 +112,41 @@ never leaves the connected mask advertising a pad whose endpoint is
 gone. Host-tested (`tests/host/test_hid_gamepad.cpp`, which also
 runs the driver's own `GamepadSelfTest`); the boot selftest is the
 gamepad-candidate arm of `XhciDescriptorSelfTest`, which runs at
-`XhciInit`. GAP: first-match claim — one
-`PortRecord` per port, so a composite device whose non-boot HID
-interface precedes its boot keyboard/mouse interface shadows the
-latter; revisit when multi-interface HID composites need both
-bound. The consumer side (a `SYS_GAMEPAD_STATE` syscall + the
-userland XInput DLL binding) has not landed yet — see
-[Roadmap item 22](../reference/Roadmap.md).
+`XhciInit`.
+
+Composite HID devices are claimed per-interface. A `PortRecord`
+carries `hid_ifaces[kMaxHidInterfacesPerPort]` (cap 4) in
+descriptor order rather than a single first-match claim, so a
+gaming keyboard whose consumer-control interface precedes its boot
+keyboard — the shape real hardware ships — yields both, each with
+its own interrupt-IN endpoint, Report-descriptor length and
+interval. The array lives in a `constinit` per-controller table, so
+enumeration touches no allocator. Alternate settings are skipped,
+a repeated `bInterfaceNumber` does not double-claim, and an
+interface with no usable interrupt-IN endpoint is dropped.
+`hid_keyboard` / `hid_mouse` / `hid_gamepad` remain as aggregates
+over the array for consumers that only need "is there one behind
+this port". Host-tested by
+`tests/host/test_xhci_hid_composite.cpp`. GAP: interfaces past the
+cap of 4 are counted in `hid_ifaces_dropped` and logged rather than
+bound — revisit if hardware appears with more than four HID
+interfaces on one device.
+
+The consumer side landed the same day. `SYS_GAMEPAD_STATE` (230)
+copies a fixed 44-byte `GamepadStateWire` — the slot's
+`XINPUT_STATE` image, its `XINPUT_CAPABILITIES` image, a connected
+flag, and the connected-slot bitmask — out to a caller holding
+`kCapInput`, staged on the kernel stack and delivered in one
+`CopyToUser`. The guest supplies only a slot index and a buffer
+whose size must equal the wire size exactly; there is no write arm,
+so ring 3 can read pad state but cannot inject reports. A
+disconnected slot is not an error — it returns `connected = 0` with
+zeroed pad state. `userland/libs/xinput1_4/xinput1_4.c` maps that
+wire to `XINPUT_STATE` / `XINPUT_CAPABILITIES`. See
+[Roadmap item 22](../reference/Roadmap.md) for what is left
+(rumble, battery level, keystroke queue, DirectInput8) and
+[Design decision 065](../reference/Design-Decisions.md) for why the
+ABI is read-only.
 
 ## Bluetooth HID Keyboard
 

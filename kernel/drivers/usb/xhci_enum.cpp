@@ -153,6 +153,10 @@ bool AddressDevice(Runtime& rt, PortRecord& port)
         return false;
     }
     port.addressed = true;
+    // Address Device published a slot context whose Context Entries
+    // field names EP0 (DCI 1). Every later Configure Endpoint must
+    // republish at least this much or it would disable EP0.
+    dev->ctx_entries_high_water = 1;
     return true;
 }
 
@@ -231,29 +235,73 @@ bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value)
                            /*wIndex=*/0, "SET_CONFIGURATION");
 }
 
-bool FetchHidMouseReportLayout(Runtime& rt, DeviceState* dev, const PortRecord& port)
+// A composite device brings up several HID interfaces off ONE
+// Configuration. SET_CONFIGURATION is a device-level request, so it
+// must be issued exactly once — re-issuing it after endpoints are
+// configured resets the device's interface state.
+bool EnsureConfigured(Runtime& rt, DeviceState* dev, u8 config_value)
 {
-    if (dev == nullptr || !port.hid_mouse || port.hid_report_desc_length == 0)
+    if (dev == nullptr)
+        return false;
+    if (dev->config_set)
+        return true;
+    if (!SetConfiguration(rt, dev, config_value))
+        return false;
+    dev->config_set = true;
+    return true;
+}
+
+// Claim the next free per-device HID endpoint record. Returns
+// nullptr once kMaxHidInterfacesPerPort endpoints are already live.
+HidEndpoint* AllocHidEndpoint(DeviceState* dev)
+{
+    if (dev == nullptr || dev->hid_ep_count >= kMaxHidInterfacesPerPort)
+        return nullptr;
+    HidEndpoint* ep = &dev->hid_eps[dev->hid_ep_count];
+    ZeroBytes(ep, sizeof(HidEndpoint));
+    ++dev->hid_ep_count;
+    return ep;
+}
+
+// Give back an endpoint record whose bring-up failed. Only the most
+// recently claimed record can be released — that is the only one a
+// failing bring-up can own, and it keeps the array contiguous so the
+// poll loop's `i < hid_ep_count` walk never sees a hole. Without
+// this a declined gamepad candidate would burn a slot on every
+// interface of a composite device.
+void ReleaseHidEndpoint(DeviceState* dev, HidEndpoint* ep)
+{
+    if (dev == nullptr || ep == nullptr || dev->hid_ep_count == 0)
+        return;
+    if (ep != &dev->hid_eps[dev->hid_ep_count - 1])
+        return;
+    ZeroBytes(ep, sizeof(HidEndpoint));
+    --dev->hid_ep_count;
+}
+
+bool FetchHidMouseReportLayout(Runtime& rt, DeviceState* dev, const HidInterfaceRecord& iface, HidEndpoint* ep)
+{
+    if (dev == nullptr || ep == nullptr || iface.kind != HidIfaceKind::BootMouse || iface.report_desc_length == 0)
         return false;
 
-    u16 reportLen = port.hid_report_desc_length;
+    u16 reportLen = iface.report_desc_length;
     if (reportLen > mm::kPageSize)
         reportLen = u16(mm::kPageSize);
     for (u32 i = 0; i < reportLen; ++i)
         dev->scratch_virt[i] = 0;
 
     if (!DoControlIn(rt, dev, /*bmRequestType=*/0x81, kUsbReqGetDescriptor, u16(u16(kDescTypeReport) << 8),
-                     u16(port.hid_interface_num), reportLen, "GET_DESCRIPTOR(HID Report)"))
+                     u16(iface.interface_num), reportLen, "GET_DESCRIPTOR(HID Report)"))
         return false;
 
     hid::HidMouseLayout layout{};
     if (!hid::HidExtractMouseLayout(dev->scratch_virt, reportLen, &layout))
         return false;
 
-    dev->hid_mouse_layout = layout;
-    dev->hid_mouse_layout_valid = true;
+    ep->mouse_layout = layout;
+    ep->mouse_layout_valid = true;
     arch::SerialWrite("[xhci]   HID mouse report layout: iface=");
-    arch::SerialWriteHex(port.hid_interface_num);
+    arch::SerialWriteHex(iface.interface_num);
     arch::SerialWrite(" bytes=");
     arch::SerialWriteHex(reportLen);
     arch::SerialWrite(" report_bits=");
@@ -266,10 +314,16 @@ bool FetchHidMouseReportLayout(Runtime& rt, DeviceState* dev, const PortRecord& 
 // Shared tail of every HID interrupt-IN bring-up (keyboard, mouse,
 // gamepad): allocate the transfer ring + report buffer, build +
 // submit the Configure Endpoint command, seed the first Normal TRB,
-// mark the device hid_ready. The per-controller polling task picks
-// up from there.
-bool ConfigureHidInterruptIn(Runtime& rt, DeviceState* dev, const PortRecord& port)
+// mark the endpoint ready. `ep` is the per-interface endpoint record
+// claimed by AllocHidEndpoint — a composite device runs several of
+// these concurrently behind one slot, so nothing here may touch
+// device-wide HID state. The per-controller polling task picks up
+// from the primed TRB.
+bool ConfigureHidInterruptIn(Runtime& rt, DeviceState* dev, HidEndpoint* ep, const HidInterfaceRecord& iface)
 {
+    if (dev == nullptr || ep == nullptr || iface.ep_addr == 0)
+        return false;
+
     // Allocate the transfer ring + report buffer.
     mm::PhysAddr ring_phys = 0;
     void* ring_virt = nullptr;
@@ -280,29 +334,33 @@ bool ConfigureHidInterruptIn(Runtime& rt, DeviceState* dev, const PortRecord& po
     if (!AllocZeroPage(&buf_phys, &buf_virt))
         return false;
 
-    dev->hid_ring_phys = ring_phys;
-    dev->hid_ring = static_cast<Trb*>(ring_virt);
-    dev->hid_ring_slots = mm::kPageSize / sizeof(Trb);
-    dev->hid_ring_idx = 0;
-    dev->hid_ring_cycle = 1;
-    Trb& link = dev->hid_ring[dev->hid_ring_slots - 1];
+    ep->ring_phys = ring_phys;
+    ep->ring = static_cast<Trb*>(ring_virt);
+    ep->ring_slots = mm::kPageSize / sizeof(Trb);
+    ep->ring_idx = 0;
+    ep->ring_cycle = 1;
+    Trb& link = ep->ring[ep->ring_slots - 1];
     link.param_lo = u32(ring_phys);
     link.param_hi = u32(ring_phys >> 32);
     link.status = 0;
     link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
 
-    dev->hid_buf_phys = buf_phys;
-    dev->hid_buf_virt = static_cast<u8*>(buf_virt);
-    dev->hid_ep_addr = port.hid_ep_addr;
-    dev->hid_ep_xhci_idx = EndpointDci(port.hid_ep_addr);
-    dev->hid_ep_max_packet = port.hid_ep_max_packet;
-    dev->hid_is_mouse = port.hid_mouse;
+    ep->buf_phys = buf_phys;
+    ep->buf_virt = static_cast<u8*>(buf_virt);
+    ep->ep_addr = iface.ep_addr;
+    ep->ep_xhci_idx = EndpointDci(iface.ep_addr);
+    ep->ep_max_packet = iface.ep_max_packet;
+    ep->is_mouse = (iface.kind == HidIfaceKind::BootMouse);
 
     // Configure Endpoint command — uses the command ring, not EP0.
-    const u32 interval = HidXhciInterval(dev->speed, port.hid_ep_interval);
-    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed,
-                                       dev->hid_ep_xhci_idx, kEpTypeInterruptIn, port.hid_ep_max_packet, interval,
-                                       dev->hid_ring_phys);
+    // Raise the slot's context-entries high-water first so adding a
+    // low-DCI endpoint after a high-DCI one can't disable the latter.
+    if (ep->ep_xhci_idx > dev->ctx_entries_high_water)
+        dev->ctx_entries_high_water = ep->ep_xhci_idx;
+    const u32 interval = HidXhciInterval(dev->speed, iface.ep_interval);
+    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, ep->ep_xhci_idx,
+                                       kEpTypeInterruptIn, iface.ep_max_packet, interval, ep->ring_phys,
+                                       dev->ctx_entries_high_water);
     const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
                                    u32(dev->input_ctx_phys >> 32), 0, u32(dev->slot_id) << 24);
     if (cmd_phys == 0)
@@ -326,45 +384,63 @@ bool ConfigureHidInterruptIn(Runtime& rt, DeviceState* dev, const PortRecord& po
         arch::SerialWrite(CompletionCodeName(code));
         arch::SerialWrite(") slot=");
         arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite(" ep=");
+        arch::SerialWriteHex(iface.ep_addr);
         arch::SerialWrite("\n");
         return false;
     }
 
     // Seed the first Normal TRB + ring doorbell so the endpoint
-    // has a TRB to fill when the keyboard has something to report.
-    const u64 trb_phys = HidEnqueueNormalTrb(dev, dev->hid_buf_phys, dev->hid_ep_max_packet);
+    // has a TRB to fill when the device has something to report.
+    const u64 trb_phys = HidEnqueueNormalTrb(ep, ep->buf_phys, ep->ep_max_packet);
     if (trb_phys == 0)
         return false;
-    dev->hid_outstanding_phys = trb_phys;
+    ep->outstanding_phys = trb_phys;
     for (u32 i = 0; i < 8; ++i)
-        dev->hid_prev[i] = 0;
-    RingDoorbell(rt, dev->slot_id, dev->hid_ep_xhci_idx);
+        ep->prev[i] = 0;
+    RingDoorbell(rt, dev->slot_id, ep->ep_xhci_idx);
 
-    dev->hid_ready = true;
+    ep->ready = true;
     return true;
 }
 
-// Bring a HID Boot Keyboard / Mouse all the way up. The per-
-// controller polling task picks up from ConfigureHidInterruptIn's
+// Bring ONE HID Boot Keyboard / Mouse interface all the way up. The
+// per-controller polling task picks up from ConfigureHidInterruptIn's
 // primed TRB.
-bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
+bool BringUpHidKeyboard(Runtime& rt, PortRecord& port, HidInterfaceRecord& iface)
 {
     DeviceState* dev = DeviceForSlot(port.slot_id);
     if (dev == nullptr)
         return false;
 
-    // SET_CONFIGURATION first so the HID interface is selected.
-    if (!SetConfiguration(rt, dev, port.hid_config_value))
+    // SET_CONFIGURATION first so the HID interfaces are selected.
+    // Idempotent: a composite calls this once per interface.
+    if (!EnsureConfigured(rt, dev, port.hid_config_value))
         return false;
+
+    HidEndpoint* ep = AllocHidEndpoint(dev);
+    if (ep == nullptr)
+    {
+        arch::SerialWrite("[xhci]   HID endpoint table full, skipping iface=");
+        arch::SerialWriteHex(iface.interface_num);
+        arch::SerialWrite("\n");
+        return false;
+    }
 
     // Boot-protocol mice still work without a Report descriptor,
     // but high-DPI / extra-button devices need the layout-aware
     // path. Failure is non-fatal: the polling loop falls back to
-    // HidMouseInjectN when hid_mouse_layout_valid remains false.
-    if (port.hid_mouse)
-        (void)FetchHidMouseReportLayout(rt, dev, port);
+    // HidMouseInjectN when mouse_layout_valid remains false.
+    if (iface.kind == HidIfaceKind::BootMouse)
+        (void)FetchHidMouseReportLayout(rt, dev, iface, ep);
 
-    return ConfigureHidInterruptIn(rt, dev, port);
+    if (!ConfigureHidInterruptIn(rt, dev, ep, iface))
+    {
+        ReleaseHidEndpoint(dev, ep);
+        return false;
+    }
+    iface.bound = true;
+    return true;
 }
 
 // Fetch the gamepad candidate's Report descriptor and extract the
@@ -372,19 +448,19 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
 // interface descriptor alone cannot confirm a report-protocol
 // device is a gamepad, and there is no boot-protocol fallback to
 // decode its reports with.
-bool FetchHidGamepadLayout(Runtime& rt, DeviceState* dev, const PortRecord& port, input::HidGamepadLayout* out)
+bool FetchHidGamepadLayout(Runtime& rt, DeviceState* dev, const HidInterfaceRecord& iface, input::HidGamepadLayout* out)
 {
-    if (dev == nullptr || !port.hid_gamepad || port.hid_report_desc_length == 0)
+    if (dev == nullptr || iface.kind != HidIfaceKind::GamepadCandidate || iface.report_desc_length == 0)
         return false;
 
-    u16 reportLen = port.hid_report_desc_length;
+    u16 reportLen = iface.report_desc_length;
     if (reportLen > mm::kPageSize)
         reportLen = u16(mm::kPageSize);
     for (u32 i = 0; i < reportLen; ++i)
         dev->scratch_virt[i] = 0;
 
     if (!DoControlIn(rt, dev, /*bmRequestType=*/0x81, kUsbReqGetDescriptor, u16(u16(kDescTypeReport) << 8),
-                     u16(port.hid_interface_num), reportLen, "GET_DESCRIPTOR(HID Report, gamepad)"))
+                     u16(iface.interface_num), reportLen, "GET_DESCRIPTOR(HID Report, gamepad)"))
         return false;
 
     return input::GamepadExtractLayout(dev->scratch_virt, reportLen, out);
@@ -395,7 +471,7 @@ bool FetchHidGamepadLayout(Runtime& rt, DeviceState* dev, const PortRecord& port
 // lands here as a candidate, and the Report-descriptor parse is the
 // step that decides. Only a confirmed gamepad allocates rings or a
 // drivers/input slot.
-bool BringUpHidGamepad(Runtime& rt, PortRecord& port)
+bool BringUpHidGamepad(Runtime& rt, PortRecord& port, HidInterfaceRecord& iface)
 {
     DeviceState* dev = DeviceForSlot(port.slot_id);
     if (dev == nullptr)
@@ -404,18 +480,21 @@ bool BringUpHidGamepad(Runtime& rt, PortRecord& port)
     // A candidate without an interrupt-IN endpoint can never feed
     // reports; decline before touching the endpoint machinery
     // (EndpointDci(0) would alias the invalid DCI 0).
-    if (port.hid_ep_addr == 0)
+    if (iface.ep_addr == 0)
         return false;
 
-    // SET_CONFIGURATION first so the HID interface is selected.
-    if (!SetConfiguration(rt, dev, port.hid_config_value))
+    // SET_CONFIGURATION first so the HID interfaces are selected.
+    // Idempotent: a composite calls this once per interface.
+    if (!EnsureConfigured(rt, dev, port.hid_config_value))
         return false;
 
     input::HidGamepadLayout layout{};
-    if (!FetchHidGamepadLayout(rt, dev, port, &layout))
+    if (!FetchHidGamepadLayout(rt, dev, iface, &layout))
     {
         arch::SerialWrite("[xhci]   HID gamepad candidate declined (report descriptor) port=");
         arch::SerialWriteHex(port.port_num);
+        arch::SerialWrite(" iface=");
+        arch::SerialWriteHex(iface.interface_num);
         arch::SerialWrite("\n");
         return false;
     }
@@ -429,18 +508,32 @@ bool BringUpHidGamepad(Runtime& rt, PortRecord& port)
         return false;
     }
 
-    if (!ConfigureHidInterruptIn(rt, dev, port))
+    HidEndpoint* ep = AllocHidEndpoint(dev);
+    if (ep == nullptr)
+    {
+        input::GamepadDisconnect(slot);
+        arch::SerialWrite("[xhci]   HID endpoint table full, skipping iface=");
+        arch::SerialWriteHex(iface.interface_num);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    if (!ConfigureHidInterruptIn(rt, dev, ep, iface))
     {
         // Roll back the input-driver registration so the connected
-        // mask never advertises a pad whose endpoint isn't feeding it.
+        // mask never advertises a pad whose endpoint isn't feeding it,
+        // and hand the endpoint record back so a sibling interface on
+        // the same composite can still use it.
+        ReleaseHidEndpoint(dev, ep);
         input::GamepadDisconnect(slot);
         return false;
     }
 
-    dev->hid_is_gamepad = true;
-    dev->hid_gamepad_slot = slot;
+    ep->is_gamepad = true;
+    ep->gamepad_slot = slot;
+    iface.bound = true;
     arch::SerialWrite("[xhci]   HID gamepad layout: iface=");
-    arch::SerialWriteHex(port.hid_interface_num);
+    arch::SerialWriteHex(iface.interface_num);
     arch::SerialWrite(" report_bits=");
     arch::SerialWriteHex(layout.report_size_bits);
     arch::SerialWrite(" buttons=");

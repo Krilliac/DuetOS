@@ -14550,3 +14550,81 @@ _2026-08-05_
 - **Revisit when:** A target PE needs `ReadConsoleOutput` /
   scrollback readback or mouse/resize INPUT_RECORD events — those
   need sink cooperation, not a kernel32-local grid.
+
+---
+
+## 064 — The non-blocking stdin probe is its own syscall, not a flag on SYS_STDIN_READ
+
+_2026-08-05_
+
+- **Scope:** `kernel/syscall/syscall.h`,
+  `kernel/syscall/syscall.cpp`, `kernel/proc/process.cpp`,
+  `kernel/proc/process.h`,
+  `userland/libs/kernel32/kernel32_console.c`,
+  `abi/native_syscalls.json`.
+- **Decision:** The probe got its own number, `SYS_STDIN_PEEK`
+  (231), rather than a mode flag on the existing `SYS_STDIN_READ`
+  (171). It takes `rdi` = destination buffer (or 0 for the
+  count-only form) and `rsi` = capacity, and returns the total
+  bytes currently buffered without advancing the ring tail. It is
+  statically gated on `kCapInput` like its sibling input syscalls,
+  and claims stdin focus exactly as the blocking read does, so a
+  consumer that polls before it ever blocks still registers as the
+  keyboard reader's destination. It amends decision 063 above,
+  which had peek semantics riding the userland record queue alone.
+- **Why:** `SYS_STDIN_READ` reads only `rdi` and `rsi`; it never
+  examines `rdx`, so its existing callers leave whatever happened
+  to be in that register — kernel32's `stdin_read_blocking`
+  constrains only `"D"` and `"S"`. Reinterpreting `rdx` as a mode
+  flag would hand every one of those callers a random mode.
+  Syscall numbers are an ABI but they are cheap; silently changing
+  the meaning of a live register is neither. A separate number
+  also keeps the cap-table row, the IDL entry, and the
+  doc-comment one-to-one with a single behaviour each.
+- **Rules out / defers:** Retrofitting flag arguments onto any
+  already-shipped native syscall whose unused argument registers
+  are not zeroed by contract. The fix for such a case is a new
+  number, not a reinterpretation.
+- **Revisit when:** The native ABI grows a documented rule that
+  all unused argument registers must be zero on entry — at which
+  point flag retrofits become sound for syscalls added after it.
+
+---
+
+## 065 — The gamepad ABI is a read-only fixed wire struct with no ring-3 injection path
+
+_2026-08-05_
+
+- **Scope:** `kernel/subsystems/win32/input_syscall.h`,
+  `kernel/subsystems/win32/input_syscall.cpp`,
+  `kernel/drivers/input/hid_gamepad.h`,
+  `userland/libs/xinput1_4/xinput_wire.h`,
+  `kernel/syscall/cap_table.def`.
+- **Decision:** `SYS_GAMEPAD_STATE` (230) copies out a fixed
+  44-byte wire struct carrying the slot's `XINPUT_STATE` image,
+  its `XINPUT_CAPABILITIES` image, a connected flag, and the
+  connected-slot bitmask. The guest supplies only a slot index
+  (0..3) and a buffer whose size must equal the wire size
+  *exactly*. The handler stages the snapshot in a kernel-stack
+  struct and copies it out in one `CopyToUser` at the end. The
+  call is statically gated on `kCapInput` in `cap_table.def`. A
+  disconnected slot is not an error: the wire comes back with
+  `connected = 0` and zeroed pad state so `xinput1_4.dll` can
+  answer `ERROR_DEVICE_NOT_CONNECTED`.
+- **Why:** Ring 3 can read pad state but has no way to inject
+  reports — the only writer of the slot table is the xHCI poll
+  task inside the kernel. A guest-supplied report path would let
+  any PE forge input visible to every other process on the box.
+  The exact-size check makes the layout a versioned contract:
+  changing it requires a new size, which old callers fail closed
+  against rather than misparsing. Staging then copying once means
+  a user fault mid-fill can never leave a half-written buffer or
+  hold driver state across a page-fault fix-up.
+- **Rules out / defers:** A writable gamepad syscall, a
+  guest-supplied virtual-pad injection path, and per-field or
+  variable-length wire negotiation. Rumble, when it lands, must be
+  a separate kernel-driven output path rather than a write arm on
+  this call.
+- **Revisit when:** Force feedback needs a command channel, or a
+  wireless receiver adds battery fields that force a wire version
+  bump.
