@@ -27,6 +27,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "sched/sched.h"
+#include "drivers/input/hid_gamepad.h"
 #include "drivers/pci/pci.h"
 #include "drivers/usb/usb.h"
 #include "drivers/usb/xhci_internal.h"
@@ -135,7 +136,21 @@ void HidPollEntry(void* raw)
                 // is `requested - residual` per xHCI completion-code
                 // semantics (kCompletionCodeShortPacket / Success).
                 // Cap at 8 bytes to match the HID buffer page slice.
-                if (dev.hid_is_mouse)
+                if (dev.hid_is_gamepad)
+                {
+                    // Route into the drivers/input gamepad slot; the
+                    // layout stored there at GamepadConnect time does
+                    // the per-field decode. Clamp at 64 bytes — the
+                    // largest interrupt-IN report a HID gamepad ships
+                    // (Report-ID prefix + axes + button block).
+                    u32 actual = dev.hid_ep_max_packet;
+                    if (residual <= actual)
+                        actual -= residual;
+                    if (actual > 64)
+                        actual = 64;
+                    duetos::drivers::input::GamepadInjectReport(dev.hid_gamepad_slot, dev.hid_buf_virt, actual);
+                }
+                else if (dev.hid_is_mouse)
                 {
                     u32 actual = dev.hid_ep_max_packet;
                     if (residual <= actual)
@@ -605,6 +620,30 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
                 arch::SerialWrite("\n");
             }
         }
+        else if (rec.hid_gamepad)
+        {
+            ++out.hid_gamepads_found;
+            arch::SerialWrite("[xhci]   HID-GAMEPAD-CANDIDATE port=");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" iface=");
+            arch::SerialWriteHex(rec.hid_interface_num);
+            arch::SerialWrite(" ep=");
+            arch::SerialWriteHex(rec.hid_ep_addr);
+            arch::SerialWrite(" mps=");
+            arch::SerialWriteHex(rec.hid_ep_max_packet);
+            arch::SerialWrite(" interval=");
+            arch::SerialWriteHex(rec.hid_ep_interval);
+            arch::SerialWrite(" config=");
+            arch::SerialWriteHex(rec.hid_config_value);
+            arch::SerialWrite("\n");
+            if (BringUpHidGamepad(rt, rec))
+            {
+                ++out.hid_gamepads_bound;
+                arch::SerialWrite("[xhci]   HID-GAMEPAD bound; polling task will pick up slot=");
+                arch::SerialWriteHex(rec.slot_id);
+                arch::SerialWrite("\n");
+            }
+        }
     }
     arch::SerialWrite("[xhci] enumeration: addressed=");
     arch::SerialWriteHex(out.devices_addressed);
@@ -620,6 +659,10 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWriteHex(out.hid_mice_found);
     arch::SerialWrite(" mouse-bound=");
     arch::SerialWriteHex(out.hid_mice_bound);
+    arch::SerialWrite(" pad-found=");
+    arch::SerialWriteHex(out.hid_gamepads_found);
+    arch::SerialWrite(" pad-bound=");
+    arch::SerialWriteHex(out.hid_gamepads_bound);
     arch::SerialWrite("\n");
 
     // Always publish this controller's Runtime into g_poll_rt so
@@ -642,7 +685,7 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     // on a wait queue the IRQ handler signals instead of polling
     // at tick cadence — order matters, the task has to see the
     // final irq_vector when it first runs.
-    if (out.hid_keyboards_bound + out.hid_mice_bound > 0)
+    if (out.hid_keyboards_bound + out.hid_mice_bound + out.hid_gamepads_bound > 0)
     {
         const u32 idx = u32(&out - g_controllers);
         if (idx < kMaxControllers)
@@ -801,8 +844,16 @@ void XhciInit()
     // slots cleanly. Frames behind the rings are leaked until we
     // teach the allocator to take them back after a full HCH
     // quiesce — intentional, matches the per-controller leak note above.
+    // Gamepad devices also release their drivers/input slot here —
+    // GamepadConnect at bring-up pairs with this disconnect, so a
+    // Shutdown/Restart cycle never leaves the connected mask
+    // advertising a pad whose endpoint is gone.
     for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+    {
+        if (g_devices[i].in_use && g_devices[i].hid_is_gamepad)
+            duetos::drivers::input::GamepadDisconnect(g_devices[i].hid_gamepad_slot);
         ZeroBytes(&g_devices[i], sizeof(DeviceState));
+    }
     g_device_count = 0;
     arch::SerialWrite(any_stuck ? "[xhci] shutdown partial (some controllers wouldn't halt)\n"
                                 : "[xhci] shutdown ok — all controllers quiesced\n");

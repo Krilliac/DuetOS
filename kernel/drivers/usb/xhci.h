@@ -94,6 +94,14 @@ struct PortRecord
     u8 hid_config_value; // bConfigurationValue from top-level Config desc
     bool hid_keyboard;
     bool hid_mouse;
+    // Non-boot HID interface claimed as a gamepad CANDIDATE. Unlike
+    // the boot keyboard/mouse (identified by interface protocol
+    // alone), a gamepad is a report-protocol device — the claim is
+    // only confirmed at bring-up time, when GET_DESCRIPTOR(Report)
+    // is parsed and GamepadExtractLayout classifies the device as
+    // Gamepad/Joystick. A candidate that fails that parse is simply
+    // not bound; no state leaks.
+    bool hid_gamepad;
     u8 hid_interface_num;
     u8 hid_ep_addr;             // bEndpointAddress: bit 7 = IN direction
     u16 hid_ep_max_packet;      // wMaxPacketSize of the HID int-IN endpoint
@@ -127,6 +135,8 @@ struct ControllerInfo
     u32 hid_keyboards_bound; // count of ports that fully came up for HID polling
     u32 hid_mice_found;      // count of ports that resolved to a HID boot mouse
     u32 hid_mice_bound;      // count of ports that fully came up for HID polling
+    u32 hid_gamepads_found;  // count of ports whose config tree yielded a gamepad candidate
+    u32 hid_gamepads_bound;  // count of candidates whose report descriptor confirmed + endpoint came up
     u32 context_bytes;       // HCCPARAMS1.CSZ → 32 or 64
     PortRecord ports[kMaxXhciPortsPerController];
 };

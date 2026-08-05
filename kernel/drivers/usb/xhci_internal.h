@@ -293,6 +293,16 @@ struct DeviceState
     bool hid_mouse_layout_valid;
     hid::HidMouseLayout hid_mouse_layout;
 
+    // Gamepad routing. When BringUpHidGamepad confirmed the device
+    // (report descriptor classified Gamepad/Joystick + endpoint came
+    // up), `hid_is_gamepad` flips true and `hid_gamepad_slot` holds
+    // the drivers/input gamepad slot index [0..3] that
+    // GamepadConnect assigned. The extracted layout lives inside
+    // that slot (copied at connect time), so the poll loop only
+    // needs the slot index to route reports.
+    bool hid_is_gamepad;
+    u32 hid_gamepad_slot;
+
     // Bulk endpoint state. One pair (IN + OUT) per device is enough
     // for every v0 USB-net class (CDC-ECM, RTL8150, AX88xxx).
     bool bulk_in_ready;
@@ -525,5 +535,12 @@ bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value);
 // Stand up the HID Boot endpoint: allocate ring + buffer, issue
 // Configure Endpoint, prime the first IN TRB, mark dev->hid_ready.
 bool BringUpHidKeyboard(Runtime& rt, PortRecord& port);
+
+// Stand up a report-protocol HID gamepad candidate: SET_CONFIGURATION,
+// fetch + parse the Report descriptor (GamepadExtractLayout — this is
+// the step that CONFIRMS the candidate; failure is a clean decline),
+// register a drivers/input gamepad slot, then the same interrupt-IN
+// ring + Configure Endpoint + first-TRB priming as the keyboard path.
+bool BringUpHidGamepad(Runtime& rt, PortRecord& port);
 
 } // namespace duetos::drivers::usb::xhci::internal

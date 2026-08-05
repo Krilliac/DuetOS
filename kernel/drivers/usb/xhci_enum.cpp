@@ -25,6 +25,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "drivers/usb/xhci_internal.h"
+#include "drivers/input/hid_gamepad.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {
@@ -262,28 +263,13 @@ bool FetchHidMouseReportLayout(Runtime& rt, DeviceState* dev, const PortRecord& 
 }
 
 
-// Bring a HID Boot Keyboard all the way up: allocate its
-// interrupt-IN transfer ring + 8-byte report buffer, build +
-// submit the Configure Endpoint command, seed the first Normal
-// TRB, mark the device hid_ready. The per-controller polling task
-// picks up from there.
-bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
+// Shared tail of every HID interrupt-IN bring-up (keyboard, mouse,
+// gamepad): allocate the transfer ring + report buffer, build +
+// submit the Configure Endpoint command, seed the first Normal TRB,
+// mark the device hid_ready. The per-controller polling task picks
+// up from there.
+bool ConfigureHidInterruptIn(Runtime& rt, DeviceState* dev, const PortRecord& port)
 {
-    DeviceState* dev = DeviceForSlot(port.slot_id);
-    if (dev == nullptr)
-        return false;
-
-    // SET_CONFIGURATION first so the HID interface is selected.
-    if (!SetConfiguration(rt, dev, port.hid_config_value))
-        return false;
-
-    // Boot-protocol mice still work without a Report descriptor,
-    // but high-DPI / extra-button devices need the layout-aware
-    // path. Failure is non-fatal: the polling loop falls back to
-    // HidMouseInjectN when hid_mouse_layout_valid remains false.
-    if (port.hid_mouse)
-        (void)FetchHidMouseReportLayout(rt, dev, port);
-
     // Allocate the transfer ring + report buffer.
     mm::PhysAddr ring_phys = 0;
     void* ring_virt = nullptr;
@@ -355,6 +341,113 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     RingDoorbell(rt, dev->slot_id, dev->hid_ep_xhci_idx);
 
     dev->hid_ready = true;
+    return true;
+}
+
+// Bring a HID Boot Keyboard / Mouse all the way up. The per-
+// controller polling task picks up from ConfigureHidInterruptIn's
+// primed TRB.
+bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
+{
+    DeviceState* dev = DeviceForSlot(port.slot_id);
+    if (dev == nullptr)
+        return false;
+
+    // SET_CONFIGURATION first so the HID interface is selected.
+    if (!SetConfiguration(rt, dev, port.hid_config_value))
+        return false;
+
+    // Boot-protocol mice still work without a Report descriptor,
+    // but high-DPI / extra-button devices need the layout-aware
+    // path. Failure is non-fatal: the polling loop falls back to
+    // HidMouseInjectN when hid_mouse_layout_valid remains false.
+    if (port.hid_mouse)
+        (void)FetchHidMouseReportLayout(rt, dev, port);
+
+    return ConfigureHidInterruptIn(rt, dev, port);
+}
+
+// Fetch the gamepad candidate's Report descriptor and extract the
+// per-field layout. Unlike the mouse path this is mandatory: the
+// interface descriptor alone cannot confirm a report-protocol
+// device is a gamepad, and there is no boot-protocol fallback to
+// decode its reports with.
+bool FetchHidGamepadLayout(Runtime& rt, DeviceState* dev, const PortRecord& port, input::HidGamepadLayout* out)
+{
+    if (dev == nullptr || !port.hid_gamepad || port.hid_report_desc_length == 0)
+        return false;
+
+    u16 reportLen = port.hid_report_desc_length;
+    if (reportLen > mm::kPageSize)
+        reportLen = u16(mm::kPageSize);
+    for (u32 i = 0; i < reportLen; ++i)
+        dev->scratch_virt[i] = 0;
+
+    if (!DoControlIn(rt, dev, /*bmRequestType=*/0x81, kUsbReqGetDescriptor, u16(u16(kDescTypeReport) << 8),
+                     u16(port.hid_interface_num), reportLen, "GET_DESCRIPTOR(HID Report, gamepad)"))
+        return false;
+
+    return input::GamepadExtractLayout(dev->scratch_virt, reportLen, out);
+}
+
+// Bring a report-protocol HID gamepad candidate up. Declining is
+// normal — any non-boot HID interface (consumer control, digitizer)
+// lands here as a candidate, and the Report-descriptor parse is the
+// step that decides. Only a confirmed gamepad allocates rings or a
+// drivers/input slot.
+bool BringUpHidGamepad(Runtime& rt, PortRecord& port)
+{
+    DeviceState* dev = DeviceForSlot(port.slot_id);
+    if (dev == nullptr)
+        return false;
+
+    // A candidate without an interrupt-IN endpoint can never feed
+    // reports; decline before touching the endpoint machinery
+    // (EndpointDci(0) would alias the invalid DCI 0).
+    if (port.hid_ep_addr == 0)
+        return false;
+
+    // SET_CONFIGURATION first so the HID interface is selected.
+    if (!SetConfiguration(rt, dev, port.hid_config_value))
+        return false;
+
+    input::HidGamepadLayout layout{};
+    if (!FetchHidGamepadLayout(rt, dev, port, &layout))
+    {
+        arch::SerialWrite("[xhci]   HID gamepad candidate declined (report descriptor) port=");
+        arch::SerialWriteHex(port.port_num);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    const u32 slot = input::GamepadConnect(&layout);
+    if (slot >= input::kGamepadMaxSlots)
+    {
+        arch::SerialWrite("[xhci]   gamepad slot table full, skipping port ");
+        arch::SerialWriteHex(port.port_num);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    if (!ConfigureHidInterruptIn(rt, dev, port))
+    {
+        // Roll back the input-driver registration so the connected
+        // mask never advertises a pad whose endpoint isn't feeding it.
+        input::GamepadDisconnect(slot);
+        return false;
+    }
+
+    dev->hid_is_gamepad = true;
+    dev->hid_gamepad_slot = slot;
+    arch::SerialWrite("[xhci]   HID gamepad layout: iface=");
+    arch::SerialWriteHex(port.hid_interface_num);
+    arch::SerialWrite(" report_bits=");
+    arch::SerialWriteHex(layout.report_size_bits);
+    arch::SerialWrite(" buttons=");
+    arch::SerialWriteHex(layout.button_count);
+    arch::SerialWrite(" pad_slot=");
+    arch::SerialWriteHex(slot);
+    arch::SerialWrite("\n");
     return true;
 }
 

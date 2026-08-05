@@ -152,6 +152,47 @@ constexpr u8 kKeyboardThenMouseConfigDescriptor[] = {
     0x04,
 };
 
+// Report-protocol gamepad: HID interface with subclass 0 /
+// protocol 0 (no boot protocol). The parser must claim it as a
+// gamepad CANDIDATE and still capture the endpoint + Report
+// descriptor length for the bring-up path to confirm against.
+constexpr u8 kGamepadConfigDescriptor[] = {
+    0x09,
+    kDescTypeConfig,
+    0x22,
+    0x00,
+    0x01,
+    0x01,
+    0x00,
+    0xA0,
+    0x32,
+    0x09,
+    kDescTypeInterface,
+    0x02,
+    0x00,
+    0x01,
+    kIfaceClassHid,
+    0x00,
+    0x00,
+    0x00,
+    0x09,
+    kDescTypeHid,
+    0x11,
+    0x01,
+    0x00,
+    0x01,
+    kDescTypeReport,
+    0x60,
+    0x00,
+    0x07,
+    kDescTypeEndpoint,
+    0x81,
+    kEpAttrTypeInterrupt,
+    0x20,
+    0x00,
+    0x08,
+};
+
 } // namespace
 
 // Walk a USB Configuration descriptor looking for the first HID
@@ -190,23 +231,40 @@ bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
             const u8 bInterfaceSubClass = buf[off + 6];
             const u8 bInterfaceProtocol = buf[off + 7];
             in_hid_iface = false;
-            if (bInterfaceClass == kIfaceClassHid && bInterfaceSubClass == kIfaceSubclassBoot)
+            if (bInterfaceClass == kIfaceClassHid)
             {
                 // PortRecord represents one polled HID device. Claim the first
                 // boot keyboard/mouse interface only; otherwise a composite
                 // keyboard+mouse descriptor can overwrite the selected interface
                 // while keeping the endpoint/report length from the first one.
-                const bool already_claimed = port.hid_keyboard || port.hid_mouse;
-                if (!already_claimed && bInterfaceProtocol == kIfaceProtocolKeyboard)
+                const bool already_claimed = port.hid_keyboard || port.hid_mouse || port.hid_gamepad;
+                const bool is_boot = (bInterfaceSubClass == kIfaceSubclassBoot);
+                if (!already_claimed && is_boot && bInterfaceProtocol == kIfaceProtocolKeyboard)
                 {
                     port.hid_interface_num = bInterfaceNumber;
                     port.hid_keyboard = true;
                     in_hid_iface = true;
                 }
-                else if (!already_claimed && bInterfaceProtocol == kIfaceProtocolMouse)
+                else if (!already_claimed && is_boot && bInterfaceProtocol == kIfaceProtocolMouse)
                 {
                     port.hid_interface_num = bInterfaceNumber;
                     port.hid_mouse = true;
+                    in_hid_iface = true;
+                }
+                else if (!already_claimed && !(is_boot && (bInterfaceProtocol == kIfaceProtocolKeyboard ||
+                                                           bInterfaceProtocol == kIfaceProtocolMouse)))
+                {
+                    // Non-boot HID interface: gamepad CANDIDATE. Gamepads are
+                    // report-protocol devices (subclass 0, protocol 0), so the
+                    // interface descriptor alone can't confirm the kind — the
+                    // bring-up path fetches the Report descriptor and only
+                    // binds if GamepadExtractLayout classifies Gamepad/Joystick.
+                    // GAP: first-match claim — a composite device whose non-boot
+                    // HID interface precedes its boot keyboard/mouse interface
+                    // shadows the latter (one PortRecord per port) — revisit
+                    // when multi-interface HID composites need both bound.
+                    port.hid_interface_num = bInterfaceNumber;
+                    port.hid_gamepad = true;
                     in_hid_iface = true;
                 }
             }
@@ -230,7 +288,7 @@ bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
         }
         off += dlen;
     }
-    return (port.hid_keyboard || port.hid_mouse) && port.hid_ep_addr != 0;
+    return (port.hid_keyboard || port.hid_mouse || port.hid_gamepad) && port.hid_ep_addr != 0;
 }
 
 void XhciDescriptorSelfTest()
@@ -260,6 +318,20 @@ void XhciDescriptorSelfTest()
         ExpectEq(u32(port.hid_interface_num), 1, "keyboard iface");
         ExpectEq(u32(port.hid_ep_addr), 0x82, "keyboard ep");
         ExpectEq(u32(port.hid_report_desc_length), 0x3F, "keyboard report len");
+    }
+
+    {
+        PortRecord port{};
+        const bool ok = ParseConfigForHidBoot(kGamepadConfigDescriptor, sizeof(kGamepadConfigDescriptor), port);
+        ExpectEq(u32(ok), 1, "gamepad parse_ok");
+        ExpectEq(u32(port.hid_gamepad), 1, "gamepad candidate flag");
+        ExpectEq(u32(port.hid_keyboard), 0, "gamepad: keyboard flag clear");
+        ExpectEq(u32(port.hid_mouse), 0, "gamepad: mouse flag clear");
+        ExpectEq(u32(port.hid_interface_num), 2, "gamepad iface");
+        ExpectEq(u32(port.hid_ep_addr), 0x81, "gamepad ep");
+        ExpectEq(u32(port.hid_ep_max_packet), 0x20, "gamepad max_packet");
+        ExpectEq(u32(port.hid_ep_interval), 8, "gamepad interval");
+        ExpectEq(u32(port.hid_report_desc_length), 0x60, "gamepad report len");
     }
 
     arch::SerialWrite("[xhci-desc-selftest] PASS (HID boot endpoint + report descriptor length parsed)\n");

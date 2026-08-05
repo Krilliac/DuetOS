@@ -88,6 +88,7 @@
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/gpu/nvidia_gpu.h"
 #include "drivers/gpu/nvidia_gsp_fw.h"
+#include "drivers/input/hid_gamepad.h"
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/iommu/dmar.h"
@@ -2441,6 +2442,7 @@ void BootBringupDevices(bool force_net_smoke)
     // with each other or the HID polling path.
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::input::HidKeyboardSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::input::GamepadSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::BtusbSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
