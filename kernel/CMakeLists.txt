@@ -868,6 +868,64 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_ICON_SMOKE_HEADER}")
 
+# bitmap_smoke.exe — PE32 test for the RT_BITMAP resource loading path.
+# gen_bitmap.py produces a minimal 8x8 24bpp .bmp at build time, windres
+# compiles bitmap_smoke.rc (which references the .bmp) into a COFF
+# resource object (stripping the BITMAPFILEHEADER, so the stored
+# resource is the packed BITMAPINFOHEADER-first DIB LoadBitmap decodes),
+# and mingw-gcc links the final PE with a genuine RT_BITMAP .rsrc section.
+set(DUETOS_BITMAP_SMOKE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/bitmap_smoke/bitmap_smoke.c")
+set(DUETOS_BITMAP_SMOKE_RC "${CMAKE_SOURCE_DIR}/userland/apps/bitmap_smoke/bitmap_smoke.rc")
+set(DUETOS_BITMAP_SMOKE_BMP "${CMAKE_CURRENT_BINARY_DIR}/bitmap_smoke.bmp")
+set(DUETOS_BITMAP_SMOKE_RES "${CMAKE_CURRENT_BINARY_DIR}/bitmap_smoke.res.o")
+set(DUETOS_BITMAP_SMOKE_EXE "${CMAKE_CURRENT_BINARY_DIR}/bitmap_smoke.exe")
+set(DUETOS_BITMAP_SMOKE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_bitmap_smoke_pe.h")
+if(MINGW_W64_I686_GCC AND MINGW_W64_I686_WINDRES)
+    add_custom_command(
+        OUTPUT "${DUETOS_BITMAP_SMOKE_BMP}"
+        COMMAND python3 "${CMAKE_SOURCE_DIR}/userland/apps/bitmap_smoke/gen_bitmap.py"
+                "${DUETOS_BITMAP_SMOKE_BMP}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/userland/apps/bitmap_smoke/gen_bitmap.py"
+        COMMENT "Generating 8x8 bitmap_smoke.bmp"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_BITMAP_SMOKE_RES}"
+        COMMAND "${MINGW_W64_I686_WINDRES}" -O coff
+                -I "${CMAKE_CURRENT_BINARY_DIR}"
+                -o "${DUETOS_BITMAP_SMOKE_RES}" "${DUETOS_BITMAP_SMOKE_RC}"
+        DEPENDS "${DUETOS_BITMAP_SMOKE_RC}" "${DUETOS_BITMAP_SMOKE_BMP}"
+        COMMENT "Compiling bitmap_smoke.rc (windres -> COFF .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_BITMAP_SMOKE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_BITMAP_SMOKE_EXE}" "${DUETOS_BITMAP_SMOKE_SRC}" "${DUETOS_BITMAP_SMOKE_RES}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_BITMAP_SMOKE_SRC}" "${DUETOS_BITMAP_SMOKE_RES}"
+        COMMENT "Cross-compiling bitmap_smoke.exe (i386 PE32 with bitmap .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_BITMAP_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_BITMAP_SMOKE_EXE}" "${DUETOS_BITMAP_SMOKE_HEADER}"
+                kBinBitmapSmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_BITMAP_SMOKE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding bitmap_smoke PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_BITMAP_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_BITMAP_SMOKE_HEADER}"
+                kBinBitmapSmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting bitmap_smoke PE stub (i686 mingw or windres absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_BITMAP_SMOKE_HEADER}")
+
 # pe32_miss.exe — PE32 that calls an unresolved Win32 import to
 # validate the 32-bit Win32 thunks page. The import (user32!
 # SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
@@ -1186,6 +1244,9 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_env.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_locale.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_io.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_console.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_console_vt.h"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_console_input.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_sync.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"

@@ -1031,7 +1031,6 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    walk `RT_GROUP_ICON` -> `RT_ICON`, decode BIH + bottom-up DIB + AND-mask
    -> BGRA; `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W` are REAL on
    both bitnesses; `icon_smoke` PE fixture in the ring3 battery.
-   `LoadBitmapA/W` remains STUB (`RT_BITMAP` decode not yet written).
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1637,7 +1636,6 @@ done, it is merely written.
      `duet_res_decode_icon` walks RT_GROUP_ICON -> RT_ICON, decodes
      BIH + bottom-up DIB (32/24/8/4/1bpp) + AND-mask -> BGRA.
      `icon_smoke` PE fixture in the ring3 battery.
-     `LoadBitmapA/W` remains STUB (`RT_BITMAP` decode not yet written).
    - ~~**Accelerators**~~ **LANDED 2026-07-29.** `LoadAcceleratorsA/W`
      parse `RT_ACCELERATOR` from the PE's `.rsrc` section.
      `TranslateAcceleratorA/W` match VK + modifier state and post
@@ -1679,8 +1677,7 @@ done, it is merely written.
    `GetStdHandle`, `WriteConsoleA/W`, `ReadConsoleA/W`,
    `GetConsoleMode`/`SetConsoleMode`, `GetConsoleScreenBufferInfo`,
    `SetConsoleCursorPosition`, `FillConsoleOutputCharacter`,
-   `SetConsoleTextAttribute`. VT sequences and `ReadConsoleInput`
-   remain GAPs.
+   `SetConsoleTextAttribute`.
 10. ~~**Fibers.**~~ **LANDED 2026-07-29.** Real `ConvertThreadToFiber`,
     `CreateFiber`, `SwitchToFiber`, `DeleteFiber`, `GetFiberData`,
     `GetCurrentFiber`, FLS (`FlsAlloc`/`FlsFree`/`FlsGetValue`/`FlsSetValue`)
@@ -1701,7 +1698,16 @@ done, it is merely written.
     had no owner, no per-process bound, and were never reclaimed at exit.
     Remaining GDI DIB gaps are listed in
     [`Win32-Surface-Status.md`](Win32-Surface-Status.md#gdi32dll).
-13. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
+13. **GDI completeness.** [dep: 12] Paths landed earlier (per-DC
+    recorder: Begin/End/Close/Stroke/Fill/StrokeAndFill/Abort/GetPath/
+    PathToRegion); regions (exact `CombineRgn` rect-list algebra +
+    the clip-selection family) and transfer modes (`SetROP2` via
+    `SYS_GDI_SET_ROP2`) landed 2026-08-05. Residue: the 11 R2 codes
+    beyond BLACK/NOT/XORPEN/COPYPEN/WHITE (fall back to COPYPEN),
+    window-DC ROP2 (only R2_BLACK/R2_WHITE via colour transform),
+    clip enforcement for outlines/lines/text (bounding-box reject,
+    not per-pixel), path curves + scan-line interior fill,
+    `FlattenPath`/`WidenPath`.
 15. **D3D9.** Large back catalogue; simpler than 11/12.
 16. **D3D11 completeness** and **D3D12** beyond the current thunk layer.
 17. **DirectWrite / Direct2D.** [dep: 13]
@@ -1710,7 +1716,16 @@ done, it is merely written.
 20. **XAudio2 / WASAPI real mixing.** [dep: 21]
 21. **Audio depth** — USB audio class, HDMI/DP audio, per-stream volume,
     resampling.
-22. **DirectInput / XInput** bound to real HID devices.
+22. **DirectInput / XInput** bound to real HID devices. Groundwork
+    landed 2026-08-05: the `hid_gamepad` driver is wired end-to-end —
+    xHCI descriptor parse claims non-boot HID interfaces as gamepad
+    candidates, Report-descriptor layout extraction binds confirmed
+    Gamepad/Joystick devices into the 4-slot XInput-shaped state
+    table, and the poll task injects interrupt-IN reports (host test
+    `tests/host/test_hid_gamepad.cpp` + the gamepad arm of
+    `XhciDescriptorSelfTest` at boot). Remaining:
+    the `SYS_GAMEPAD_STATE` syscall + the userland XInput DLL
+    binding.
 
 ### Tier 3 — hardware needed to be a daily driver
 

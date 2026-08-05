@@ -422,7 +422,24 @@ syscall routing shows up immediately.
   `GetStdHandle`, `SetStdHandle`,
   `AllocConsole`, `FreeConsole`, `AttachConsole`,
   `GetConsoleScreenBufferInfo` (basic),
-  `SetConsoleTextAttribute`, `SetConsoleCursorPosition`
+  `SetConsoleTextAttribute`, `SetConsoleCursorPosition`,
+  `ReadConsoleInputA/W`, `PeekConsoleInputA/W`,
+  `FlushConsoleInputBuffer`, `GetNumberOfConsoleInputEvents`.
+  `ReadConsoleA/W` block on the kernel-owned `SYS_STDIN_READ` ring
+  with `ENABLE_LINE_INPUT` editing + `ENABLE_ECHO_INPUT` echo and
+  return CRLF-terminated lines; the `*ConsoleInput*` family
+  translates stdin bytes into `KEY_EVENT` `INPUT_RECORD` down/up
+  pairs (VK + `uChar` + SHIFT/CTRL control-key state) in a userland
+  record queue. With `ENABLE_VIRTUAL_TERMINAL_PROCESSING` set on
+  stdout/stderr, written bytes feed a VT tracker that keeps the
+  `GetConsoleScreenBufferInfo` mirror (cursor position + attribute
+  word) coherent while the bytes still pass unmodified to the
+  VT-interpreting sink. Like the Resources family below, these
+  console exports resolve from the preloaded `kernel32.dll` EAT —
+  the `kOffPinReturn*` rows the auto-generated table lists for
+  `ReadConsoleA/W`, `ReadConsoleInputA/W`, `PeekConsoleInputW`,
+  `FlushConsoleInputBuffer` and `GetNumberOfConsoleInputEvents` are
+  dead fallbacks.
 - App-compat: `IsDebuggerPresent`,
   `SetThreadStackGuarantee` — both consult the per-process
   compat sidecar via the cached `SYS_COMPAT_QUERY = 206`
@@ -1675,10 +1692,21 @@ WinDbg client API, `SymLoadModuleEx`.
   (syscall 224), which nearest-neighbour samples to the 12x20
   internal sprite. Cursors up to 64x64 are decoded.
 - `LoadImageA/W` — REAL. Dispatches by `IMAGE_ICON` / `IMAGE_CURSOR`
-  / `IMAGE_BITMAP` to LoadIcon / LoadCursor / LoadBitmap. GAP:
-  `LR_DEFAULTSIZE`, `LR_SHARED`, `LR_LOADFROMFILE` not implemented.
-- `LoadBitmapA/W` — STUB, returns NULL. RT_BITMAP decoding is the
-  remaining piece.
+  / `IMAGE_BITMAP` to LoadIcon / LoadCursor / LoadBitmap —
+  `IMAGE_BITMAP` now reaches the real RT_BITMAP decoder rather than
+  falling through to a stub. GAP: `LR_DEFAULTSIZE`, `LR_SHARED`,
+  `LR_LOADFROMFILE` not implemented.
+- `LoadBitmapA/W` — REAL on both bitnesses. Decodes RT_BITMAP (a
+  packed DIB: `BITMAPINFOHEADER` with no `BITMAPFILEHEADER`;
+  32/24/8/4/1bpp `BI_RGB`, bottom-up and top-down) via
+  `duet_res_decode_bitmap` into BGRA, then creates a GDI bitmap via
+  `SYS_GDI_CREATE_COMPAT_BITMAP` + `SYS_GDI_SET_DIBITS` — the
+  returned HBITMAP behaves exactly like one from
+  `CreateCompatibleBitmap` + `SetDIBits`. The i386 `user32_32`
+  implementation follows the same decode + syscall pair. NULL on any
+  failure (Win32 has no system-bitmap fallback). GAP: integer
+  ordinals only (no string resource names); bitmaps larger than
+  128x128 are rejected (static decode buffer).
 - `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — REAL.
   The kernel now posts Win32 VK codes in `WM_KEYDOWN`/`WM_KEYUP`
   `wParam` (translated from DuetOS `KeyCode` via
@@ -1845,11 +1873,32 @@ WinDbg client API, `SymLoadModuleEx`.
   `ETO_OPAQUE` still STUB), `DrawTextA/W`
 - State: `SetBkColor`, `SetBkMode`, `SetMapMode`,
   `SetTextColor`, `SetTextAlign`
+- Transfer mode: `SetROP2` / `GetROP2` — REAL. ROP2 is kernel per-DC
+  state set via `SYS_GDI_SET_ROP2` (229); memory-DC drawing honours
+  `R2_BLACK` / `R2_NOT` / `R2_XORPEN` / `R2_COPYPEN` / `R2_WHITE`
+  per-pixel in the kernel (pixel core host-tested by
+  `tests/host/test_gdi32_rop2.cpp`). GAP: the other 11 R2 codes fall
+  back to `R2_COPYPEN`. GAP: window DCs honour only `R2_BLACK` /
+  `R2_WHITE`, applied as a colour transform rather than a
+  read-modify-write against the framebuffer.
 - Region API (rect-list): `CreateRectRgn`, `CreateRectRgnIndirect`,
   `CombineRgn`, `SetRectRgn`, `GetRgnBox`, `PtInRegion`,
-  `RectInRegion`, `OffsetRgn`, `EqualRgn` — REAL. Single-rect regions
-  and the rect-list query/manipulation ops are exact; the geometry is
-  host-tested (`tests/host/test_gdi32_region.cpp`).
+  `RectInRegion`, `OffsetRgn`, `EqualRgn` — REAL. `CombineRgn` runs
+  exact rect-list set algebra for `RGN_AND` / `RGN_OR` / `RGN_XOR` /
+  `RGN_DIFF` on multi-rect inputs, collapsing to the bounding box
+  only when the exact result exceeds the 8-rect per-region cap; the
+  geometry is host-tested (`tests/host/test_gdi32_region.cpp`,
+  `tests/host/test_gdi32_region_combine.cpp`). `CreateEllipticRgn`
+  is REAL as a scan-line band approximation (bounded to the same
+  8-rect cap).
+- Clip-region selection: `SelectClipRgn`, `ExtSelectClipRgn`,
+  `GetClipRgn`, `OffsetClipRgn`, `IntersectClipRect`,
+  `ExcludeClipRect`, `GetClipBox`, `PtVisible`, `RectVisible` —
+  REAL. The clip lives user-side in gdi32.c (per-DC region pool) and
+  is enforced by the drawing wrappers: exact per-pixel/per-band for
+  `FillRect` / `SetPixel`, whole-primitive bounding-box reject for
+  outlines, lines and text — GAP (a primitive partially inside the
+  clip draws fully or not at all).
 
 **STUB / GAP:**
 - DIB depths: 16 / 24 / 32bpp only. Palettised (<= 8bpp) DIBs are
@@ -1864,12 +1913,15 @@ WinDbg client API, `SymLoadModuleEx`.
   backing store) — GAP. Its user-side pixels reach the kernel
   surface on the next `BitBlt` / `StretchBlt`, not on write.
 - `GetObjectA/W` returns 0 (no BITMAP/LOGBRUSH introspection) — STUB.
-- Path API: `BeginPath`, `EndPath`, `StrokePath` — STUB
-- Region set-algebra: `CombineRgn` with `RGN_OR`/`RGN_XOR`/`RGN_DIFF`
-  on multi-rect inputs collapses to the bounding box (no rectangle
-  decomposition) — GAP. Shape regions (`CreateRoundRectRgn`,
-  `CreateEllipticRgn`, `CreatePolygonRgn`) and clip-region selection
-  (`SelectClipRgn`, `ExtSelectClipRgn`) — STUB.
+- Path API: gdi32.c carries a real per-DC path recorder —
+  `BeginPath`, `EndPath`, `CloseFigure`, `StrokePath`, `FillPath`,
+  `StrokeAndFillPath`, `AbortPath`, `GetPath`, `PathToRegion` record
+  MoveTo/LineTo segments inside the bracket and replay them. GAP: no
+  curve segments (arcs/béziers are not recorded) and no scan-line
+  interior fill — `FillPath` strokes each closed subpath's outline.
+  `FlattenPath`, `WidenPath` — STUB.
+- Shape regions: `CreateRoundRectRgn`, `CreatePolygonRgn` — STUB
+  (`CreateEllipticRgn` is REAL, see above).
 - Metafiles: `CreateMetaFile`, `PlayMetaFile` — STUB
 - **Font pipeline (v0):** `CreateFontA`/`CreateFontW` route through
   `SYS_GDI_CREATE_FONT` (225) to a kernel font registry with 3

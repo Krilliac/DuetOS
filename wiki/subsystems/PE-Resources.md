@@ -132,28 +132,28 @@ single-language binary depends on — it stores everything under one
 LANGID and expects `FindResource` to find it whatever the thread locale
 is.
 
-## Not implemented, and why
+## Downstream consumers (since landed)
 
-Neither of these is blocked on the parser. Both are blocked on there
-being nothing to hand the result to, and building a decoder with no sink
-is the "built but not wired in" antipattern `CLAUDE.md` forbids.
+Both consumer families this section originally deferred have since
+gained their sinks and landed:
 
-- **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`, `LoadBitmap`,
-  `LoadImage`). The compositor has no icon concept and no off-screen
-  surface for a decoded DIB, and `SYS_GDI_CREATE_CURSOR` takes a fixed
-  12x20 three-level mask rather than image bits. Prerequisite: backlog
-  item 12, off-screen surfaces.
-- **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`). The
-  kernel *does* post `WM_KEYDOWN` to the active PE window
-  (`kernel/core/boot_tasks.cpp`), but `wParam` carries a DuetOS
-  `KeyCode` — `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`
-  (`kernel/drivers/input/ps2kbd.h`) — not a Win32 virtual-key code,
-  where `VK_F1 == 0x70` and `VK_RETURN == 0x0D`. `RT_ACCELERATOR`
-  entries store VKs, so every `FVIRTKEY` accelerator would mis-compare.
-  Prerequisite: a KeyCode -> VK translation on the kernel side of the
-  message post. Note this is a real defect in the `WM_KEYDOWN` contract
-  independent of accelerators — any PE that switches on `wParam`
-  expecting VKs is already reading the wrong numbers.
+- **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`,
+  `LoadBitmap`, `LoadImage`) — REAL on both bitnesses. Off-screen
+  surfaces (backlog item 12) supplied the sink: icon and bitmap
+  decoders emit BGRA through `SYS_GDI_CREATE_COMPAT_BITMAP` +
+  `SYS_GDI_SET_DIBITS`, and `SYS_GDI_CREATE_CURSOR_RGBA` (224) takes
+  real image bits. `LoadBitmapA/W` (landed 2026-08-05) decodes
+  RT_BITMAP packed DIBs via `duet_res_decode_bitmap`; the per-bpp
+  DIB row unpack is shared with the icon decoder
+  (`duet_res_decode_dib_row`). See
+  [`Win32-Surface-Status.md`](../reference/Win32-Surface-Status.md#user32dll)
+  for the per-export GAPs.
+- **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) —
+  REAL since 2026-07-29. The prerequisite KeyCode -> VK translation
+  landed on the kernel side of the message post
+  (`kernel/subsystems/win32/keycode_vk.h`), so `WM_KEYDOWN`'s
+  `wParam` now carries Win32 VKs and `FVIRTKEY` entries compare
+  correctly.
 
 ## Proof
 

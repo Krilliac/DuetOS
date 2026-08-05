@@ -820,6 +820,26 @@ add_host_test(d3dcompiler)
 # GDI region geometry: freestanding header (userland/libs/gdi32/gdi32_region.h),
 # included by relative path — no extra target_sources needed.
 add_host_test(gdi32_region)
+# Exact region combine ops (intersect/subtract/union/xor) from the same
+# freestanding header.
+add_host_test(gdi32_region_combine)
+# ROP2 raster-op math (kernel/subsystems/win32/gdi_surface_math.h Rop2Apply).
+add_host_test(gdi32_rop2)
+# RT_BITMAP packed-DIB decode (userland/libs/common/pe_resources.h).
+add_host_test(pe_bitmap_decode)
+if(NOT MSVC)
+    target_compile_options(test_pe_bitmap_decode PRIVATE -Wno-conversion -Wno-sign-conversion)
+endif()
+# kernel32 console screen-buffer mirror VT tracker: freestanding header
+# (userland/libs/kernel32/kernel32_console_vt.h), no kernel TU.
+add_host_test(kernel32_console_vt)
+# kernel32 cooked-byte -> KEY_EVENT stroke translation core: freestanding
+# header (userland/libs/kernel32/kernel32_console_input.h), no kernel TU.
+add_host_test(kernel32_console_input)
+# HID gamepad driver: links the real kernel TU through the hosted seam.
+add_host_test(hid_gamepad)
+target_compile_definitions(test_hid_gamepad PRIVATE DUETOS_HOSTED_TEST=1)
+target_sources(test_hid_gamepad PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/drivers/input/hid_gamepad.cpp")
 # Off-screen GDI surface arithmetic: freestanding header
 # (kernel/subsystems/win32/gdi_surface_math.h). Pins the guest-controlled
 # allocation math (32-bit pixel-count wrap, DIB DWORD row padding,

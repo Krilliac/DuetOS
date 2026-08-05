@@ -157,7 +157,8 @@ performs the authoritative cap check.
 | 8 | `kCapPowerTune` |
 | 9 | `kCapSchedPriority` |
 | 10 | `kCapSerialConsole` |
-| 11 | `kCapSpawnThread` |
+| 11 | `kCapServiceControl` |
+| 12 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by

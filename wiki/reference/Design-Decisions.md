@@ -14454,3 +14454,99 @@ _2026-08-02_
   once, proves later checkouts and publication use that same identity, and a
   repository ruleset or workflow gate rejects mutable/re-written refs. Until
   then, immutable tag/manual source selection is an operator-enforced boundary.
+
+---
+
+## 061 — DC clip regions are user-side gdi32 state; ROP2 is kernel per-DC state
+
+_2026-08-05_
+
+- **Scope:** `userland/libs/gdi32/gdi32.c`,
+  `userland/libs/gdi32/gdi32_region.h`,
+  `kernel/subsystems/win32/gdi_objects.{h,cpp}`,
+  `kernel/subsystems/win32/gdi_surface_math.h`,
+  `tests/host/test_gdi32_region_combine.cpp`,
+  `tests/host/test_gdi32_rop2.cpp`.
+- **Decision:** DC clip regions live user-side in gdi32.c — a fixed
+  8-slot clip pool keyed by HDC — with clip enforcement performed by
+  the user-side drawing wrappers (exact for `FillRect` / `SetPixel`,
+  bounding-box reject for outlines/lines/text). ROP2, by contrast, is
+  kernel per-DC state set via the new syscall `SYS_GDI_SET_ROP2`
+  (229).
+- **Why:** The kernel draw paths and the display list carry no clip
+  channel, so a kernel-owned clip would have widened the draw-syscall
+  ABI for state the user-mode wrappers can enforce before issuing the
+  syscall. ROP2 cannot live user-side: read-modify-write modes
+  (`R2_NOT`, `R2_XORPEN`) need the destination pixels, and only the
+  kernel owns the surface.
+- **Rules out / defers:** A per-draw-syscall clip parameter and a
+  kernel-side clip region object for v0. Per-pixel clip enforcement
+  for outline/line/text primitives is a documented GAP, not a promise.
+- **Revisit when:** A real workload needs pixel-exact clipping of
+  outlines/text, or the display list grows a clip channel for another
+  reason — at that point move enforcement kernel-side rather than
+  duplicating it.
+
+---
+
+## 062 — RT_BITMAP decode forces alpha=255; DIB row unpack lives in one helper
+
+_2026-08-05_
+
+- **Scope:** `userland/libs/common/pe_resources.h`
+  (`duet_res_decode_bitmap`, `duet_res_decode_dib_row`),
+  `userland/libs/user32/user32.c`,
+  `userland/libs/user32_32/user32_32_misc.c`,
+  `tests/host/test_pe_bitmap_decode.cpp`.
+- **Decision:** RT_BITMAP decode forces every output pixel's alpha to
+  255. The per-bpp DIB row unpack (32/24/8/4/1bpp `BI_RGB`) lives
+  once in `duet_res_decode_dib_row`, shared by the icon and bitmap
+  decoders.
+- **Why:** GDI treats the DIB 4th byte as padding, and real RT_BITMAP
+  art routinely ships it as 0 — passing it through as alpha renders
+  bitmaps invisible on DuetOS's alpha-honouring compositor. Two
+  copies of the per-bpp unpack (icon vs bitmap) would drift; the
+  icon decoder keeps its alpha-passthrough behaviour by flag
+  (`opaque_alpha`), not by a forked pixel loop.
+- **Rules out / defers:** Honouring 32bpp DIB alpha for RT_BITMAP
+  (would need `BI_BITFIELDS`/`BITMAPV4HEADER` evidence that the
+  resource really carries alpha) and a second row-unpack
+  implementation anywhere.
+- **Revisit when:** A PE ships premultiplied/V4+ bitmap resources
+  whose alpha is meaningful.
+
+---
+
+## 063 — Win32 console VT processing is sink passthrough plus a userland CSBI mirror
+
+_2026-08-05_
+
+- **Scope:** `userland/libs/kernel32/kernel32_console.c`,
+  `kernel32_console_input.h`, `kernel32_console_vt.h`,
+  `kernel32_io.c`, `kernel32_locale.c`,
+  `tests/host/test_kernel32_console_vt.cpp`,
+  `tests/host/test_kernel32_console_input.cpp`.
+- **Decision:** `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is implemented
+  as passthrough to the single VT-interpreting sink plus a userland
+  CSBI mirror tracker in kernel32 that keeps
+  `GetConsoleScreenBufferInfo`'s cursor position and attribute word
+  coherent with the bytes written. It is deliberately NOT a second
+  renderer/parser in the kernel and NOT a per-process screen-buffer
+  grid — ED/EL (erase) sequences mutate only the sink's grid.
+  Console input for PEs stays on the one kernel-owned
+  `SYS_STDIN_READ` ring; `INPUT_RECORD` translation (KEY_EVENT
+  down/up pairs, VK + uChar + control-key state) is userland.
+- **Why:** One source of truth per resource: the sink already parses
+  and renders VT, so a kernel-side re-parse or a per-process grid
+  would be a second diverging terminal implementation whose state
+  could disagree with what the user sees. The mirror tracks only
+  what the CSBI API must answer. On input, a second kernel input
+  channel for INPUT_RECORDs would duplicate the stdin ring for a
+  shape userland can derive from the same bytes.
+- **Rules out / defers:** A kernel VT parser, a per-process console
+  screen-buffer grid (so `ReadConsoleOutput`-style cell readback is
+  out of scope), and a dedicated kernel INPUT_RECORD queue. Peek
+  semantics ride the userland record queue over the blocking ring.
+- **Revisit when:** A target PE needs `ReadConsoleOutput` /
+  scrollback readback or mouse/resize INPUT_RECORD events — those
+  need sink cooperation, not a kernel32-local grid.

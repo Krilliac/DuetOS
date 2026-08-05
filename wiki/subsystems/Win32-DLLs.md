@@ -175,7 +175,7 @@ named export is real. Page-level limits:
    and refresh `docs/sync-wiki.sh` output.
 
 <!-- AUTO:dll_list -->
-*61 DLLs preloaded into every Win32 PE process.*
+*62 DLLs preloaded into every Win32 PE process.*
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
@@ -187,6 +187,7 @@ named export is real. Page-level limits:
 | `comctl32` | 50 | `userland/libs/comctl32/` |
 | `comdlg32_32` | 1 | `userland/libs/comdlg32_32/` |
 | `comdlg32` | 19 | `userland/libs/comdlg32/` |
+| `comtest` | 2 | `userland/libs/comtest/` |
 | `crypt32_32` | 10 | `userland/libs/crypt32_32/` |
 | `crypt32` | 48 | `userland/libs/crypt32/` |
 | `customdll2` | 1 | `userland/libs/customdll2/` |
@@ -204,11 +205,11 @@ named export is real. Page-level limits:
 | `dwrite` | 1 | `userland/libs/dwrite/` |
 | `dxgi` | 6 | `userland/libs/dxgi/` |
 | `gdi32_32` | 46 | `userland/libs/gdi32_32/` |
-| `gdi32` | 80 | `userland/libs/gdi32/` |
+| `gdi32` | 97 | `userland/libs/gdi32/` |
 | `iphlpapi_32` | 4 | `userland/libs/iphlpapi_32/` |
 | `iphlpapi` | 56 | `userland/libs/iphlpapi/` |
 | `kernel32_32` | 132 | `userland/libs/kernel32_32/` |
-| `kernel32` | 434 | `userland/libs/kernel32/` |
+| `kernel32` | 457 | `userland/libs/kernel32/` |
 | `kernelbase` | 0 | `userland/libs/kernelbase/` |
 | `msvcp140` | 6 | `userland/libs/msvcp140/` |
 | `msvcrt_32` | 70 | `userland/libs/msvcrt_32/` |
@@ -225,8 +226,8 @@ named export is real. Page-level limits:
 | `shlwapi` | 44 | `userland/libs/shlwapi/` |
 | `sxslib` | 2 | `userland/libs/sxslib/` |
 | `ucrtbase` | 136 | `userland/libs/ucrtbase/` |
-| `user32_32` | 157 | `userland/libs/user32_32/` |
-| `user32` | 212 | `userland/libs/user32/` |
+| `user32_32` | 163 | `userland/libs/user32_32/` |
+| `user32` | 225 | `userland/libs/user32/` |
 | `userenv` | 27 | `userland/libs/userenv/` |
 | `uxtheme` | 41 | `userland/libs/uxtheme/` |
 | `vcruntime140` | 22 | `userland/libs/vcruntime140/` |

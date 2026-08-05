@@ -85,6 +85,41 @@ xHCI interrupt-IN poll (`kernel/drivers/usb/xhci_init.cpp`
   (`kernel/drivers/input/hid_keyboard.{h,cpp}`).
 - Routes events into the same queue PS/2 uses.
 
+## USB HID Gamepad
+
+`kernel/drivers/input/hid_gamepad.{h,cpp}` + the xHCI enumeration/
+poll path (`kernel/drivers/usb/xhci_descparse.cpp`, `xhci_enum.cpp`,
+`xhci_init.cpp`). Wired end-to-end as of 2026-08-05.
+
+Gamepads are report-protocol HID devices (subclass 0, protocol 0),
+so the interface descriptor alone cannot identify them. The wiring
+is a two-stage claim: `ParseConfigForHidBoot` marks any non-boot HID
+interface as a gamepad CANDIDATE (capturing the interrupt-IN
+endpoint + Report-descriptor length), and `BringUpHidGamepad`
+confirms the candidate at bring-up by fetching
+`GET_DESCRIPTOR(Report)` and running `GamepadExtractLayout`, which
+binds only devices whose top-level usage classifies as
+Gamepad/Joystick — a consumer-control or digitizer interface lands
+as a candidate and is cleanly declined, allocating no rings and no
+slot. A confirmed pad enters the 4-slot XInput-shaped state table
+via `GamepadConnect` (state/capabilities structs are
+layout-asserted against `XINPUT_GAMEPAD` / `XINPUT_STATE` /
+`XINPUT_CAPABILITIES`), and the xHCI poll task routes its
+interrupt-IN reports through `GamepadInjectReport`, where the
+layout stored at connect time does the per-field decode.
+`XhciShutdown` disconnects the slots, so a shutdown/restart cycle
+never leaves the connected mask advertising a pad whose endpoint is
+gone. Host-tested (`tests/host/test_hid_gamepad.cpp`, which also
+runs the driver's own `GamepadSelfTest`); the boot selftest is the
+gamepad-candidate arm of `XhciDescriptorSelfTest`, which runs at
+`XhciInit`. GAP: first-match claim — one
+`PortRecord` per port, so a composite device whose non-boot HID
+interface precedes its boot keyboard/mouse interface shadows the
+latter; revisit when multi-interface HID composites need both
+bound. The consumer side (a `SYS_GAMEPAD_STATE` syscall + the
+userland XInput DLL binding) has not landed yet — see
+[Roadmap item 22](../reference/Roadmap.md).
+
 ## Bluetooth HID Keyboard
 
 `kernel/net/bluetooth/hid.{h,cpp}`.
