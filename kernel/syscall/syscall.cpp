@@ -112,6 +112,7 @@
 #include "subsystems/win32/spawn_syscall.h"
 #include "subsystems/win32/token_syscall.h"
 #include "subsystems/win32/window_syscall.h"
+#include "subsystems/win32/input_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/registry.h"
@@ -4344,6 +4345,22 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_STDIN_PEEK:
+    {
+        // rdi = user dst buffer (0 = count-only), rsi = capacity.
+        // Non-blocking: returns the buffered byte count without
+        // consuming; optionally copies without advancing the tail.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i64 rv = ProcessPeekStdin(proc, reinterpret_cast<void*>(frame->rdi), frame->rsi);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
     case SYS_DLL_BASE_BY_NAME:
     {
         // rdi = user pointer to ASCII name, rsi = name length.
@@ -5083,6 +5100,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_FLS_SET:
         subsystems::win32::DoFlsSet(frame);
+        return;
+
+    // Gamepad input (kCapInput gated centrally, like the keystate /
+    // mouse-delta reads).
+    case SYS_GAMEPAD_STATE:
+        subsystems::win32::DoGamepadState(frame);
         return;
 
     case SYS_SERVICE_ENDPOINT_OP:

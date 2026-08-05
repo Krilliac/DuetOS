@@ -8588,6 +8588,132 @@
       ],
       "returns": "0 when a structured result was delivered; negative errno for invalid ABI storage, copy faults, or unavailable kernel ingress",
       "summary": "Versioned native service self-readiness and capability-gated supervisor lifecycle and exit-ledger ingress."
+    },
+    {
+      "name": "SYS_GDI_SET_ROP2",
+      "number": 229,
+      "summary": "SYS_GDI_SET_ROP2 — SetROP2. rdi = HDC, rsi = R2_* mode (1..16). Sets the per-DC binary raster op consulted by the kernel draw paths (PatBlt / filled rectangle / LineTo on memory DCs). rax = previous mode, 0 on failure.",
+      "status": "implemented",
+      "arguments": [
+        {
+          "register": "rdi",
+          "kind": "scalar",
+          "description": "HDC"
+        },
+        {
+          "register": "rsi",
+          "kind": "scalar",
+          "description": "R2_* raster-op mode (1..16)"
+        }
+      ],
+      "returns": "previous R2_* mode on success, 0 on bad HDC or out-of-range mode",
+      "authorization": {
+        "mode": "dynamic",
+        "capabilities": [],
+        "owner": "kernel/syscall/syscall.cpp",
+        "rationale": "The dispatcher or delegated handler owns argument-dependent or intentionally open policy."
+      },
+      "object_rights": {
+        "mode": "none",
+        "owner": "none",
+        "rationale": "The HDC is a per-process GDI table index validated by the handler, not a HandleTable object.",
+        "rights": []
+      },
+      "trace": {
+        "category": "graphics",
+        "sensitive": false
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "scalar"
+      }
+    },
+    {
+      "name": "SYS_GAMEPAD_STATE",
+      "number": 230,
+      "summary": "SYS_GAMEPAD_STATE — read-only snapshot of one HID gamepad slot. rdi = slot index (0..3), rsi = user pointer to a GamepadStateWire (44 bytes), rdx = exact wire-struct size. The kernel copies packet number, XINPUT_GAMEPAD-shaped pad state, XINPUT_CAPABILITIES-shaped capabilities, a per-slot connected flag, and the connected-slot bitmask into the caller's buffer. A disconnected slot is not an error: the wire struct comes back with connected = 0 and zeroed pad state so userland XInput can return ERROR_DEVICE_NOT_CONNECTED. rax = 0 on success, u64(-1) on bad slot / size / pointer. Backs xinput1_4.dll XInputGetState / XInputGetCapabilities.",
+      "status": "implemented",
+      "arguments": [
+        {
+          "register": "rdi",
+          "kind": "scalar",
+          "description": "gamepad slot index (0..3)"
+        },
+        {
+          "register": "rsi",
+          "kind": "user_buffer",
+          "description": "user pointer to a 44-byte GamepadStateWire snapshot buffer"
+        },
+        {
+          "register": "rdx",
+          "kind": "size",
+          "description": "wire-struct size; must equal 44"
+        }
+      ],
+      "returns": "0 on success (connected flag inside the wire struct), u64(-1) on bad slot index, size, or copy fault",
+      "authorization": {
+        "mode": "static",
+        "capabilities": [
+          "kCapInput"
+        ],
+        "owner": "kernel/syscall/cap_gate.cpp",
+        "rationale": "The generated pre-dispatch capability gate requires every listed capability."
+      },
+      "object_rights": {
+        "mode": "none",
+        "owner": "none",
+        "rationale": "The slot index selects a kernel-owned driver slot; no HandleTable object is involved.",
+        "rights": []
+      },
+      "trace": {
+        "category": "graphics",
+        "sensitive": false
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "mixed"
+      }
+    },
+    {
+      "number": 231,
+      "name": "SYS_STDIN_PEEK",
+      "status": "implemented",
+      "authorization": {
+        "mode": "static",
+        "capabilities": [
+          "kCapInput"
+        ],
+        "owner": "kernel/syscall/cap_gate.cpp",
+        "rationale": "The generated pre-dispatch capability gate requires every listed capability."
+      },
+      "object_rights": {
+        "mode": "none",
+        "rights": [],
+        "owner": "none",
+        "rationale": "No handle argument is declared by the migrated ABI documentation."
+      },
+      "trace": {
+        "category": "system",
+        "sensitive": false
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "buffer"
+      },
+      "arguments": [
+        {
+          "register": "rdi",
+          "kind": "user_buffer",
+          "description": "user pointer to a destination byte buffer, or 0 for the count-only form"
+        },
+        {
+          "register": "rsi",
+          "kind": "scalar",
+          "description": "capacity in bytes (0 = count-only)"
+        }
+      ],
+      "returns": "total bytes currently buffered (0 when empty), or u64(-1) on a bad user pointer",
+      "summary": "SYS_STDIN_PEEK - non-blocking probe of the calling process's stdin ring. Backs kernel32's GetNumberOfConsoleInputEvents / PeekConsoleInput / FlushConsoleInputBuffer, which must see bytes still parked in the kernel ring without consuming them. When rdi/rsi are non-zero, up to min(rsi, available) bytes are copied WITHOUT advancing the ring tail - a subsequent SYS_STDIN_READ returns the same bytes. Never blocks. Claims stdin focus like SYS_STDIN_READ so a poll-before-read consumer starts receiving keyboard bytes."
     }
   ]
 }

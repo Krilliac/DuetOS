@@ -836,6 +836,9 @@ add_host_test(kernel32_console_vt)
 # kernel32 cooked-byte -> KEY_EVENT stroke translation core: freestanding
 # header (userland/libs/kernel32/kernel32_console_input.h), no kernel TU.
 add_host_test(kernel32_console_input)
+# Counting / chunk-sizing helpers behind the SYS_STDIN_PEEK wiring, from
+# the same freestanding header.
+add_host_test(kernel32_console_peek)
 # HID gamepad driver: links the real kernel TU through the hosted seam.
 add_host_test(hid_gamepad)
 target_compile_definitions(test_hid_gamepad PRIVATE DUETOS_HOSTED_TEST=1)

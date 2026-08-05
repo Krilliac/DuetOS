@@ -229,3 +229,6 @@ _Generated from `abi/native_syscalls.json`; do not edit by hand._
 | 226 | `SYS_GDI_GET_TEXT_METRICS` | dynamic | none | graphics | pointer | `rdi` scalar; `rsi` user_pointer |
 | 227 | `SYS_SERVICE_ENDPOINT_OP` | dynamic | dynamic | ipc | mixed | `rdi` user_buffer; `rsi` size; `rdx` user_buffer; `r10` size |
 | 228 | `SYS_SERVICE_CONTROL` | dynamic | none | process | mixed | `rdi` user_buffer; `rsi` size; `rdx` user_buffer; `r10` size |
+| 229 | `SYS_GDI_SET_ROP2` | dynamic | none | graphics | scalar | `rdi` scalar; `rsi` scalar |
+| 230 | `SYS_GAMEPAD_STATE` | static: kCapInput | none | graphics | mixed | `rdi` scalar; `rsi` user_buffer; `rdx` size |
+| 231 | `SYS_STDIN_PEEK` | static: kCapInput | none | system | buffer | `rdi` user_buffer; `rsi` scalar |

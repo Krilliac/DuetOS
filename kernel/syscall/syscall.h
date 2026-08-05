@@ -2358,6 +2358,42 @@ enum SyscallNumber : u64
     // Sets the per-DC binary raster op consulted by the kernel draw
     // paths (PatBlt / filled rectangle / LineTo on memory DCs).
     SYS_GDI_SET_ROP2 = 229,
+
+    // SYS_GAMEPAD_STATE — read-only snapshot of one HID gamepad slot.
+    //   rdi = slot index (0..3, XInput's XUSER_MAX_COUNT slots)
+    //   rsi = user pointer to a GamepadStateWire (44 bytes, see
+    //         subsystems/win32/input_syscall.h)
+    //   rdx = wire-struct size; must equal 44 exactly (versioning
+    //         guard — a future v2 wire bumps the size)
+    // The kernel copies packet number, XINPUT_GAMEPAD-shaped pad
+    // state, XINPUT_CAPABILITIES-shaped capabilities, a per-slot
+    // connected flag, and the connected-slot bitmask from the HID
+    // gamepad driver (kernel/drivers/input/hid_gamepad.h) into the
+    // caller's buffer. A disconnected slot is NOT an error — the
+    // wire struct comes back with connected = 0 and zeroed pad
+    // state so xinput1_4.dll can return ERROR_DEVICE_NOT_CONNECTED.
+    // The guest supplies only a slot index; it never hands the
+    // kernel raw HID report data.
+    //   rax = 0 on success, u64(-1) on bad slot / size / copy fault.
+    // Gated on kCapInput (cap_table.def) like the sibling
+    // SYS_WIN_GET_KEYSTATE / SYS_WIN_GET_MOUSE_DELTA input reads.
+    SYS_GAMEPAD_STATE = 230,
+
+    // SYS_STDIN_PEEK — non-blocking probe of the calling process's
+    // stdin ring. Backs kernel32's GetNumberOfConsoleInputEvents /
+    // PeekConsoleInput / FlushConsoleInputBuffer, which must see
+    // bytes still parked in the kernel ring without consuming them.
+    //   rdi = user pointer to a destination byte buffer, or 0 for
+    //         the count-only form.
+    //   rsi = capacity in bytes (0 = count-only).
+    //   rax = total bytes currently buffered (0 when empty), or
+    //         (u64)-1 on a bad user pointer. When rdi/rsi are
+    //         non-zero, up to min(rsi, available) bytes are copied
+    //         WITHOUT advancing the ring tail — a subsequent
+    //         SYS_STDIN_READ returns the same bytes.
+    // Never blocks. Claims stdin focus like SYS_STDIN_READ so a
+    // poll-before-read consumer starts receiving keyboard bytes.
+    SYS_STDIN_PEEK = 231,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
