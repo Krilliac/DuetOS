@@ -220,29 +220,68 @@ constexpr BlitRect ClipBlit(i32 sx, i32 sy, i32 dx, i32 dy, i32 w, i32 h, i32 sr
 // Win32 SetROP2 codes the memory-DC paint helpers honour. Kept here
 // (not gdi_objects.h) so the hosted test test_gdi32_rop2.cpp can pin
 // the per-pixel truth table without pulling kernel headers.
-inline constexpr u8 kRop2Black = 1;    // R2_BLACK   — always 0
-inline constexpr u8 kRop2Not = 6;      // R2_NOT     — ~dst
-inline constexpr u8 kRop2XorPen = 7;   // R2_XORPEN  — dst ^ pen
-inline constexpr u8 kRop2CopyPen = 13; // R2_COPYPEN — pen (default)
-inline constexpr u8 kRop2White = 16;   // R2_WHITE   — always 1s
+//
+// All 16 R2_* codes, in numeric order. P = pen/brush colour, D = the
+// destination pixel already on the surface.
+inline constexpr u8 kRop2Black = 1;        // R2_BLACK       — always 0
+inline constexpr u8 kRop2NotMergePen = 2;  // R2_NOTMERGEPEN — ~(D | P)
+inline constexpr u8 kRop2MaskNotPen = 3;   // R2_MASKNOTPEN  — D & ~P
+inline constexpr u8 kRop2NotCopyPen = 4;   // R2_NOTCOPYPEN  — ~P
+inline constexpr u8 kRop2MaskPenNot = 5;   // R2_MASKPENNOT  — P & ~D
+inline constexpr u8 kRop2Not = 6;          // R2_NOT         — ~D
+inline constexpr u8 kRop2XorPen = 7;       // R2_XORPEN      — D ^ P
+inline constexpr u8 kRop2NotMaskPen = 8;   // R2_NOTMASKPEN  — ~(D & P)
+inline constexpr u8 kRop2MaskPen = 9;      // R2_MASKPEN     — D & P
+inline constexpr u8 kRop2NotXorPen = 10;   // R2_NOTXORPEN   — ~(D ^ P)
+inline constexpr u8 kRop2Nop = 11;         // R2_NOP         — D (unchanged)
+inline constexpr u8 kRop2MergeNotPen = 12; // R2_MERGENOTPEN — D | ~P
+inline constexpr u8 kRop2CopyPen = 13;     // R2_COPYPEN     — P (default)
+inline constexpr u8 kRop2MergePenNot = 14; // R2_MERGEPENNOT — P | ~D
+inline constexpr u8 kRop2MergePen = 15;    // R2_MERGEPEN    — D | P
+inline constexpr u8 kRop2White = 16;       // R2_WHITE       — always 1s
 
 /// Apply a binary raster op to one 0x00RRGGBB pixel. `dst` is the
-/// current surface pixel, `src` the pen/brush colour.
-/// GAP: of the 16 Win32 R2_* codes only BLACK / NOT / XORPEN /
-/// COPYPEN / WHITE are computed; the other 11 fall back to COPYPEN.
-/// Revisit when a PE draws with R2_MASKPEN-family ops.
+/// current surface pixel, `src` the pen/brush colour. Every op that
+/// involves an inversion masks its result to 24 bits so an alpha
+/// byte on the destination can't leak through `~`. The two verbatim
+/// pass-throughs are deliberate: COPYPEN trusts the caller's 24-bit
+/// COLORREF, and NOP returns the destination bit-exactly (a true
+/// no-op must not scrub alpha garbage it didn't create).
 constexpr u32 Rop2Apply(u8 rop2, u32 dst, u32 src)
 {
     switch (rop2)
     {
     case kRop2Black:
         return 0x00000000u;
-    case kRop2White:
-        return 0x00FFFFFFu;
+    case kRop2NotMergePen:
+        return ~(dst | src) & 0x00FFFFFFu;
+    case kRop2MaskNotPen:
+        return (dst & ~src) & 0x00FFFFFFu;
+    case kRop2NotCopyPen:
+        return ~src & 0x00FFFFFFu;
+    case kRop2MaskPenNot:
+        return (src & ~dst) & 0x00FFFFFFu;
     case kRop2Not:
         return ~dst & 0x00FFFFFFu;
     case kRop2XorPen:
         return (dst ^ src) & 0x00FFFFFFu;
+    case kRop2NotMaskPen:
+        return ~(dst & src) & 0x00FFFFFFu;
+    case kRop2MaskPen:
+        return (dst & src) & 0x00FFFFFFu;
+    case kRop2NotXorPen:
+        return ~(dst ^ src) & 0x00FFFFFFu;
+    case kRop2Nop:
+        return dst;
+    case kRop2MergeNotPen:
+        return (dst | ~src) & 0x00FFFFFFu;
+    case kRop2MergePenNot:
+        return (src | ~dst) & 0x00FFFFFFu;
+    case kRop2MergePen:
+        return (dst | src) & 0x00FFFFFFu;
+    case kRop2White:
+        return 0x00FFFFFFu;
+    case kRop2CopyPen:
     default:
         return src;
     }
@@ -250,9 +289,10 @@ constexpr u32 Rop2Apply(u8 rop2, u32 dst, u32 src)
 
 /// True when the op reads the destination pixel (read-modify-write);
 /// false ops can precompute one value and store it straight through.
+/// Only BLACK / NOTCOPYPEN / COPYPEN / WHITE are dst-independent.
 constexpr bool Rop2NeedsDst(u8 rop2)
 {
-    return rop2 == kRop2Not || rop2 == kRop2XorPen;
+    return rop2 != kRop2Black && rop2 != kRop2NotCopyPen && rop2 != kRop2CopyPen && rop2 != kRop2White;
 }
 
 /// True for the mode values SetROP2 accepts (Win32 R2_* range).

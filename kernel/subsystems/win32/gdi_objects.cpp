@@ -952,6 +952,8 @@ void GdiPaintRectOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u
 {
     if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
         return;
+    if (rop2 == kRop2Nop)
+        return; // R2_NOP: destination stays bit-exact — skip the walk.
     // Clip against bitmap extents. Use i64 math so `x + w` can't
     // wrap for bad inputs. Negative starts are advanced to 0.
     i64 x0 = x;
@@ -972,8 +974,8 @@ void GdiPaintRectOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u
     const u32 stride = bmp->pitch / 4;
     if (!Rop2NeedsDst(rop2))
     {
-        // Destination-independent op (COPYPEN / BLACK / WHITE and
-        // the COPYPEN fallbacks): one value, straight stores.
+        // Destination-independent op (BLACK / NOTCOPYPEN / COPYPEN /
+        // WHITE): one value, straight stores.
         const u32 value = Rop2Apply(rop2, 0, rgb);
         for (i64 yy = y0; yy < y1; ++yy)
         {
@@ -983,7 +985,7 @@ void GdiPaintRectOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u
         }
         return;
     }
-    // Read-modify-write ops (R2_NOT / R2_XORPEN).
+    // Read-modify-write ops (the twelve dst-reading R2_* codes).
     for (i64 yy = y0; yy < y1; ++yy)
     {
         u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
@@ -1078,6 +1080,8 @@ void GdiDrawLineOnBitmapRop(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb
 {
     if (bmp == nullptr || bmp->pixels == nullptr)
         return;
+    if (rop2 == kRop2Nop)
+        return; // R2_NOP: destination stays bit-exact — skip the walk.
     // Standard Bresenham with a per-pixel surface clip — no
     // Cohen-Sutherland pre-clip because single-pixel plots here
     // are so cheap that the clip-test dwarfs the plot.
@@ -1628,11 +1632,14 @@ u32 ResolveBrushColor(u64 hdc)
 // Ellipse equation: (x-cx)^2 / a^2 + (y-cy)^2 / b^2 <= 1, equivalent
 // to `(x-cx)^2 * b^2 + (y-cy)^2 * a^2 <= a^2 * b^2` — integer math,
 // no sqrt, no floats. Surface-clipped. Degenerate (zero-axis)
-// rects are a no-op.
-void PaintFilledEllipseOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+// rects are a no-op. Applies the DC's ROP2 per pixel, same contract
+// as GdiPaintRectOnBitmapRop.
+void PaintFilledEllipseOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u8 rop2)
 {
     if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
         return;
+    if (rop2 == kRop2Nop)
+        return; // R2_NOP: destination stays bit-exact — skip the walk.
     const i64 a = w / 2;
     const i64 b = h / 2;
     if (a == 0 || b == 0)
@@ -1657,6 +1664,10 @@ void PaintFilledEllipseOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb
         y1 = bmp->height;
 
     const u32 stride = bmp->pitch / 4;
+    // Destination-independent ops precompute one value; the
+    // dst-reading ops fold the surface pixel in per plot.
+    const bool needs_dst = Rop2NeedsDst(rop2);
+    const u32 flat = needs_dst ? 0u : Rop2Apply(rop2, 0, rgb);
     for (i64 yy = y0; yy < y1; ++yy)
     {
         u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
@@ -1666,20 +1677,24 @@ void PaintFilledEllipseOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb
         {
             const i64 dx = xx - cx;
             if (dx * dx * b2 + dy2 * a2 <= a2b2)
-                row[xx] = rgb;
+                row[xx] = needs_dst ? Rop2Apply(rop2, row[xx], rgb) : flat;
         }
     }
 }
 
 // Paint a 1-pixel-thick ellipse outline into a bitmap, matching
-// the boundary that PaintFilledEllipseOnBitmap would produce. A
+// the boundary that PaintFilledEllipseOnBitmapRop would produce. A
 // pixel is "on the outline" iff it is inside the ellipse and at
 // least one of its 4-connected neighbours is outside. Same
-// integer test as the filled version, no sqrt.
-void PaintEllipseOutlineOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+// integer test as the filled version, no sqrt. Applies the DC's
+// ROP2 per pixel; each outline pixel is plotted exactly once, so
+// R2_NOT / R2_XORPEN don't double-invert anywhere.
+void PaintEllipseOutlineOnBitmapRop(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb, u8 rop2)
 {
     if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
         return;
+    if (rop2 == kRop2Nop)
+        return; // R2_NOP: destination stays bit-exact — skip the walk.
     const i64 a = w / 2;
     const i64 b = h / 2;
     if (a == 0 || b == 0)
@@ -1711,6 +1726,8 @@ void PaintEllipseOutlineOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rg
         y1 = bmp->height;
 
     const u32 stride = bmp->pitch / 4;
+    const bool needs_dst = Rop2NeedsDst(rop2);
+    const u32 flat = needs_dst ? 0u : Rop2Apply(rop2, 0, rgb);
     for (i64 yy = y0; yy < y1; ++yy)
     {
         u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
@@ -1719,7 +1736,7 @@ void PaintEllipseOutlineOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rg
             if (!inside(xx, yy))
                 continue;
             if (!inside(xx - 1, yy) || !inside(xx + 1, yy) || !inside(xx, yy - 1) || !inside(xx, yy + 1))
-                row[xx] = rgb;
+                row[xx] = needs_dst ? Rop2Apply(rop2, row[xx], rgb) : flat;
         }
     }
 }
@@ -1951,10 +1968,8 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
             Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
             if (bmp != nullptr)
             {
-                // GAP: ellipse painting ignores the DC's ROP2 (always
-                // COPYPEN) — only line/rect/fill honour it so far.
-                PaintFilledEllipseOnBitmap(bmp, x, y, w, h, brush_rgb);
-                PaintEllipseOutlineOnBitmap(bmp, x, y, w, h, pen_rgb);
+                PaintFilledEllipseOnBitmapRop(bmp, x, y, w, h, brush_rgb, dc->rop2);
+                PaintEllipseOutlineOnBitmapRop(bmp, x, y, w, h, pen_rgb, dc->rop2);
                 ok = true;
             }
         }
@@ -1970,6 +1985,9 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
             // the FilledEllipse paints the interior; the Ellipse
             // outline is drawn on top by the compositor in the
             // order they were enqueued.
+            // GAP: window-DC Ellipse ignores ROP2 — the compositor
+            // display list carries a colour but no raster op (same
+            // limit as window-DC PatBlt above).
             WindowClientFilledEllipse(h_comp, x, y, w, h, brush_rgb);
             WindowClientEllipse(h_comp, x, y, w, h, pen_rgb);
             const Theme& theme = ThemeCurrent();
