@@ -27,7 +27,7 @@
       "release_tag": "latest-flavors"
     },
     "499457818": {
-      "count": 1,
+      "count": 2,
       "name": "duetos-kernel-release-lto.elf",
       "release_tag": "latest-flavors"
     },
@@ -78,8 +78,8 @@
     }
   },
   "delta_this_run": 1,
-  "lifetime_total": 32,
-  "live_assets_total": 14,
+  "lifetime_total": 33,
+  "live_assets_total": 15,
   "repo": "Krilliac/DuetOS",
-  "snapshot_at": "2026-09-11T17:22:16+00:00"
+  "snapshot_at": "2026-09-12T04:45:48+00:00"
 }
