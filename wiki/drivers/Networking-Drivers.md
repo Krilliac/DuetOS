@@ -40,9 +40,12 @@ virtio-net `1AF4:1000` remain inventory-only.
 precede MMIO access; coherent RX/TX rings are prepared before DMA is enabled.
 The worker is polled and uses the generation-owned `NetInterfaceBinding`,
 with descriptor ownership, frame-length, and ring-address bounds checks.
-Shutdown closes operations, retires and joins the worker, disables RX/TX and
-PCI bus mastering, then frees DMA. The implementation intentionally performs
-no PHY, OCP, or firmware writes. RTL8125A firmware/link-management behavior
+Shutdown closes operations, retires and joins the worker, drains the binding,
+disables RX/TX and PCI bus mastering, restores the original safe PCI command,
+then frees DMA; failed proofs quarantine and retain the context. The
+implementation intentionally performs no PHY, OCP, or firmware writes. Link
+state is reported only from the primary-sourced `PHYstatus` bit; no carrier
+means no DHCP claim. RTL8125A firmware/link-management behavior
 and live Node1 traffic remain silicon-only gates; the host contract test does
 not claim those gates.
 

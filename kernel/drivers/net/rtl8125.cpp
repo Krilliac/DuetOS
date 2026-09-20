@@ -63,7 +63,11 @@ struct Context
     u32 tx_in_flight = 0;
     bool bound = false;
     bool dma_armed = false;
+    bool pci_command_saved = false;
+    u16 pci_command_original = 0;
     bool online = false;
+    bool quarantined = false;
+    bool worker_started = false;
 };
 
 Context g_context{};
@@ -96,6 +100,9 @@ void FreeDma(Context& c)
     c.tx_buffers = nullptr;
     c.bound = false;
     c.dma_armed = false;
+    c.pci_command_saved = false;
+    c.pci_command_original = 0;
+    c.worker_started = false;
 }
 
 bool StackTx(void* opaque, u32 iface, const void* frame, u64 len)
@@ -111,10 +118,16 @@ bool StackTx(void* opaque, u32 iface, const void* frame, u64 len)
         return false;
     }
     const u32 slot = c->tx_cursor;
+    const u64 buffer_address = c->tx_buf_dma.phys + u64(slot) * kBufferBytes;
+    if (!DescriptorAddressValid(buffer_address, static_cast<u16>(len)))
+    {
+        (void)DriverOperationGateRelease(&c->operations);
+        return false;
+    }
     for (u32 i = 0; i < len; ++i)
         c->tx_buffers[slot * kBufferBytes + i] = static_cast<const u8*>(frame)[i];
     Descriptor& d = c->tx_ring[slot];
-    d.address = c->tx_buf_dma.phys + u64(slot) * kBufferBytes;
+    d.address = buffer_address;
     d.options2 = 0;
     d.options1 = EncodeTx(d.address, static_cast<u16>(len), true, true, slot == kRingSlots - 1) | kDescOwn;
     mm::DmaSyncForDevice(c->tx_buf_dma, u64(slot) * kBufferBytes, len);
@@ -151,15 +164,20 @@ void Poll(void* opaque)
                 {
                     const u64 offset = u64(c->rx_cursor) * kBufferBytes;
                     mm::DmaSyncForCpu(c->rx_buf_dma, offset, length);
-                    ::duetos::net::NetStackInjectRx(c->binding, c->rx_buffers + offset, length);
+                    const u16 payload_length = RxPayloadLength(length);
+                    if (payload_length != 0)
+                        ::duetos::net::NetStackInjectRx(c->binding, c->rx_buffers + offset, payload_length);
                 }
                 d.options2 = 0;
-                d.options1 = EncodeRx(d.address, c->rx_cursor == kRingSlots - 1);
+                d.options1 = EncodeRx(d.address, kBufferBytes, c->rx_cursor == kRingSlots - 1);
                 mm::DmaSyncForDevice(c->rx_ring_dma, u64(c->rx_cursor) * sizeof(Descriptor), sizeof(Descriptor));
                 c->rx_cursor = (c->rx_cursor + 1) % kRingSlots;
             }
-            while (c->tx_in_flight != 0 && (c->tx_ring[c->tx_clean].options1 & kDescOwn) == 0)
+            while (c->tx_in_flight != 0)
             {
+                mm::DmaSyncForCpu(c->tx_ring_dma, u64(c->tx_clean) * sizeof(Descriptor), sizeof(Descriptor));
+                if ((c->tx_ring[c->tx_clean].options1 & kDescOwn) != 0)
+                    break;
                 c->tx_clean = (c->tx_clean + 1) % kRingSlots;
                 --c->tx_in_flight;
             }
@@ -180,18 +198,38 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
         return false;
     if (!Valid(g_context, 0, 0))
         g_context.mmio = static_cast<volatile u8*>(nic.mmio_virt);
-    if (g_context.online)
+    if (g_context.online || g_context.quarantined || g_context.pci_command_saved)
         return false;
     g_context.address.bus = nic.bus;
     g_context.address.device = nic.device;
     g_context.address.function = nic.function;
     g_context.iface = iface_index;
+    g_context.pci_command_original = pci::PciConfigRead16(g_context.address, 0x04);
+    g_context.pci_command_saved = true;
+    pci::PciConfigWrite32(g_context.address, 0x04, static_cast<u32>(g_context.pci_command_original & ~0x4u));
+    if ((pci::PciConfigRead16(g_context.address, 0x04) & 0x4u) != 0)
+        return false;
+    const auto abort_bringup = [&]() {
+        const u16 safe = static_cast<u16>(g_context.pci_command_original & ~0x4u);
+        pci::PciConfigWrite32(g_context.address, 0x04, safe);
+        FreeDma(g_context);
+    };
     auto rx_ring = mm::AllocDmaCoherent(kRingSlots * sizeof(Descriptor), mm::Zone::Dma32);
     auto tx_ring = mm::AllocDmaCoherent(kRingSlots * sizeof(Descriptor), mm::Zone::Dma32);
     auto rx_buf = mm::AllocDmaCoherent(u64(kRingSlots) * kBufferBytes, mm::Zone::Dma32);
     auto tx_buf = mm::AllocDmaCoherent(u64(kRingSlots) * kBufferBytes, mm::Zone::Dma32);
     if (!rx_ring || !tx_ring || !rx_buf || !tx_buf)
+    {
+        if (rx_ring)
+            mm::FreeDmaCoherent(rx_ring.value());
+        if (tx_ring)
+            mm::FreeDmaCoherent(tx_ring.value());
+        if (rx_buf)
+            mm::FreeDmaCoherent(rx_buf.value());
+        if (tx_buf)
+            mm::FreeDmaCoherent(tx_buf.value());
         return false;
+    }
     g_context.rx_ring_dma = rx_ring.value();
     g_context.tx_ring_dma = tx_ring.value();
     g_context.rx_buf_dma = rx_buf.value();
@@ -200,28 +238,20 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
     g_context.tx_ring = static_cast<Descriptor*>(g_context.tx_ring_dma.virt);
     g_context.rx_buffers = static_cast<u8*>(g_context.rx_buf_dma.virt);
     g_context.tx_buffers = static_cast<u8*>(g_context.tx_buf_dma.virt);
-    const auto abort_bringup = [&]() {
-        const u16 safe = static_cast<u16>(pci::PciConfigRead16(g_context.address, 0x04) & ~0x4u);
-        pci::PciConfigWrite32(g_context.address, 0x04, safe);
-        FreeDma(g_context);
-    };
     for (u32 i = 0; i < kRingSlots; ++i)
     {
         g_context.rx_ring[i].address = g_context.rx_buf_dma.phys + u64(i) * kBufferBytes;
         g_context.rx_ring[i].options2 = 0;
-        g_context.rx_ring[i].options1 = EncodeRx(g_context.rx_ring[i].address, i == kRingSlots - 1);
+        if (!DescriptorAddressValid(g_context.rx_ring[i].address, kBufferBytes))
+        {
+            abort_bringup();
+            return false;
+        }
+        g_context.rx_ring[i].options1 = EncodeRx(g_context.rx_ring[i].address, kBufferBytes, i == kRingSlots - 1);
         g_context.tx_ring[i] = {};
     }
     mm::DmaSyncForDevice(g_context.rx_ring_dma, 0, g_context.rx_ring_dma.bytes);
     mm::DmaSyncForDevice(g_context.tx_ring_dma, 0, g_context.tx_ring_dma.bytes);
-    const u16 command = pci::PciConfigRead16(g_context.address, 0x04);
-    pci::PciConfigWrite32(g_context.address, 0x04, static_cast<u16>(command | 0x6u));
-    if ((pci::PciConfigRead16(g_context.address, 0x04) & 0x6u) != 0x6u)
-    {
-        abort_bringup();
-        return false;
-    }
-    g_context.dma_armed = true;
     // The reset is the only chip-wide control write. No PHY, OCP, or firmware
     // writes are attempted; RTL8125 firmware upload remains a documented gap.
     Write8(g_context, kRegChipCmd, kCmdReset);
@@ -258,35 +288,53 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
                                                                        ::duetos::net::Ipv4Address{{0, 0, 0, 0}}, StackTx,
                                                                        &g_context, &g_context.binding))
     {
+        if (generation != 0)
+            (void)DriverWorkerLeaseRelease(&g_context.worker, generation);
         abort_bringup();
         return false;
     }
     g_context.bound = true;
+    if (sched::SchedCreate(Poll, &g_context, "rtl8125-rx-poll") == nullptr)
+    {
+        g_context.quarantined = true;
+        return false;
+    }
+    g_context.worker_started = true;
+    const u16 command = pci::PciConfigRead16(g_context.address, 0x04);
+    pci::PciConfigWrite32(g_context.address, 0x04, static_cast<u32>(command | 0x6u));
+    if ((pci::PciConfigRead16(g_context.address, 0x04) & 0x6u) != 0x6u)
+    {
+        g_context.quarantined = true;
+        return false;
+    }
+    g_context.dma_armed = true;
     if (!DriverOperationGateOpen(&g_context.operations))
     {
-        abort_bringup();
+        g_context.quarantined = true;
         return false;
     }
     Write8(g_context, kRegChipCmd, kCmdRxEnable | kCmdTxEnable);
-    if (sched::SchedCreate(Poll, &g_context, "rtl8125-rx-poll") == nullptr)
-    {
-        abort_bringup();
-        return false;
-    }
     g_context.online = true;
     nic.driver_online = true;
-    nic.link_up = true;
+    // Linux r8169 identifies PHYstatus (0x6c), bit 1 as LinkStatus. Do not
+    // claim carrier or start DHCP when the status read does not report it.
+    nic.link_up = (Read8(g_context, 0x6C) & 0x02u) != 0;
     nic.wireless_fw_state = NicInfo::WirelessFwState::NotApplicable;
-    ::duetos::net::DhcpStart(iface_index);
+    if (nic.link_up)
+        ::duetos::net::DhcpStart(iface_index);
     return true;
 }
 
 bool Rtl8125QuiesceAll()
 {
-    if (!g_context.online && !g_context.bound)
+    if (!g_context.online && !g_context.bound && !g_context.quarantined)
         return true;
     g_context.online = false;
-    (void)DriverOperationGateClose(&g_context.operations);
+    if (!DriverOperationGateClose(&g_context.operations))
+    {
+        g_context.quarantined = true;
+        return false;
+    }
     const u64 generation = DriverWorkerLeaseActiveGeneration(&g_context.worker);
     if (generation != 0)
         (void)DriverWorkerLeaseRequestRetire(&g_context.worker, generation);
@@ -297,16 +345,47 @@ bool Rtl8125QuiesceAll()
         if (!worker_joined)
             sched::SchedSleepTicks(1);
     }
-    if (!worker_joined)
+    if (!worker_joined || DriverOperationGatePinCount(&g_context.operations) != 0)
+    {
+        g_context.quarantined = true;
         return false;
+    }
     if (g_context.bound)
-        (void)::duetos::net::NetStackUnbindInterface(g_context.binding, 1000);
+    {
+        if (::duetos::net::NetStackUnbindInterface(g_context.binding, 1000) !=
+            ::duetos::net::NetInterfaceUnbindResult::Unbound)
+        {
+            g_context.quarantined = true;
+            return false;
+        }
+        g_context.bound = false;
+    }
     if (g_context.mmio != nullptr)
+    {
         Write8(g_context, kRegChipCmd, 0);
-    const u16 command = static_cast<u16>(pci::PciConfigRead16(g_context.address, 0x04) & ~0x4u);
-    pci::PciConfigWrite32(g_context.address, 0x04, command);
+        const u8 status = Read8(g_context, kRegChipCmd);
+        if ((status & (kCmdRxEnable | kCmdTxEnable)) != 0)
+        {
+            g_context.quarantined = true;
+            return false;
+        }
+    }
+    const u16 safe_command = static_cast<u16>(g_context.pci_command_original & ~0x4u);
+    pci::PciConfigWrite32(g_context.address, 0x04, safe_command);
+    if ((pci::PciConfigRead16(g_context.address, 0x04) & ~0x4u) != (safe_command & ~0x4u) ||
+        (pci::PciConfigRead16(g_context.address, 0x04) & 0x4u) != 0)
+    {
+        g_context.quarantined = true;
+        return false;
+    }
     if (generation != 0)
-        (void)DriverWorkerLeaseRelease(&g_context.worker, generation);
+    {
+        if (!DriverWorkerLeaseRelease(&g_context.worker, generation))
+        {
+            g_context.quarantined = true;
+            return false;
+        }
+    }
     FreeDma(g_context);
     return true;
 }
