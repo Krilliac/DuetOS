@@ -2,6 +2,8 @@
 
 #include "drivers/net/rtl8125_contract.h"
 
+using duetos::u16;
+using duetos::u32;
 using namespace duetos::drivers::net::rtl8125::contract;
 
 int main()
@@ -9,6 +11,63 @@ int main()
     EXPECT_TRUE(IsExactHardware(0x10EC, 0x8125, 0x10EC, 0x0123, 0x05));
     EXPECT_FALSE(IsExactHardware(0x10EC, 0x8125, 0x10EC, 0x0123, 0x04));
     EXPECT_FALSE(IsExactHardware(0x10EC, 0x8125, 0x10EC, 0x9999, 0x05));
+
+    EXPECT_EQ(PciPreflightCommand(0x0007), 0x0003);
+    EXPECT_EQ(PciPreflightCommand(0x0000), 0x0002);
+    EXPECT_TRUE(PciPreflightReadbackValid(0x0002));
+    EXPECT_TRUE(PciPreflightReadbackValid(0x0003));
+    EXPECT_FALSE(PciPreflightReadbackValid(0x0006));
+    EXPECT_FALSE(PciPreflightReadbackValid(0x0000));
+    EXPECT_EQ(PciSafeRestoreCommand(0x0007), 0x0003);
+    EXPECT_TRUE(PciSafeRestoreReadbackValid(0x0007, 0x0003));
+    EXPECT_FALSE(PciSafeRestoreReadbackValid(0x0007, 0x0007));
+
+    {
+        u16 writes[2]{};
+        u16 reads[]{0x0002};
+        u32 write_count = 0;
+        u32 read_count = 0;
+        const auto result = RunPciPreflight(
+            0x0007, [&](u16 value) { writes[write_count++] = value; }, [&]() { return reads[read_count++]; });
+        EXPECT_EQ(result, PciPreflightResult::ReadyForMmio);
+        EXPECT_EQ(write_count, 1u);
+        EXPECT_EQ(read_count, 1u);
+        EXPECT_EQ(writes[0], 0x0003);
+    }
+
+    {
+        u16 writes[2]{};
+        u16 reads[]{0x0006, 0x0003};
+        u32 write_count = 0;
+        u32 read_count = 0;
+        const auto result = RunPciPreflight(
+            0x0007, [&](u16 value) { writes[write_count++] = value; }, [&]() { return reads[read_count++]; });
+        EXPECT_EQ(result, PciPreflightResult::RestoredSafe);
+        EXPECT_EQ(write_count, 2u);
+        EXPECT_EQ(read_count, 2u);
+        EXPECT_EQ(writes[0], 0x0003);
+        EXPECT_EQ(writes[1], 0x0003);
+    }
+
+    {
+        u16 writes[2]{};
+        u16 reads[]{0x0006, 0x0007};
+        u32 write_count = 0;
+        u32 read_count = 0;
+        const auto result = RunPciPreflight(
+            0x0007, [&](u16 value) { writes[write_count++] = value; }, [&]() { return reads[read_count++]; });
+        EXPECT_EQ(result, PciPreflightResult::QuarantinePciOnly);
+        EXPECT_EQ(write_count, 2u);
+        EXPECT_EQ(read_count, 2u);
+        EXPECT_EQ(writes[1], 0x0003);
+    }
+
+    {
+        u16 write = 0;
+        EXPECT_TRUE(RunPciSafeRestore(0x0007, [&](u16 value) { write = value; }, []() { return u16{0x0003}; }));
+        EXPECT_EQ(write, 0x0003);
+        EXPECT_FALSE(RunPciSafeRestore(0x0007, [&](u16 value) { write = value; }, []() { return u16{0x0007}; }));
+    }
 
     EXPECT_EQ(EncodeTx(0x12345000, 1500, true, true, false), 0x30000000u | 1500u);
     EXPECT_EQ(EncodeTx(0x12345003, 1500, true, true, false), 0u);

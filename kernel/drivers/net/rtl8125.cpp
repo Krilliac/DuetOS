@@ -47,6 +47,7 @@ struct Context
     sync::SpinLock tx_lock{};
     pci::DeviceAddress address{};
     volatile u8* mmio = nullptr;
+    bool mmio_access_ready = false;
     mm::DmaBuffer rx_ring_dma{};
     mm::DmaBuffer tx_ring_dma{};
     mm::DmaBuffer rx_buf_dma{};
@@ -94,17 +95,8 @@ void Write32(const Context& c, u32 offset, u32 value)
     *reinterpret_cast<volatile u32*>(c.mmio + offset) = value;
 }
 
-bool Valid(const Context& c, u32 offset, u32 bytes)
+bool LiveIdentityMatches(const pci::DeviceAddress& address, const NicInfo& nic)
 {
-    return c.mmio != nullptr && offset <= 0x10000u && bytes <= 0x10000u - offset;
-}
-
-bool LiveIdentityMatches(const NicInfo& nic)
-{
-    pci::DeviceAddress address{};
-    address.bus = nic.bus;
-    address.device = nic.device;
-    address.function = nic.function;
     const u32 id = pci::PciConfigRead32(address, 0x00);
     const u32 class_revision = pci::PciConfigRead32(address, 0x08);
     const u32 subsystem = pci::PciConfigRead32(address, 0x2C);
@@ -125,6 +117,7 @@ void FreeDma(Context& c)
     c.tx_ring_dma = {};
     c.rx_buf_dma = {};
     c.tx_buf_dma = {};
+    c.mmio_access_ready = false;
     c.rx_ring = nullptr;
     c.tx_ring = nullptr;
     c.rx_buffers = nullptr;
@@ -144,6 +137,24 @@ void FreeDma(Context& c)
     c.tx_clean = 0;
     c.tx_in_flight = 0;
     c.quarantined = false;
+}
+
+bool RestorePciCommandSafe(const pci::DeviceAddress& address, u16 original)
+{
+    return RunPciSafeRestore(
+        original, [&](u16 command) { pci::PciConfigWrite32(address, 0x04, command); },
+        [&]() { return pci::PciConfigRead16(address, 0x04); });
+}
+
+bool AbortPreactivation(Context& c)
+{
+    if (c.pci_command_saved && !RestorePciCommandSafe(c.address, c.pci_command_original))
+    {
+        c.quarantined = true;
+        return false;
+    }
+    FreeDma(c);
+    return true;
 }
 
 bool StackTx(void* opaque, u32 iface, const void* frame, u64 len)
@@ -242,28 +253,42 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
                                             nic.subsystem_device_id, nic.revision_id) ||
         nic.mmio_virt == nullptr || nic.mmio_size < 0x1A00)
         return false;
-    if (!Valid(g_context, 0, 0))
-        g_context.mmio = static_cast<volatile u8*>(nic.mmio_virt);
-    if (g_context.online || g_context.quarantined || g_context.pci_command_saved)
+    if (g_context.online || g_context.quarantined || g_context.pci_command_saved || g_context.mmio_access_ready ||
+        g_context.mmio != nullptr)
         return false;
-    g_context.address.bus = nic.bus;
-    g_context.address.device = nic.device;
-    g_context.address.function = nic.function;
-    g_context.iface = iface_index;
-    if (!LiveIdentityMatches(nic))
+
+    pci::DeviceAddress candidate{};
+    candidate.bus = nic.bus;
+    candidate.device = nic.device;
+    candidate.function = nic.function;
+    if (!LiveIdentityMatches(candidate, nic))
         return false;
-    g_context.pci_command_original = pci::PciConfigRead16(g_context.address, 0x04);
-    g_context.pci_command_saved = true;
-    const u16 memory_decode_command = static_cast<u16>((g_context.pci_command_original | 0x2u) & ~0x4u);
-    pci::PciConfigWrite32(g_context.address, 0x04, memory_decode_command);
-    if ((pci::PciConfigRead16(g_context.address, 0x04) & 0x6u) != 0x2u)
-        return false;
-    const auto abort_bringup = [&]()
+
+    const u16 original_command = pci::PciConfigRead16(candidate, 0x04);
+    const auto preflight_result = RunPciPreflight(
+        original_command, [&](u16 command) { pci::PciConfigWrite32(candidate, 0x04, command); },
+        [&]() { return pci::PciConfigRead16(candidate, 0x04); });
+    if (preflight_result != PciPreflightResult::ReadyForMmio)
     {
-        const u16 safe = static_cast<u16>(g_context.pci_command_original & ~0x4u);
-        pci::PciConfigWrite32(g_context.address, 0x04, safe);
-        FreeDma(g_context);
-    };
+        if (preflight_result == PciPreflightResult::QuarantinePciOnly)
+        {
+            // Retain only the PCI identity needed to retry a safe BME-off
+            // restore. MMIO was never published and must not be touched.
+            g_context.address = candidate;
+            g_context.pci_command_original = original_command;
+            g_context.pci_command_saved = true;
+            g_context.quarantined = true;
+        }
+        return false;
+    }
+
+    g_context.address = candidate;
+    g_context.iface = iface_index;
+    g_context.mmio = static_cast<volatile u8*>(nic.mmio_virt);
+    g_context.mmio_access_ready = true;
+    g_context.pci_command_original = original_command;
+    g_context.pci_command_saved = true;
+
     auto rx_ring = mm::AllocDmaCoherent(kRingSlots * sizeof(Descriptor), mm::Zone::Dma32);
     auto tx_ring = mm::AllocDmaCoherent(kRingSlots * sizeof(Descriptor), mm::Zone::Dma32);
     auto rx_buf = mm::AllocDmaCoherent(u64(kRingSlots) * kBufferBytes, mm::Zone::Dma32);
@@ -278,6 +303,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
             mm::FreeDmaCoherent(rx_buf.value());
         if (tx_buf)
             mm::FreeDmaCoherent(tx_buf.value());
+        (void)AbortPreactivation(g_context);
         return false;
     }
     g_context.rx_ring_dma = rx_ring.value();
@@ -293,7 +319,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
         !DescriptorAddressValid(g_context.rx_buf_dma.phys, u64(kRingSlots) * kBufferBytes) ||
         !DescriptorAddressValid(g_context.tx_buf_dma.phys, u64(kRingSlots) * kBufferBytes))
     {
-        abort_bringup();
+        (void)AbortPreactivation(g_context);
         return false;
     }
     for (u32 i = 0; i < kRingSlots; ++i)
@@ -302,7 +328,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
         g_context.rx_ring[i].options2 = 0;
         if (!DescriptorAddressValid(g_context.rx_ring[i].address, kBufferBytes))
         {
-            abort_bringup();
+            (void)AbortPreactivation(g_context);
             return false;
         }
         g_context.rx_ring[i].options1 = EncodeRx(g_context.rx_ring[i].address, kBufferBytes, i == kRingSlots - 1);
@@ -317,7 +343,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
         sched::SchedSleepTicks(1);
     if ((Read8(g_context, kRegChipCmd) & kCmdReset) != 0)
     {
-        abort_bringup();
+        (void)AbortPreactivation(g_context);
         return false;
     }
     const u32 mac0 = Read32(g_context, kRegMac);
@@ -329,7 +355,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
     nic.mac_valid = (nic.mac[0] | nic.mac[1] | nic.mac[2] | nic.mac[3] | nic.mac[4] | nic.mac[5]) != 0;
     if (!nic.mac_valid)
     {
-        abort_bringup();
+        (void)AbortPreactivation(g_context);
         return false;
     }
     Write32(g_context, kRegTxDescLow, static_cast<u32>(g_context.tx_ring_dma.phys));
@@ -348,7 +374,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
     {
         if (generation != 0)
             (void)DriverWorkerLeaseRelease(&g_context.worker, generation);
-        abort_bringup();
+        (void)AbortPreactivation(g_context);
         return false;
     }
     g_context.bound = true;
@@ -360,8 +386,10 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
     }
     g_context.worker_started = true;
     const u16 command = pci::PciConfigRead16(g_context.address, 0x04);
-    pci::PciConfigWrite32(g_context.address, 0x04, static_cast<u32>(command | 0x6u));
-    if ((pci::PciConfigRead16(g_context.address, 0x04) & 0x6u) != 0x6u)
+    pci::PciConfigWrite32(g_context.address, 0x04,
+                          static_cast<u32>(command | kPciCommandMemorySpace | kPciCommandBusMaster));
+    if ((pci::PciConfigRead16(g_context.address, 0x04) & (kPciCommandMemorySpace | kPciCommandBusMaster)) !=
+        (kPciCommandMemorySpace | kPciCommandBusMaster))
     {
         g_context.quarantined = true;
         (void)Rtl8125QuiesceAll();
@@ -390,7 +418,7 @@ bool Rtl8125BringUp(NicInfo& nic, u32 iface_index)
 bool Rtl8125QuiesceAll()
 {
     if (!g_context.online && !g_context.bound && !g_context.quarantined && !g_context.pci_command_saved &&
-        !g_context.dma_armed)
+        !g_context.dma_armed && !g_context.mmio_access_ready)
         return true;
     g_context.online = false;
     if (g_context.operation_gate_open && !DriverOperationGateClose(&g_context.operations))
@@ -440,10 +468,10 @@ bool Rtl8125QuiesceAll()
         }
         g_context.bound = false;
     }
-    if (g_context.mmio != nullptr)
+    bool stopped = !g_context.mmio_access_ready;
+    if (g_context.mmio_access_ready)
     {
         Write8(g_context, kRegChipCmd, 0);
-        bool stopped = false;
         for (u32 waited = 0; waited < 1000; ++waited)
         {
             if ((Read8(g_context, kRegChipCmd) & (kCmdRxEnable | kCmdTxEnable)) == 0)
@@ -459,16 +487,15 @@ bool Rtl8125QuiesceAll()
             return false;
         }
     }
-    const u16 safe_command = static_cast<u16>(g_context.pci_command_original & ~0x4u);
-    pci::PciConfigWrite32(g_context.address, 0x04, safe_command);
-    if ((pci::PciConfigRead16(g_context.address, 0x04) & ~0x4u) != (safe_command & ~0x4u) ||
-        (pci::PciConfigRead16(g_context.address, 0x04) & 0x4u) != 0)
+    bool bus_master_off = true;
+    if (g_context.pci_command_saved && !RestorePciCommandSafe(g_context.address, g_context.pci_command_original))
     {
         g_context.quarantined = true;
         return false;
     }
-    if (!TeardownProof(!g_context.operation_gate_open, worker_joined, !g_context.bound, true,
-                       (pci::PciConfigRead16(g_context.address, 0x04) & 0x4u) == 0))
+    if (g_context.pci_command_saved)
+        bus_master_off = (pci::PciConfigRead16(g_context.address, 0x04) & kPciCommandBusMaster) == 0;
+    if (!TeardownProof(!g_context.operation_gate_open, worker_joined, !g_context.bound, stopped, bus_master_off))
     {
         g_context.quarantined = true;
         return false;

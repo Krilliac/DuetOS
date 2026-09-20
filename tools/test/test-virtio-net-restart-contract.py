@@ -278,8 +278,11 @@ class VirtioNetRestartContract(unittest.TestCase):
 
     def test_net_shutdown_attempts_every_restart_safe_backend(self) -> None:
         shutdown = function_body(NET_SOURCE, "NetShutdown")
-        ordered(shutdown, "PcnetQuiesceAll", "E1000QuiesceAll", "VirtioNetQuiesce")
-        self.assertIn("!pcnet_quiesced || !e1000_quiesced || !virtio_net_quiesced", shutdown)
+        ordered(shutdown, "PcnetQuiesceAll", "E1000QuiesceAll", "Rtl8125QuiesceAll", "VirtioNetQuiesce")
+        self.assertIn(
+            "!pcnet_quiesced || !e1000_quiesced || !rtl8125_quiesced || !virtio_net_quiesced",
+            shutdown,
+        )
 
 
 if __name__ == "__main__":

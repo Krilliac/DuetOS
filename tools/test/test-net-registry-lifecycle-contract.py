@@ -58,11 +58,11 @@ class NetRegistryLifecycleContract(unittest.TestCase):
         shutdown = body(NET_CPP, "Result<void> NetShutdown()")
         self.assertLess(shutdown.index("NicRegistryState::Stopping"), shutdown.index("E1000QuiesceAll"))
         self.assertGreaterEqual(shutdown.count("NicRegistryState::Quarantined"), 2)
-        for quiesce in ("PcnetQuiesceAll", "E1000QuiesceAll", "VirtioNetQuiesce"):
+        for quiesce in ("PcnetQuiesceAll", "E1000QuiesceAll", "Rtl8125QuiesceAll", "VirtioNetQuiesce"):
             self.assertEqual(shutdown.count(quiesce), 1)
         self.assertRegex(
             shutdown,
-            r"if\s*\(\s*unsupported_online\s*\|\|\s*!pcnet_quiesced\s*\|\|\s*!e1000_quiesced\s*\|\|\s*!virtio_net_quiesced\s*\)",
+            r"if\s*\(\s*unsupported_online\s*\|\|\s*!pcnet_quiesced\s*\|\|\s*!e1000_quiesced\s*\|\|\s*!rtl8125_quiesced\s*\|\|\s*!virtio_net_quiesced\s*\)",
         )
         self.assertLess(shutdown.index("E1000QuiesceAll"), shutdown.index("g_nic_count = 0"))
         self.assertLess(shutdown.index("g_nic_count = 0"), shutdown.rindex("NicRegistryState::Stopped"))

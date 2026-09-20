@@ -15,6 +15,8 @@ inline constexpr u32 kBufferBytes = 16 * 1024 - 1;
 inline constexpr u32 kMinimumFrameBytes = 60;
 inline constexpr u32 kMaximumFrameBytes = 1518;
 inline constexpr u32 kEthernetFcsBytes = 4;
+inline constexpr u16 kPciCommandMemorySpace = 0x0002;
+inline constexpr u16 kPciCommandBusMaster = 0x0004;
 
 // Values are from Linux drivers/net/ethernet/realtek/r8169_main.c. The
 // v0 path uses only the generic descriptor bits shared by RTL8125.
@@ -30,6 +32,51 @@ constexpr bool IsExactHardware(u16 vendor, u16 device, u16 subsystem_vendor, u16
 {
     return vendor == kVendorRealtek && device == kDevice && subsystem_vendor == kSubsystemVendor &&
            subsystem_device == kSubsystemDevice && revision == kRevision;
+}
+
+constexpr u16 PciPreflightCommand(u16 original)
+{
+    return static_cast<u16>((original | kPciCommandMemorySpace) & ~kPciCommandBusMaster);
+}
+
+constexpr bool PciPreflightReadbackValid(u16 observed)
+{
+    return (observed & (kPciCommandMemorySpace | kPciCommandBusMaster)) == kPciCommandMemorySpace;
+}
+
+constexpr u16 PciSafeRestoreCommand(u16 original)
+{
+    return static_cast<u16>(original & ~kPciCommandBusMaster);
+}
+
+constexpr bool PciSafeRestoreReadbackValid(u16 original, u16 observed)
+{
+    const u16 relevant = kPciCommandMemorySpace | kPciCommandBusMaster;
+    return (observed & relevant) == (PciSafeRestoreCommand(original) & relevant);
+}
+
+enum class PciPreflightResult : u8
+{
+    ReadyForMmio,
+    RestoredSafe,
+    QuarantinePciOnly,
+};
+
+template <typename WriteCommand, typename ReadCommand>
+constexpr bool RunPciSafeRestore(u16 original, WriteCommand write_command, ReadCommand read_command)
+{
+    write_command(PciSafeRestoreCommand(original));
+    return PciSafeRestoreReadbackValid(original, read_command());
+}
+
+template <typename WriteCommand, typename ReadCommand>
+constexpr PciPreflightResult RunPciPreflight(u16 original, WriteCommand write_command, ReadCommand read_command)
+{
+    write_command(PciPreflightCommand(original));
+    if (PciPreflightReadbackValid(read_command()))
+        return PciPreflightResult::ReadyForMmio;
+    return RunPciSafeRestore(original, write_command, read_command) ? PciPreflightResult::RestoredSafe
+                                                                    : PciPreflightResult::QuarantinePciOnly;
 }
 
 constexpr bool DescriptorAddressValid(u64 address, u64 aperture_bytes)
