@@ -622,12 +622,12 @@ syscall routing shows up immediately.
 | `CreateEventW` | REAL | `kOffCreateEventReal` |
 | `CreateFiber` | REAL | `kOffPinFiberZero` |
 | `CreateFiberEx` | REAL | `kOffPinFiberZero` |
-| `CreateFileA` | REAL | `kOffReturnMinus1` |
+| `CreateFileA` | REAL | `kernel32.dll` export (open/create disposition aware) |
 | `CreateFileMappingA` | REAL | `kOffPinReturn0` |
 | `CreateFileMappingA` | REAL | `kOffPinReturn0` |
 | `CreateFileMappingW` | REAL | `kOffPinReturn0` |
 | `CreateFileMappingW` | REAL | `kOffPinReturn0` |
-| `CreateFileW` | REAL | `kOffCreateFileW` |
+| `CreateFileW` | REAL | `kernel32.dll` export (open/create disposition aware) |
 | `CreateMutexA` | REAL | `kOffCreateMutexW` |
 | `CreateMutexExW` | REAL | `kOffCreateMutexW` |
 | `CreateMutexW` | REAL | `kOffCreateMutexW` |
@@ -746,8 +746,8 @@ syscall routing shows up immediately.
 | `GetNumaHighestNodeNumber` | REAL | `kOffPinReturn0` |
 | `GetNumberOfConsoleInputEvents` | REAL | `kOffPinReturn0` |
 | `GetOEMCP` | REAL | `kOffGetConsoleCP` |
-| `GetOverlappedResult` | REAL | `kOffPinReturn1` |
-| `GetOverlappedResultEx` | REAL | `kOffPinReturn1` |
+| `GetOverlappedResult` | REAL | `kernel32.dll` export (x64; PE32 overlapped I/O rejected) |
+| `GetOverlappedResultEx` | REAL | `kernel32.dll` export (x64; PE32 overlapped I/O rejected) |
 | `GetPriorityClass` | REAL | `kOffReturnPrioNormal` |
 | `GetProcAddress` | REAL | `kOffGetProcAddressReal` |
 | `GetProcessHeap` | REAL | `kOffGetProcessHeap` |

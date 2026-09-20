@@ -23,7 +23,7 @@ int main()
         EXPECT_TRUE(ThunkRetirementRequiresRealDll("kernelbase.dll", name));
         EXPECT_TRUE(IsRetiredKernel32ImportName(name));
     }
-    EXPECT_EQ(count, 40u);
+    EXPECT_EQ(count, 43u);
 
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "createthread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "CreateThreadEx"));
@@ -39,6 +39,9 @@ int main()
     EXPECT_FALSE(IsRetiredKernel32ImportName("tlsalloc"));
     EXPECT_TRUE(IsRetiredKernel32ImportName("FlsAlloc"));
     EXPECT_TRUE(IsRetiredKernel32ImportName("IsThreadAFiber"));
+    EXPECT_TRUE(IsRetiredKernel32ImportName("GetOverlappedResult"));
+    EXPECT_TRUE(IsRetiredKernel32ImportName("GetOverlappedResultEx"));
+    EXPECT_TRUE(IsRetiredKernel32ImportName("CreateFileA"));
     EXPECT_FALSE(IsRetiredKernel32ImportName("TlsAllocEx"));
 
     EXPECT_TRUE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastError"));

@@ -26,9 +26,17 @@ __declspec(dllexport) ULONG RtlNtStatusToDosError(NTSTATUS s)
     switch (s)
     {
     case NTSTATUS_SUCCESS:
-        return 0; /* ERROR_SUCCESS */
+        return 0;      /* ERROR_SUCCESS */
+    case 0x00000102UL: /* STATUS_TIMEOUT */
+        return 1460;   /* ERROR_TIMEOUT */
+    case 0x00000103UL: /* STATUS_PENDING */
+        return 997;    /* ERROR_IO_PENDING */
     case NTSTATUS_UNSUCCESSFUL:
         return 31;     /* ERROR_GEN_FAILURE */
+    case 0xC0000011UL: /* STATUS_END_OF_FILE */
+        return 38;     /* ERROR_HANDLE_EOF */
+    case 0xC0000120UL: /* STATUS_CANCELLED */
+        return 995;    /* ERROR_OPERATION_ABORTED */
     case 0xC0000002UL: /* STATUS_NOT_IMPLEMENTED */
         return 1;      /* ERROR_INVALID_FUNCTION */
     case NTSTATUS_INVALID_INFO_CLASS:

@@ -497,8 +497,8 @@
     // call (more diagnostic than a silent ret into junk memory).
 
     // === File I/O + thread/fiber + debug + precise time.
-    // All NO-OP-correct for v0 — no async I/O (CancelIo nothing to
-    // cancel; GetOverlappedResult pretends sync completion), no
+    // Most remain NO-OP-correct for v0 — no async I/O backlog for
+    // CancelIo to cancel, no
     // multi-CPU affinity knobs (v0 is uni-processor from the user
     // angle — AffinityMask set always "succeeds"), no fibers (real
     // stack-swap fibers need SwapContext which isn't hooked up).
@@ -508,8 +508,7 @@
     {"kernel32.dll", "LockFile", kOffPinReturn1}, {"kernel32.dll", "LockFileEx", kOffPinReturn1},
     {"kernel32.dll", "UnlockFile", kOffPinReturn1}, {"kernel32.dll", "UnlockFileEx", kOffPinReturn1},
     {"kernel32.dll", "CancelIo", kOffPinReturn1}, {"kernel32.dll", "CancelIoEx", kOffPinReturn1},
-    {"kernel32.dll", "CancelSynchronousIo", kOffPinReturn1}, {"kernel32.dll", "GetOverlappedResult", kOffPinReturn1},
-    {"kernel32.dll", "GetOverlappedResultEx", kOffPinReturn1},
+    {"kernel32.dll", "CancelSynchronousIo", kOffPinReturn1},
     // Thread/process scheduling knobs: pin TRUE — v0 accepts the
     // request but the scheduler observes its own policy.
     {"kernel32.dll", "SetThreadAffinityMask", kOffPinReturn1},
@@ -1482,7 +1481,6 @@
 
     // ---- KERNEL32 file / directory / volume ----
     {"kernel32.dll", "AreFileApisANSI", kOffPinReturn1},    // ANSI assumed
-    {"kernel32.dll", "CreateFileA", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
     // NOTE: CreateFileW is deliberately NOT repeated here. It is
     // bound to the real kOffCreateFileW thunk above; a second row
     // pinning it to INVALID_HANDLE_VALUE was dead (the earlier row

@@ -3,10 +3,20 @@
 typedef unsigned long NTSTATUS;
 
 #define STATUS_SUCCESS 0x00000000UL
+#define STATUS_PENDING 0x00000103UL
 #define STATUS_PROCESS_NOT_IN_JOB 0x00000123UL
 #define STATUS_PROCESS_IN_JOB 0x00000124UL
 
+#define ERROR_FILE_NOT_FOUND 2UL
+#define ERROR_PATH_NOT_FOUND 3UL
+#define ERROR_ACCESS_DENIED 5UL
+#define ERROR_INVALID_HANDLE 6UL
+#define ERROR_GEN_FAILURE 31UL
+#define ERROR_FILE_EXISTS 80UL
 #define ERROR_INVALID_PARAMETER 87UL
+#define ERROR_ALREADY_EXISTS 183UL
+#define ERROR_FILENAME_EXCED_RANGE 206UL
+#define ERROR_IO_INCOMPLETE 996UL
 #define ERROR_NOT_SUPPORTED 50UL
 
 #define JOB_OBJECT_ALL_ACCESS 0x001F001FUL
@@ -32,6 +42,21 @@ static BOOL kernel32_is_file_handle(unsigned long long raw)
     const unsigned long long tag = raw & 0xFFFULL;
     const unsigned long long generation = raw >> 12;
     return raw <= 0x7FFFFFFFULL && generation != 0 && tag >= 0x100ULL && tag < 0x110ULL;
+}
+
+static BOOL kernel32_is_live_file_handle(HANDLE handle)
+{
+    const unsigned long long raw = (unsigned long long)(UINT_PTR)handle;
+    if (!kernel32_is_file_handle(raw))
+        return 0;
+    long long size = 0;
+    long long status;
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)24), /* SYS_FILE_FSTAT */
+                       "D"((long long)raw), "S"((long long)&size)
+                     : "memory");
+    return status == 0 ? 1 : 0;
 }
 
 /* GetFileAttributesA/W live further down — they use SYS_FILE_QUERY_ATTRIBUTES
@@ -412,6 +437,61 @@ static void win32_overlapped_complete(void* ov, unsigned long long status, unsig
     unsigned char* p = (unsigned char*)ov;
     __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL, &status, sizeof(status));
     __builtin_memcpy(p + OVERLAPPED_OFF_INTERNAL_HIGH, &bytes, sizeof(bytes));
+}
+
+/* DuetOS currently completes file OVERLAPPED operations synchronously.  Keep
+ * the result APIs honest about the completion block nonetheless: callers get
+ * the transferred byte count for terminal states, STATUS_PENDING remains
+ * incomplete, and failures are translated through ntdll just like the other
+ * kernel32 NTSTATUS facades.  Waiting is intentionally deferred until an
+ * asynchronous backend can signal hEvent without polling. */
+static BOOL win32_get_overlapped_result(HANDLE hFile, void* lpOverlapped, DWORD* lpNumberOfBytesTransferred)
+{
+    if (lpOverlapped == (void*)0 || lpNumberOfBytesTransferred == (DWORD*)0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (!kernel32_is_live_file_handle(hFile))
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    const unsigned char* p = (const unsigned char*)lpOverlapped;
+    unsigned long long raw_status = 0;
+    unsigned long long raw_bytes = 0;
+    __builtin_memcpy(&raw_status, p + OVERLAPPED_OFF_INTERNAL, sizeof(raw_status));
+    __builtin_memcpy(&raw_bytes, p + OVERLAPPED_OFF_INTERNAL_HIGH, sizeof(raw_bytes));
+    const NTSTATUS status = (NTSTATUS)raw_status;
+
+    if (status == STATUS_PENDING)
+    {
+        SetLastError(ERROR_IO_INCOMPLETE);
+        return 0;
+    }
+
+    *lpNumberOfBytesTransferred = (DWORD)raw_bytes;
+    if (status == STATUS_SUCCESS)
+        return 1;
+
+    SetLastError((DWORD)RtlNtStatusToDosError(status));
+    return 0;
+}
+
+__declspec(dllexport) BOOL GetOverlappedResult(HANDLE hFile, void* lpOverlapped, DWORD* lpNumberOfBytesTransferred,
+                                               BOOL bWait)
+{
+    (void)bWait;
+    return win32_get_overlapped_result(hFile, lpOverlapped, lpNumberOfBytesTransferred);
+}
+
+__declspec(dllexport) BOOL GetOverlappedResultEx(HANDLE hFile, void* lpOverlapped, DWORD* lpNumberOfBytesTransferred,
+                                                 DWORD dwMilliseconds, BOOL bAlertable)
+{
+    (void)dwMilliseconds;
+    (void)bAlertable;
+    return win32_get_overlapped_result(hFile, lpOverlapped, lpNumberOfBytesTransferred);
 }
 
 /* CreateTimerQueue / DeleteTimerQueue — sentinel handle. */
@@ -2338,50 +2418,21 @@ __declspec(dllexport) BOOL CloseHandle(HANDLE h)
     return status == STATUS_SUCCESS ? 1 : kernel32_job_fail(status);
 }
 
-/* CreateFileW — wide path in rcx (lpFileName), other args
- * ignored. UTF-16 → ASCII strip on a stack-local buffer, then
- * SYS_FILE_OPEN(rdi=path, rsi=len). Returns the kernel handle
- * (opaque generation plus a low 0x100..0x10F tag) or -1 on failure. */
-__declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
-                                         void* lpSecurityAttributes, DWORD dwCreationDisposition,
-                                         DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+static HANDLE win32_create_file_normalized(const char* path, int path_len, DWORD disposition)
 {
-    (void)dwDesiredAccess;
-    (void)dwShareMode;
-    (void)lpSecurityAttributes;
-    (void)dwCreationDisposition;
-    (void)dwFlagsAndAttributes;
-    (void)hTemplateFile;
-    if (lpFileName == (const WCHAR_t*)0)
-        return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
-    /* UTF-16 → ASCII; normalise '\\' → '/' so Windows-style paths
-     * match the kernel ramfs's POSIX-style lookup. Optional drive
-     * prefix "C:" / "c:" is stripped — DuetOS has one logical
-     * volume; drive letters are vestigial from the Win32 ABI. */
-    char ascii[256];
-    int i = 0;
-    int j = 0;
-    /* Skip drive letter prefix if present. */
-    if (lpFileName[0] != 0 && lpFileName[1] == ':' &&
-        ((lpFileName[0] >= 'A' && lpFileName[0] <= 'Z') || (lpFileName[0] >= 'a' && lpFileName[0] <= 'z')))
-        i = 2;
-    while (j < 255 && lpFileName[i] != 0)
+    if (path_len == 0)
     {
-        char c = (char)(lpFileName[i] & 0xFF);
-        ascii[j++] = (c == '\\') ? '/' : c;
-        ++i;
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return (HANDLE)(long long)-1;
     }
-    ascii[j] = '\0';
-    i = j;
+
     /* Named-pipe prefix recognition. After backslash normalisation,
-     * "\\.\pipe\NAME" becomes "//./pipe/NAME". Route through
-     * SYS_NAMED_PIPE_OPEN (203) with the bare name instead of
-     * dispatching SYS_FILE_OPEN (which would miss in ramfs / FAT32). */
-    if (j > 9 && ascii[0] == '/' && ascii[1] == '/' && ascii[2] == '.' && ascii[3] == '/' && ascii[4] == 'p' &&
-        ascii[5] == 'i' && ascii[6] == 'p' && ascii[7] == 'e' && ascii[8] == '/')
+     * "\\.\pipe\NAME" becomes "//./pipe/NAME". */
+    if (path_len > 9 && path[0] == '/' && path[1] == '/' && path[2] == '.' && path[3] == '/' && path[4] == 'p' &&
+        path[5] == 'i' && path[6] == 'p' && path[7] == 'e' && path[8] == '/')
     {
-        const char* name = ascii + 9;
-        const int name_len = j - 9;
+        const char* name = path + 9;
+        const int name_len = path_len - 9;
         long long rv_pipe;
         __asm__ volatile("int $0x80"
                          : "=a"(rv_pipe)
@@ -2390,13 +2441,152 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
                          : "memory");
         return (HANDLE)rv_pipe;
     }
-    long long rv;
+
+    long long opened = -1;
+    /* Every disposition probes once so CREATE_NEW can distinguish an
+     * existing target and the create-or-open variants can report it. */
+    if (disposition >= 1UL && disposition <= 5UL)
+    {
+        __asm__ volatile("int $0x80"
+                         : "=a"(opened)
+                         : "a"((long long)20), /* SYS_FILE_OPEN */
+                           "D"((long long)path), "S"((long long)path_len)
+                         : "memory");
+        if (disposition == 1UL && opened != -1) /* CREATE_NEW */
+        {
+            (void)NtClose((HANDLE)opened);
+            SetLastError(ERROR_FILE_EXISTS);
+            return (HANDLE)(long long)-1;
+        }
+        if (disposition == 3UL) /* OPEN_EXISTING */
+        {
+            if (opened == -1)
+                SetLastError(ERROR_FILE_NOT_FOUND);
+            return (HANDLE)opened;
+        }
+        if (disposition == 4UL && opened != -1) /* OPEN_ALWAYS */
+        {
+            SetLastError(ERROR_ALREADY_EXISTS);
+            return (HANDLE)opened;
+        }
+        if (disposition == 5UL && opened == -1) /* TRUNCATE_EXISTING */
+        {
+            SetLastError(ERROR_FILE_NOT_FOUND);
+            return (HANDLE)(long long)-1;
+        }
+    }
+
+    if (disposition != 1UL && disposition != 2UL && disposition != 4UL && disposition != 5UL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (HANDLE)(long long)-1;
+    }
+
+    /* SYS_FILE_CREATE is create-new. CREATE_ALWAYS and
+     * TRUNCATE_EXISTING therefore close and replace an existing entry. */
+    if (opened != -1)
+    {
+        (void)NtClose((HANDLE)opened);
+        long long unlink_status;
+        __asm__ volatile("int $0x80"
+                         : "=a"(unlink_status)
+                         : "a"((long long)143), /* SYS_FILE_UNLINK */
+                           "D"((long long)path), "S"((long long)path_len)
+                         : "memory");
+        if (unlink_status != 0)
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return (HANDLE)(long long)-1;
+        }
+    }
+
+    long long created;
+    register long long init_len __asm__("r10") = 0;
     __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)20), /* SYS_FILE_OPEN */
-                       "D"((long long)ascii), "S"((long long)i)
+                     : "=a"(created)
+                     : "a"((long long)44), /* SYS_FILE_CREATE */
+                       "D"((long long)path), "S"((long long)path_len), "d"((long long)0), "r"(init_len)
                      : "memory");
-    return (HANDLE)rv;
+    if (created == -1)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return (HANDLE)(long long)-1;
+    }
+    if (disposition == 2UL || disposition == 4UL) /* CREATE_ALWAYS / OPEN_ALWAYS */
+        SetLastError(opened == -1 ? 0UL : ERROR_ALREADY_EXISTS);
+    return (HANDLE)created;
+}
+
+__declspec(dllexport) HANDLE CreateFileA(const char* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                                         void* lpSecurityAttributes, DWORD dwCreationDisposition,
+                                         DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+{
+    (void)dwDesiredAccess;
+    (void)dwShareMode;
+    (void)lpSecurityAttributes;
+    (void)dwFlagsAndAttributes;
+    (void)hTemplateFile;
+    if (lpFileName == (const char*)0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (HANDLE)(long long)-1;
+    }
+
+    char ascii[256];
+    int i = 0;
+    int j = 0;
+    if (lpFileName[0] != 0 && lpFileName[1] == ':' &&
+        ((lpFileName[0] >= 'A' && lpFileName[0] <= 'Z') || (lpFileName[0] >= 'a' && lpFileName[0] <= 'z')))
+        i = 2;
+    while (j < 255 && lpFileName[i] != 0)
+    {
+        const char c = lpFileName[i++];
+        ascii[j++] = (c == '\\') ? '/' : c;
+    }
+    if (lpFileName[i] != 0)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return (HANDLE)(long long)-1;
+    }
+    ascii[j] = '\0';
+    return win32_create_file_normalized(ascii, j, dwCreationDisposition);
+}
+
+/* CreateFileW — UTF-16-to-ASCII facade over the same native open/create
+ * path as CreateFileA. The five creation dispositions are distinguished. */
+__declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                                         void* lpSecurityAttributes, DWORD dwCreationDisposition,
+                                         DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+{
+    (void)dwDesiredAccess;
+    (void)dwShareMode;
+    (void)lpSecurityAttributes;
+    (void)dwFlagsAndAttributes;
+    (void)hTemplateFile;
+    if (lpFileName == (const WCHAR_t*)0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (HANDLE)(long long)-1;
+    }
+
+    char ascii[256];
+    int i = 0;
+    int j = 0;
+    if (lpFileName[0] != 0 && lpFileName[1] == ':' &&
+        ((lpFileName[0] >= 'A' && lpFileName[0] <= 'Z') || (lpFileName[0] >= 'a' && lpFileName[0] <= 'z')))
+        i = 2;
+    while (j < 255 && lpFileName[i] != 0)
+    {
+        const char c = (char)(lpFileName[i++] & 0xFF);
+        ascii[j++] = (c == '\\') ? '/' : c;
+    }
+    if (lpFileName[i] != 0)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return (HANDLE)(long long)-1;
+    }
+    ascii[j] = '\0';
+    return win32_create_file_normalized(ascii, j, dwCreationDisposition);
 }
 
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)

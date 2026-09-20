@@ -270,6 +270,8 @@ case "${PROFILE}" in
             "[block] self-test OK"
             'pe spawn name="ring3-tls-smoke"'
             "[ring3-tls-smoke] PASS"
+            'pe spawn name="ring3-iocp-overlapped-smoke"'
+            "[ring3-iocp-overlapped-smoke] PASS"
             'pe spawn name="ring3-thunk-alias-smoke"'
             "[thunk_alias_smoke] kernel32.dll pseudo-handle PASS"
             "[thunk_alias_smoke] kernelbase.dll pseudo-handle PASS"

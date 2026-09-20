@@ -222,6 +222,7 @@
 #include "generated_dialog_smoke_pe.h"
 #include "generated_find_smoke_pe.h"
 #include "generated_iocp2_smoke_pe.h"
+#include "generated_iocp_overlapped_smoke_pe.h"
 #include "generated_proc2_smoke_pe.h"
 #include "generated_select_smoke_pe.h"
 #include "generated_signal_smoke_pe.h"
@@ -2452,6 +2453,7 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-proc2-smoke", kBinProc2SmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-find-smoke", kBinFindSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-iocp2-smoke", kBinIocp2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-iocp-overlapped-smoke", kBinIocpOverlappedSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-signal-smoke", kBinSignalSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-timer-smoke", kBinTimerSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-pe-stress", kBinPeStressBytes, BareMetal, true),
@@ -3031,6 +3033,9 @@ void StartRing3SmokeTask()
         {
             SpawnPeFile("ring3-tls-smoke", fs::generated::kBinTlsSmokeBytes, fs::generated::kBinTlsSmokeBytes_len,
                         CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            SpawnPeFile("ring3-iocp-overlapped-smoke", fs::generated::kBinIocpOverlappedSmokeBytes,
+                        fs::generated::kBinIocpOverlappedSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         }
         // Mixed-provider retirement fixture: the Wave 2-6 APIs are
         // intentionally imported across kernel32, kernelbase, and five

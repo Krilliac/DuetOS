@@ -8,6 +8,7 @@ EXPORTS
     CloseHandle                = kernel32.CloseHandle
     CreateEventA               = kernel32.CreateEventA
     CreateEventW               = kernel32.CreateEventW
+    CreateFileA                = kernel32.CreateFileA
     CreateFileW                = kernel32.CreateFileW
     CreateMutexA               = kernel32.CreateMutexA
     CreateMutexW               = kernel32.CreateMutexW
@@ -28,6 +29,8 @@ EXPORTS
     GetLastError               = kernel32.GetLastError
     GetModuleFileNameW         = kernel32.GetModuleFileNameW
     GetModuleHandleW           = kernel32.GetModuleHandleW
+    GetOverlappedResult        = kernel32.GetOverlappedResult
+    GetOverlappedResultEx      = kernel32.GetOverlappedResultEx
     GetProcessHeap             = kernel32.GetProcessHeap
     GetStdHandle               = kernel32.GetStdHandle
     GetVersionExW              = kernel32.GetVersionExW

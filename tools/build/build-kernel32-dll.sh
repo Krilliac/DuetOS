@@ -339,8 +339,11 @@ set +e
     /export:ReadConsoleA \
     /export:ReadConsoleW \
     /export:CloseHandle \
+    /export:CreateFileA \
     /export:CreateFileW \
     /export:ReadFile \
+    /export:GetOverlappedResult \
+    /export:GetOverlappedResultEx \
     /export:SetFilePointerEx \
     /export:GetFileSizeEx \
     /export:GetFileSize \

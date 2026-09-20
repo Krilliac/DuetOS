@@ -269,6 +269,9 @@ class VerifyPeExportsTests(unittest.TestCase):
                 "GetCurrentFiber",
                 "GetFiberData",
                 "IsThreadAFiber",
+                "GetOverlappedResult",
+                "GetOverlappedResultEx",
+                "CreateFileA",
             ],
         )
 
