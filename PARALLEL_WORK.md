@@ -739,13 +739,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T15:53:43Z
 - **Status**: COMPLETED @ 2026-09-20T15:55:39Z
 
-### [ACTIVE] codex-duetos-runtime-dll-iat
+### [DONE] codex-duetos-runtime-dll-iat
 - **Session**: `DESKTOP-950K3EI-558`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/syscall/syscall.cpp,kernel/proc/spawn.cpp,userland/libs/runtime_import/*,tools/build/build-runtime-import-dll.sh,userland/apps/module_smoke/module_smoke.c,wiki/subsystems/PE-Loader.md`
 - **Description**: Bind runtime-loaded DLL imports before publication and prove an imported export
 - **Claimed**: 2026-09-20T15:59:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:07:18Z
 
 ### [ACTIVE] codex-duetos-runtime-dll-fixture
 - **Session**: `DESKTOP-950K3EI-534`
