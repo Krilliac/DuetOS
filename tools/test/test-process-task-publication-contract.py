@@ -549,6 +549,37 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
         returned = unwind.find("return TaskCreateResult{false, 0}")
         self.assertTrue(0 <= unlock < release < returned, "failed publication releases Process ownership unsafely")
 
+    def test_user_task_address_space_admission_is_serialized_with_teardown(self) -> None:
+        create_user = function_body(self.sched_cpp, r"TaskCreateResult\s+CreateUserTask")
+        transaction = create_user.find("ScopedProcessVmTransaction vm_transaction(process)")
+        lifecycle = create_user.find("ProcessLifecycleLoad(process)")
+        address_space = create_user.find("process->as")
+        create_internal = create_user.find("SchedCreateInternal(")
+
+        self.assertTrue(
+            0 <= transaction < lifecycle < address_space < create_internal,
+            "CreateUserTask reads the Process address space outside its VM transaction/lifecycle admission",
+        )
+
+        null_guards = [
+            statement
+            for statement in if_statements(create_user)
+            if re.search(r"process->as\s*==\s*nullptr", statement.condition)
+        ]
+        self.assertEqual(len(null_guards), 1, "CreateUserTask lacks one fail-closed null-AS admission guard")
+        null_guard = null_guards[0]
+        self.assertTrue(lifecycle < null_guard.start < create_internal)
+        unlock = null_guard.then_body.find("vm_transaction.Unlock()")
+        release = null_guard.then_body.find("ProcessRelease(process)")
+        returned = null_guard.then_body.find("return TaskCreateResult{false, 0}")
+        self.assertTrue(0 <= unlock < release < returned, "null-AS rejection does not return transferred ownership safely")
+        null_guard_body = create_user.find(null_guard.then_body, null_guard.start)
+        self.assertNotIn(
+            "vm_transaction.Unlock()",
+            create_user[null_guard_body + len(null_guard.then_body) : create_internal],
+            "CreateUserTask drops the VM transaction before scheduler publication",
+        )
+
     def test_first_and_additional_task_publication_are_state_gated_under_lock(self) -> None:
         publish = function_body(self.sched_cpp, r"bool\s+PublishCreatedTask")
         publish_store = require_pattern(

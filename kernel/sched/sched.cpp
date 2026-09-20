@@ -2907,7 +2907,6 @@ TaskCreateResult CreateUserTask(TaskEntry entry, void* arg, const char* name, co
     KLOG_INFO_S("sched", prepare != nullptr ? "SchedCreateUserPrepared: ring-3 task" : "SchedCreateUser: ring-3 task",
                 "name", name);
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
-    KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
 
     if (!duetos::security::GateThread(duetos::security::ImageKind::UserThread, name))
     {
@@ -2929,6 +2928,13 @@ TaskCreateResult CreateUserTask(TaskEntry entry, void* arg, const char* name, co
     {
         vm_transaction.Unlock();
         KLOG_WARN_S("sched", "SchedCreateUser rejected exiting Process", "name", name);
+        core::ProcessRelease(process);
+        return TaskCreateResult{false, 0};
+    }
+    if (process->as == nullptr)
+    {
+        vm_transaction.Unlock();
+        KLOG_WARN_S("sched", "SchedCreateUser rejected Process without address space", "name", name);
         core::ProcessRelease(process);
         return TaskCreateResult{false, 0};
     }
