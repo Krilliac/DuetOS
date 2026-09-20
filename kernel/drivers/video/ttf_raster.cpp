@@ -39,6 +39,19 @@ struct Edge
 constinit Edge g_edges[kMaxEdges]{};
 constinit u32 g_edge_count = 0;
 
+// Map a Q16.16 coordinate to the nearest supersample row. Truncating with
+// `>> 16` biased every edge upward by as much as one complete 4x subrow;
+// at 13 px that promoted a 0.08 px cap overshoot into 25% coverage on an
+// otherwise empty row. Use symmetric rounding so positive and negative
+// coordinates have the same sampling rule.
+i32 RoundQ16ToInt(i32 value)
+{
+    const i64 wide = value;
+    if (wide >= 0)
+        return static_cast<i32>((wide + 0x8000) >> 16);
+    return -static_cast<i32>((-wide + 0x8000) >> 16);
+}
+
 // Add a straight edge from `(x0, y0)` to `(x1, y1)` — supersample
 // units, Q16.16 X. Skips horizontal edges (no contribution to
 // even-odd parity at any scanline).
@@ -73,7 +86,7 @@ void FlattenQuad(i32 x0, i32 y0, i32 cx, i32 cy, i32 x1, i32 y1, i32 depth)
 {
     if (depth <= 0)
     {
-        AddEdge(x0, y0 >> 16, x1, y1 >> 16);
+        AddEdge(x0, RoundQ16ToInt(y0), x1, RoundQ16ToInt(y1));
         return;
     }
     // Midpoint subdivision: m0 = avg(p0, c), m1 = avg(c, p1),
@@ -96,7 +109,7 @@ void FlattenQuad(i32 x0, i32 y0, i32 cx, i32 cy, i32 x1, i32 y1, i32 depth)
     // Threshold ≈ 1 supersample-pixel * length scale. Q16.16 scale.
     if (abs_cross < (i64{1} << 32))
     {
-        AddEdge(x0, y0 >> 16, x1, y1 >> 16);
+        AddEdge(x0, RoundQ16ToInt(y0), x1, RoundQ16ToInt(y1));
         return;
     }
     FlattenQuad(x0, y0, m0x, m0y, mx, my, depth - 1);
@@ -109,7 +122,7 @@ void FlattenQuad(i32 x0, i32 y0, i32 cx, i32 cy, i32 x1, i32 y1, i32 depth)
 // consecutive off-curve points imply an implicit on-curve midpoint
 // between them; consecutive on-curve points are a straight line.
 void WalkContour(const TtfPoint* points, u16 a, u16 b, i32 px_to_q16_scale, i32 origin_x_q16, i32 origin_y_q16,
-                 i32 ymax_q16, bool flip_y)
+                 i32 flip_origin_y_q16, bool flip_y)
 {
     // Find a starting on-curve point. If the entire contour is
     // off-curve, the convention says the first point IS the implicit
@@ -117,7 +130,22 @@ void WalkContour(const TtfPoint* points, u16 a, u16 b, i32 px_to_q16_scale, i32 
     // practice but legal.
     auto to_qx = [&](i32 design_x) -> i32 { return origin_x_q16 + design_x * px_to_q16_scale; };
     auto to_qy = [&](i32 design_y) -> i32
-    { return flip_y ? (ymax_q16 - design_y * px_to_q16_scale) : (origin_y_q16 + design_y * px_to_q16_scale); };
+    {
+        i32 scaled_y = design_y * px_to_q16_scale;
+        if (flip_y)
+        {
+            // Minimal baseline grid fitting: font outlines commonly put
+            // round letters a few design units below y=0. If that overshoot
+            // is less than half an output pixel, pin it to the shared
+            // baseline instead of quantizing it into a full 4x subrow.
+            // Real descenders remain untouched.
+            constexpr i32 kHalfOutputPixelQ16 = static_cast<i32>((kSS * 65536u) / 2u);
+            if (scaled_y > -kHalfOutputPixelQ16 && scaled_y < kHalfOutputPixelQ16)
+                scaled_y = 0;
+            return flip_origin_y_q16 - scaled_y;
+        }
+        return origin_y_q16 + scaled_y;
+    };
 
     // First, find an on-curve anchor. If none exists, synthesize one
     // halfway between points[a] and points[b].
@@ -151,7 +179,7 @@ void WalkContour(const TtfPoint* points, u16 a, u16 b, i32 px_to_q16_scale, i32 
         const i32 py = to_qy(p.y);
         if (p.on_curve)
         {
-            AddEdge(cur_x_q16, cur_y_q16 >> 16, px, py >> 16);
+            AddEdge(cur_x_q16, RoundQ16ToInt(cur_y_q16), px, RoundQ16ToInt(py));
             cur_x_q16 = px;
             cur_y_q16 = py;
         }
@@ -312,16 +340,33 @@ bool TtfRenderGlyph(const TtfFont& font, u32 codepoint, u32 pixel_height, u8* ds
     }
     const u32 px_w =
         static_cast<u32>((static_cast<i64>(design_w) * pixel_height + font.units_per_em - 1) / font.units_per_em) + 2u;
-    const u32 px_h =
-        static_cast<u32>((static_cast<i64>(design_h) * pixel_height + font.units_per_em - 1) / font.units_per_em) + 2u;
-    if (static_cast<u64>(px_w) * px_h > dst_capacity)
+    const i64 design_ascent = glyph.y_max > 0 ? static_cast<i64>(glyph.y_max) : 0;
+    const i64 design_descent = glyph.y_min < 0 ? -static_cast<i64>(glyph.y_min) : 0;
+    const u32 glyph_ascent_px =
+        static_cast<u32>((design_ascent * pixel_height + font.units_per_em - 1) / font.units_per_em);
+    const u32 glyph_descent_px =
+        static_cast<u32>((design_descent * pixel_height + font.units_per_em - 1) / font.units_per_em);
+
+    // Anchor every glyph to the same em-square baseline used by
+    // TtfDrawStringFont (`y + pixel_height`).  The old path made each
+    // glyph's exact yMax the local raster origin, then composited it with a
+    // separately rounded ascent.  Tiny, intentional round-letter overshoot
+    // therefore changed the sampling phase by a whole output row at 11/13
+    // px: B sat at -9 while G/C/O sat at -10.  A baseline-space raster
+    // keeps that subpixel overshoot subpixel instead of turning uppercase
+    // labels into apparent mixed-case text.
+    const u32 raster_ascent = ((glyph_ascent_px > pixel_height) ? glyph_ascent_px : pixel_height) + 1u;
+    const u32 px_h = raster_ascent + glyph_descent_px + 1u;
+    if (static_cast<u64>(px_w) * px_h > dst_capacity || raster_ascent > (0x7FFFFFFFu / (kSS * 65536u)))
         return false;
 
-    // Origin in supersample Q16.16: shift design coords so x_min/y_min
-    // map to 0. Y is flipped (TrueType design space is Y-up; bitmap is
-    // Y-down) so the output baseline aligns at row `ascent`.
+    // Origin in supersample Q16.16. X remains local to the glyph bbox.
+    // Y is flipped around an integer, em-anchored baseline so every glyph
+    // in a line samples against the same output-pixel grid. The extra row
+    // on either side is an AA guard and cancels out during compositing via
+    // `out->ascent` below.
     const i32 origin_x_q16 = -static_cast<i32>(glyph.x_min) * px_to_q16_scale + (1 << 16); // +1 px margin
-    const i32 ymax_q16 = static_cast<i32>(glyph.y_max) * px_to_q16_scale + (1 << 16);
+    const i32 baseline_q16 = static_cast<i32>(raster_ascent * kSS * 65536u);
     const i32 origin_y_q16 = 0; // unused for flip_y=true path
 
     g_edge_count = 0;
@@ -331,7 +376,7 @@ bool TtfRenderGlyph(const TtfFont& font, u32 codepoint, u32 pixel_height, u8* ds
     for (u16 c = 0; c < glyph.contour_count; ++c)
     {
         const u16 contour_end = glyph.endpoints[c];
-        WalkContour(glyph.points, contour_start, contour_end, px_to_q16_scale, origin_x_q16, origin_y_q16, ymax_q16,
+        WalkContour(glyph.points, contour_start, contour_end, px_to_q16_scale, origin_x_q16, origin_y_q16, baseline_q16,
                     /*flip_y=*/true);
         contour_start = static_cast<u16>(contour_end + 1);
     }
@@ -344,10 +389,8 @@ bool TtfRenderGlyph(const TtfFont& font, u32 codepoint, u32 pixel_height, u8* ds
     out->pixels = dst;
     out->width = px_w;
     out->height = px_h;
-    out->ascent =
-        static_cast<i32>((static_cast<i64>(glyph.y_max) * pixel_height + font.units_per_em - 1) / font.units_per_em);
-    out->descent =
-        static_cast<i32>((static_cast<i64>(-glyph.y_min) * pixel_height + font.units_per_em - 1) / font.units_per_em);
+    out->ascent = static_cast<i32>(raster_ascent);
+    out->descent = static_cast<i32>(glyph_descent_px);
     out->advance = static_cast<u32>((static_cast<u64>(hm.advance_width) * pixel_height) / font.units_per_em);
     return true;
 }
