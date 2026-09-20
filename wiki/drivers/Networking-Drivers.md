@@ -13,6 +13,7 @@ Several NIC paths feed the same kernel net stack today:
 | Driver | Path | Maturity |
 |--------|------|----------|
 | Intel e1000 / e1000e (wired) | `kernel/drivers/net/net.cpp` | v0 — packet-I/O profiles enabled only for QEMU identities `8086:100E` and `8086:10D3`; restart QEMU proof pending |
+| Realtek RTL8125 (wired) | `kernel/drivers/net/rtl8125.cpp` | v0 — exact Node1 tuple `10EC:8125`, subsystem `10EC:0123`, revision `05`; polled rings; silicon proof pending |
 | AMD PCnet (wired) | `kernel/drivers/net/pcnet.cpp` | v0 — exact `1022:2000` profile with restart-safe polled packet I/O; QEMU runtime proof pending |
 | virtio-net (wired) | `kernel/drivers/virtio/virtio_net.cpp` | v0 — modern `1AF4:1041` capability transport with restart-safe polled packet I/O; transitional `1AF4:1000` is inventory-only; QEMU runtime proof pending |
 | USB CDC-ECM | `kernel/drivers/usb/cdc_ecm.cpp` | v0 — control + data plane |
@@ -31,6 +32,19 @@ as e1000. Modern virtio-net `1AF4:1041` is activated on the registry-assigned
 interface only after its staged PCI transport has been revalidated by exact BDF
 and capability/BAR fingerprint. Other AMD NIC identities and transitional
 virtio-net `1AF4:1000` remain inventory-only.
+
+## Realtek RTL8125 (Wired, Exact-Identity v0)
+
+`kernel/drivers/net/rtl8125.cpp` admits only `10EC:8125` with subsystem
+`10EC:0123` and revision `05`. BAR validation and PCI bus-master disarming
+precede MMIO access; coherent RX/TX rings are prepared before DMA is enabled.
+The worker is polled and uses the generation-owned `NetInterfaceBinding`,
+with descriptor ownership, frame-length, and ring-address bounds checks.
+Shutdown closes operations, retires and joins the worker, disables RX/TX and
+PCI bus mastering, then frees DMA. The implementation intentionally performs
+no PHY, OCP, or firmware writes. RTL8125A firmware/link-management behavior
+and live Node1 traffic remain silicon-only gates; the host contract test does
+not claim those gates.
 
 ## PCI-ID classification (`nic_ids.h`)
 

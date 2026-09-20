@@ -632,6 +632,7 @@ target_include_directories(
 # They deliberately perform no host MMIO; the threaded lease fixture models
 # hostile first-schedule-after-retire and concurrent publication races.
 add_host_test(nic_ids)
+add_host_test(rtl8125_contract)
 add_host_test(wireless_watch)
 target_link_libraries(test_wireless_watch PRIVATE Threads::Threads)
 add_host_test(pcnet_restart)

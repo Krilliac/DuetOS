@@ -809,6 +809,11 @@ constexpr const char* RealtekWiredTag(u16 did)
     }
 }
 
+constexpr bool Realtek8125BringUpEligible(u16 did, u16 subsystem_vendor, u16 subsystem_device, u8 revision)
+{
+    return did == 0x8125 && subsystem_vendor == kVendorRealtek && subsystem_device == 0x0123 && revision == 0x05;
+}
+
 // ---------------------------------------------------------------
 // Broadcom.
 // ---------------------------------------------------------------
