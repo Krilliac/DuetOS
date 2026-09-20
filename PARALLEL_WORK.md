@@ -627,13 +627,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T11:14:23Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] codex-duetos-storage-doc-drift
+### [DONE] codex-duetos-storage-doc-drift
 - **Session**: `Codex-DuetOS-Campaign-20260920`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/drivers/storage/nvme.cpp`
 - **Description**: Synchronize crash-dump safety documentation with fail-closed storage code
 - **Claimed**: 2026-09-20T11:37:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:42:40Z
 
 ### [DONE] codex-duetos-static-network
 - **Session**: `Codex-DuetOS-Campaign-20260920`
