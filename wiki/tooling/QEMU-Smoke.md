@@ -243,6 +243,13 @@ under `tests/`. These do not require QEMU.
 DuetOS, wait `DUETOS_SETTLE` seconds, snapshot the framebuffer to
 PNG. Used to capture `docs/screenshots/`.
 
+The screenshot monitor socket lives under `XDG_RUNTIME_DIR` (or `/tmp`) rather
+than the build tree, so capture works when the checkout is on WSL drvfs/v9fs or
+another filesystem that cannot host Unix sockets. Set
+`DUETOS_SCREENSHOT_MONITOR_SOCK` only when an explicit alternate native socket
+path is required. If ImageMagick is unavailable, both scripts use the shared
+stdlib-only `tools/qemu/ppm-to-png.py` converter.
+
 `screenshot-theme.sh` takes an **absolute** GRUB menu-entry index into
 `boot/grub/grub.cfg` (counting `menuentry` blocks from 0) and pins it
 as the default in a one-shot sidecar ISO, so no keystroke navigation is

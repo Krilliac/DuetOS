@@ -10,11 +10,12 @@ boot the kernel.
 
 ## Safety boundary
 
-`tools/image/build-removable-media.sh` accepts an output **file**.  It rejects
-Linux device paths, Windows `PhysicalDrive` paths, and block-device nodes even
-when `--force` is present.  Construction happens in a sibling temporary
-directory and the completed image is renamed into place, so a failed host tool
-does not leave a partial artifact at the requested path.
+`tools/image/build-removable-media.sh` accepts an output **regular file**. It
+rejects Linux device paths, Windows `PhysicalDrive` paths, block-device nodes,
+directories, symlinks, and every other existing non-regular target even when
+`--force` is present. Construction happens in a sibling temporary directory
+and the completed image is renamed into place, so a failed host tool does not
+leave a partial artifact at the requested path.
 
 The tool does not:
 
