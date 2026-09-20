@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract: an AP never logs while its GSBASE is stale.
+"""Contract: an AP never enters shared kernel machinery with stale GSBASE.
 
 WHY
     LoadGdtForCurrent's `mov %ax, %gs` reloads GS's hidden base from the
@@ -18,8 +18,12 @@ WHY
     regression" — so every boot reported a regression that was really just
     this gap. Observed count: 69 per boot.
 
-    Pins the invariant: the GDT-load step re-establishes GSBASE itself, so no
-    logging can occur between the two.
+    The GDT-load step now re-establishes GSBASE itself, closing that window.
+    A second gap remained before CPUHP: ApEntryFromTrampoline called
+    CpuhpBringUp while GSBASE was still unset, and its first spinlock's
+    lockdep bookkeeping called CurrentCpu four times. Pin both boundaries:
+    install GSBASE from the already-validated PerCpu before CPUHP, then
+    restore it again immediately after the GDT load clears the hidden base.
 """
 
 from __future__ import annotations
@@ -32,6 +36,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SMP = (ROOT / "kernel/arch/x86_64/smp.cpp").read_text(encoding="utf-8")
 CPUHP = (ROOT / "kernel/cpu/cpuhp.cpp").read_text(encoding="utf-8")
 PERCPU = (ROOT / "kernel/cpu/percpu.cpp").read_text(encoding="utf-8")
+PROFILE = (ROOT / "tools/test/profile-boot-smoke.sh").read_text(encoding="utf-8")
+BOCHS = (ROOT / "tools/test/bochs-smoke.sh").read_text(encoding="utf-8")
+CTEST = (ROOT / "tools/test/ctest-boot-smoke.sh").read_text(encoding="utf-8")
+WORKFLOW = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
 
 
 def fn_body(src: str, signature: str) -> str:
@@ -61,6 +69,33 @@ class GdtStepRestoresGsBase(unittest.TestCase):
         # does not shift. Its write is idempotent.
         self.assertIn("CpuhpStartGsBase", SMP)
         self.assertIn("CpuhpState::StartingGsBase", SMP)
+
+
+class EntryInstallsGsBaseBeforeCpuhp(unittest.TestCase):
+    def test_validated_percpu_is_installed_before_cpuhp_locking(self) -> None:
+        body = fn_body(SMP, 'extern "C" [[noreturn]] void ApEntryFromTrampoline(')
+        pcpu = body.index("cpu::PerCpu* const pcpu")
+        gs = body.index("WriteMsrGsBase", pcpu)
+        kgs = body.index("WriteMsrKernelGsBase", pcpu)
+        bringup = body.index("CpuhpBringUp", pcpu)
+        self.assertLess(pcpu, gs)
+        self.assertLess(gs, bringup)
+        self.assertLess(kgs, bringup)
+        self.assertIn("WriteMsrGsBase(reinterpret_cast<u64>(pcpu))", body)
+        self.assertIn("WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu))", body)
+
+    def test_bsp_asserts_ap_bringup_needed_no_fallback(self) -> None:
+        body = fn_body(SMP, "u64 SmpStartAps()")
+        self.assertIn("CurrentCpuGsbaseFallbackCount", body)
+        self.assertIn("AP bring-up required stale GSBASE fallback", body)
+
+    def test_boot_gates_reject_any_future_fallback_warning(self) -> None:
+        marker = "CurrentCpu LAPIC-resolved a non-kernel GSBASE"
+        for source in (PROFILE, BOCHS, CTEST):
+            self.assertIn(marker, source)
+
+    def test_contract_is_wired_into_hosted_structural_ci(self) -> None:
+        self.assertIn("python3 tools/test/test-ap-gsbase-window-contract.py", WORKFLOW)
 
 
 class TheHazardStillExists(unittest.TestCase):

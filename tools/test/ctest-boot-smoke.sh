@@ -325,6 +325,7 @@ forbidden=(
     "PANIC"
     "DUETOS CRASH"
     "triple fault"
+    "CurrentCpu LAPIC-resolved a non-kernel GSBASE"
     # Regression guard: winkill
     # (real-world MSVC windows-kill.exe) runs start-to-finish
     # as a ring-3 process and exits via ExitProcess(0). Any

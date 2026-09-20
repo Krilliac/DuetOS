@@ -1188,6 +1188,16 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id, u32 attempt_token
         ParkUnadmittedAp(attempt_token);
     }
 
+    // CPUHP's first operation acquires g_state_lock, whose lockdep/owner
+    // bookkeeping calls CurrentCpu(). Install the already-validated PerCpu
+    // pointer before entering that shared machinery so the AP never needs
+    // LAPIC-based stale-GS recovery during normal bring-up. CpuhpStartGdt
+    // repeats both writes immediately after LoadGdtForCurrent because that
+    // descriptor load clears the hidden GS base; the duplication closes two
+    // distinct windows and is intentionally idempotent.
+    WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
+    WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
+
     // Walk the bring-up chain through every registered startup. The
     // chain runs the historic AP init steps (GDT/GS-base/IDT/CR4/
     // syscall-MSRs/LAPIC/topology) in their original numeric order;
@@ -1614,6 +1624,10 @@ u64 SmpStartAps()
         // publication above before entering SchedEnterOnAp.
         __atomic_store_n(&g_ap_admission[cpu_id], ApGateValue(attempt_token, kApGateRun), __ATOMIC_RELEASE);
     }
+
+    const u64 gsbase_fallbacks = cpu::CurrentCpuGsbaseFallbackCount();
+    KASSERT_WITH_VALUE(gsbase_fallbacks == 0, "arch/smp", "AP bring-up required stale GSBASE fallback",
+                       gsbase_fallbacks);
 
     // Structural sentinel — ONE atomic SerialWrite so it stays a
     // clean, greppable line. The klog tally below renders as

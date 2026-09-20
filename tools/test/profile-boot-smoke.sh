@@ -181,6 +181,7 @@ forbidden=(
     "RETIRED import uses unrecognized API-set provider"
     "UNRESOLVED kernel-provider ordinal import"
     "FAIL retired kernel32 export unavailable"
+    "CurrentCpu LAPIC-resolved a non-kernel GSBASE"
     # Any kernel selftest failure, from any subsystem. The kernel has
     # ~370 "[<tag>] FAIL" sites across 105 selftests and none of them
     # could fail a boot before this entry: expected[] names only a
