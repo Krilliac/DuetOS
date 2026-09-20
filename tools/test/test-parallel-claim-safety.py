@@ -193,7 +193,8 @@ class RepoHarness:
 
     def remote_oid(self, branch: str = "claude/test") -> str:
         line = self._run(
-            ["git", "ls-remote", "--heads", str(self.remote), f"refs/heads/{branch}"]
+            ["git", "ls-remote", "--heads", str(self.remote), f"refs/heads/{branch}"],
+            cwd=self.root,
         ).stdout.strip()
         return line.split()[0]
 

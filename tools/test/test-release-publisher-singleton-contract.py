@@ -52,7 +52,7 @@ class ReleasePublisherSingletonContract(unittest.TestCase):
 
     def test_build_main_publisher_has_the_complete_gate(self) -> None:
         trigger = self.build.split("\non:\n", 1)[1].split("\nconcurrency:\n", 1)[0]
-        self.assertIn("branches: [main, claude/**]", trigger)
+        self.assertIn("branches: [main, claude/**, codex/**]", trigger)
 
         publisher = job_block(self.build, "publish-rolling")
         self.assertIn(
