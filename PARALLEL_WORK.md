@@ -747,13 +747,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T15:59:15Z
 - **Status**: COMPLETED @ 2026-09-20T17:07:18Z
 
-### [ACTIVE] codex-duetos-runtime-dll-fixture
+### [DONE] codex-duetos-runtime-dll-fixture
 - **Session**: `DESKTOP-950K3EI-534`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `userland/libs/customdll2/customdll2.c,tools/build/build-customdll2.sh`
 - **Description**: Make runtime LoadLibrary fixture import kernel32 and expose a verdict export
 - **Claimed**: 2026-09-20T16:00:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:07:27Z
 
 ### [ACTIVE] codex-duetos-runtime-dll-loader-api
 - **Session**: `DESKTOP-950K3EI-187`
