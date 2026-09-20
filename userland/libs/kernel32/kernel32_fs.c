@@ -1,4 +1,5 @@
 #include "kernel32_internal.h"
+#include "createprocess_cmdline.h"
 
 /* ------------------------------------------------------------------
  * File system — Find*, Copy/Move/Delete, dir ops.
@@ -160,11 +161,10 @@ static unsigned long Win32PathPrefixA(const char* in, char* out, unsigned long o
      * length prefixes (case-insensitive, separator-agnostic). */
     for (;;)
     {
-        const char a = in[ci];
-        const char b = in[ci + 1];
-        const char c = in[ci + 2];
-        const char d = in[ci + 3];
-        if ((a == '\\' || a == '/') && (b == '\\' || b == '/') && c == '?' && (d == '\\' || d == '/'))
+        /* Keep the checks short-circuiting: preloading all four bytes reads
+         * beyond the terminator for a one- to three-byte relative path. */
+        if ((in[ci] == '\\' || in[ci] == '/') && (in[ci + 1] == '\\' || in[ci + 1] == '/') && in[ci + 2] == '?' &&
+            (in[ci + 3] == '\\' || in[ci + 3] == '/'))
             ci += 4;
         else
             break;
@@ -211,10 +211,10 @@ static unsigned long Win32PathPrefixA(const char* in, char* out, unsigned long o
  * `pattern_out` may be NULL — caller doesn't care about the
  * pattern (no glob filtering). Cap at 63 bytes so the kernel's
  * path-copy buffer doesn't truncate the leaf. */
-static void NormalizePathA(const char* in, char* out, unsigned long out_cap, char* pattern_out, unsigned long pat_cap)
+static int NormalizePathA(const char* in, char* out, unsigned long out_cap, char* pattern_out, unsigned long pat_cap)
 {
     if (out_cap == 0)
-        return;
+        return 0;
 
     unsigned long prefix_len = 0;
     unsigned long consumed = Win32PathPrefixA(in, out, out_cap, &prefix_len);
@@ -235,6 +235,7 @@ static void NormalizePathA(const char* in, char* out, unsigned long out_cap, cha
         ++ci;
         ++in;
     }
+    const int complete = (in[0] == '\0');
     out[ci] = '\0';
     if (pattern_out && pat_cap > 0)
         pattern_out[0] = '\0';
@@ -253,6 +254,7 @@ static void NormalizePathA(const char* in, char* out, unsigned long out_cap, cha
             out[last_sep] = '\0';
         }
     }
+    return complete;
 }
 
 static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap, char* pattern_out,
@@ -524,10 +526,11 @@ __declspec(dllexport) BOOL FindClose(HANDLE h)
  * lpApplicationName, or extracted from the first token of
  * lpCommandLine if lpApplicationName is NULL).
  *
- * Path translation: forward slashes pass through verbatim. The
- * kernel-side helper accepts only "/disk/<idx>/<rest>" paths;
- * Windows-native "C:\\..." paths need Windows→Unix translation
- * which is its own slice.
+ * The selected executable is normalized through the shared Win32 path
+ * translator, so drive prefixes and backslashes reach the kernel as
+ * "/disk/<idx>/<rest>". The current spawn ABI still carries no arguments,
+ * environment block, current directory, or creation flags; only launch-path
+ * correctness is claimed here.
  *
  * On success, fills lpProcessInformation->hProcess /
  * dwProcessId / hThread / dwThreadId. hThread is collapsed to 0
@@ -648,10 +651,11 @@ __declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* l
     (void)dwCreationFlags;
     (void)lpEnvironment;
     (void)lpCurrentDirectory;
-    const char* path = lpApplicationName;
-    if (path == (const char*)0)
-        path = lpCommandLine; // first arg of cmdline ≈ executable
-    if (path == (const char*)0)
+    char executable[128];
+    if (!Win32ExtractCreateProcessExecutableA(lpApplicationName, lpCommandLine, executable, sizeof(executable)))
+        return 0;
+    char path[128];
+    if (!NormalizePathA(executable, path, sizeof(path), (char*)0, 0) || path[0] == '\0')
         return 0;
 
     struct ProcessSpawnStdio_t bundle;
@@ -695,23 +699,13 @@ __declspec(dllexport) BOOL CreateProcessW(const wchar_t16* lpApplicationName, wc
                                           void* lpProcessInformation)
 {
     (void)lpCurrentDirectory;
-    /* Strip wide → ASCII (low byte). 128-byte cap matches the
-     * kernel-side path buffer. */
+    /* The v0 spawn ABI accepts an ASCII executable path only. Parse the
+     * module token without truncation; trailing arguments remain unsupported
+     * until that ABI carries a full command line. */
     char path[128];
-    for (unsigned i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    const wchar_t16* src = lpApplicationName;
-    if (src == (const WCHAR_t*)0)
-        src = lpCommandLine;
-    if (src == (const WCHAR_t*)0)
+    if (!Win32ExtractCreateProcessExecutableW((const unsigned short*)lpApplicationName,
+                                              (const unsigned short*)lpCommandLine, path, sizeof(path)))
         return 0;
-    unsigned i = 0;
-    while (i + 1 < sizeof(path) && src[i] != 0)
-    {
-        path[i] = (char)(src[i] & 0xFF);
-        ++i;
-    }
-    path[i] = '\0';
     return CreateProcessA(path, (char*)0, lpProcessAttributes, lpThreadAttributes, bInheritHandles, dwCreationFlags,
                           lpEnvironment, (const char*)0, lpStartupInfo, lpProcessInformation);
 }

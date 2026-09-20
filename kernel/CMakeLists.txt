@@ -1240,6 +1240,7 @@ duetos_embed_blob(generated_kernel32_dll.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c"
     EXTRA_DEPS
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_internal.h"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/createprocess_cmdline.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_interlocked.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_strmem.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_env.c"

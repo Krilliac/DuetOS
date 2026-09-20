@@ -1012,6 +1012,7 @@ endif()
 
 add_host_test(wild_address)
 add_host_test(disk_path)
+add_host_test(createprocess_cmdline)
 add_host_test(fat32_write_bounds)
 add_host_test(nospec)
 add_host_test(saturating)

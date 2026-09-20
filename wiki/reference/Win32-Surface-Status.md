@@ -534,9 +534,13 @@ syscall routing shows up immediately.
   divergent unwinder.
 - File: `LockFile`, `UnlockFile`, `LockFileEx`, `UnlockFileEx`
   return success without locking (no FS write contention in v0)
-- Process: `CreateProcessA/W` is structurally working but
-  `STARTUPINFO` is mostly ignored; `CreateProcessAsUserW` always
-  fails (no token impersonation)
+- Process: `CreateProcessA/W` extracts a bounded quoted or unquoted executable
+  token when `lpApplicationName == NULL`, honours an explicit application name,
+  and normalizes Win32 drive/backslash paths before spawning. The v0 spawn ABI
+  still gives the child only its program name (no trailing command-line args,
+  environment block, current directory, or creation flags); `STARTUPINFO` is
+  otherwise mostly ignored. `CreateProcessAsUserW` always fails (no token
+  impersonation).
 - IPC: anonymous pipes (`CreatePipe`) + named pipes
   (`CreateNamedPipeA/W`, `CreateFileA/W` against `\\.\pipe\NAME`,
   `ConnectNamedPipe`, `DisconnectNamedPipe`, `WaitNamedPipeA/W`)
