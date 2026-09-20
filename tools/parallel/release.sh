@@ -47,7 +47,8 @@ MERGE_FLAG="${2:-}"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a Git worktree"
 BRANCH="$(git symbolic-ref --quiet --short HEAD)" || die "detached HEAD cannot release a claim"
-[[ "$BRANCH" == claude/* ]] || die "release from the claude/* branch that owns the claim"
+[[ "$BRANCH" == claude/* || "$BRANCH" == codex/* ]] || \
+    die "release from the claude/* or codex/* branch that owns the claim"
 GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)" || \
     die "cannot resolve the Git common directory"
 HOLDER_PID="$$"

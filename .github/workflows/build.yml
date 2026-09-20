@@ -19,7 +19,7 @@
 name: build
 on:
   push:
-    branches: [main, claude/**]
+    branches: [main, claude/**, codex/**]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'

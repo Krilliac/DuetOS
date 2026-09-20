@@ -2,7 +2,7 @@
 
 ## MANDATORY — read before touching any files
 
-DuetOS may be worked on by several concurrent Claude Code sessions at once.
+DuetOS may be worked on by several concurrent Claude Code or Codex sessions at once.
 Follow this protocol every session, no exceptions. The scripts in
 `tools/parallel/` automate the bookkeeping; the shared coordinator file
 `PARALLEL_WORK.md` (tracked at the repo root) is the source of truth for who
@@ -10,7 +10,7 @@ owns what.
 
 > **Visibility note.** A successful claim is not local bookkeeping:
 > `claim.sh` makes a signed coordinator-only commit, performs a normal
-> (non-force) push of the current `claude/*` branch, and verifies that the
+> (non-force) push of the current `claude/*` or `codex/*` branch, and verifies that the
 > remote branch head is exactly that commit before reporting success. The
 > scripts never auto-rebase a dirty integration tree. They fetch the current
 > remote session branch and fail if it is not already an ancestor of `HEAD`;
@@ -39,7 +39,7 @@ tools/parallel/claim.sh sched        "kernel/sched/*"          "MLFQ runqueue wo
 ```
 
 This will:
-- Require that you already be on the intended `claude/*` session branch.
+- Require that you already be on the intended `claude/*` or `codex/*` session branch.
 - Permit unrelated implementation files to remain dirty, but require
   `PARALLEL_WORK.md` itself to be clean.
 - Normalize comma/whitespace-delimited scopes and reject intersections with

@@ -314,7 +314,9 @@ git rebase origin/main                         # if behind, rebase
 **Rules:**
 - **Never** commit or push while behind the base branch. Always rebase first.
 - Prefer upstream changes for auto-generated content (`<!-- AUTO:* -->` sections) once docs automation is introduced.
-- All Claude-driven development happens on the feature branch the harness checked out for the session (`claude/<slug>`). Merge target is `main`. Do not push to other branches without explicit permission.
+- Agent-driven development happens on the feature branch checked out for the
+  session (`claude/<slug>` for Claude Code, `codex/<slug>` for Codex). Merge
+  target is `main`. Do not push to other branches without explicit permission.
 
 ## Pre-commit checks
 

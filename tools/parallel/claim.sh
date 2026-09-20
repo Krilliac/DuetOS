@@ -44,8 +44,8 @@ DESCRIPTION="${3:-No description provided}"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a Git worktree"
 CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD)" || die "detached HEAD cannot publish a claim"
-[[ "$CURRENT_BRANCH" == claude/* ]] || \
-    die "claim from a claude/* branch; create/switch the branch before carrying dirty work"
+[[ "$CURRENT_BRANCH" == claude/* || "$CURRENT_BRANCH" == codex/* ]] || \
+    die "claim from a claude/* or codex/* branch; create/switch the branch before carrying dirty work"
 BRANCH="$CURRENT_BRANCH"
 GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)" || \
     die "cannot resolve the Git common directory"
