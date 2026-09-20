@@ -12,7 +12,12 @@
 #include "core/panic.h"
 #include "drivers/storage/block.h"
 #include "fs/fat32_write_bounds.h"
+#include "fs/file_route.h"
+#include "fs/mount.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "log/klog.h"
+#include "proc/process.h"
 
 namespace duetos::fs::fat32
 {
@@ -30,6 +35,69 @@ inline void Zero(void* p, u64 n)
     auto* b = static_cast<volatile u8*>(p);
     for (u64 i = 0; i < n; ++i)
         b[i] = 0;
+}
+
+void ExerciseEmptyFileRoute(const Volume* volume, u32 volume_idx)
+{
+    using ::duetos::core::Process;
+
+    char mount_point[16]{};
+    if (!VfsFormatDiskMountPoint(volume_idx, mount_point, sizeof(mount_point)))
+        ::duetos::core::Panic("fs/route", "empty-file route mount-point format failed");
+    const MountId mount_id = VfsMount(mount_point, FsType::Fat32, volume_idx);
+    if (mount_id == kInvalidMountId)
+        ::duetos::core::Panic("fs/route", "empty-file route fixture mount failed");
+
+    char path[32]{};
+    u32 path_len = 0;
+    while (mount_point[path_len] != '\0')
+    {
+        path[path_len] = mount_point[path_len];
+        ++path_len;
+    }
+    constexpr char kLeaf[] = "/RTEMPTY.TXT";
+    for (u32 i = 0; i < sizeof(kLeaf); ++i)
+        path[path_len + i] = kLeaf[i];
+
+    static Process process{};
+    process.pid = 0xF32EU;
+    process.root = RamfsTrustedRoot();
+    for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        process.win32_handles[i].kind = Process::FsBackingKind::None;
+        process.win32_handles[i].ramfs_node = nullptr;
+        process.win32_handles[i].fat32_volume_idx = 0;
+        process.win32_handles[i].cursor = 0;
+    }
+
+    const u64 handle = routing::CreateForProcess(&process, path, nullptr, 0);
+    if (handle == u64(-1))
+        ::duetos::core::Panic("fs/route", "create-empty route failed");
+    u64 size = 1;
+    if (routing::FstatForProcess(&process, handle, &size) != 0 || size != 0)
+        ::duetos::core::Panic("fs/route", "create-empty route initial size mismatch");
+    constexpr char kPayload[] = "empty-grow";
+    constexpr u64 kPayloadLen = sizeof(kPayload) - 1;
+    if (routing::WriteForProcess(&process, handle, kPayload, kPayloadLen) != kPayloadLen)
+        ::duetos::core::Panic("fs/route", "create-empty route first write failed");
+    if (routing::FstatForProcess(&process, handle, &size) != 0 || size != kPayloadLen)
+        ::duetos::core::Panic("fs/route", "create-empty route grown size mismatch");
+    if (routing::SeekForProcess(&process, handle, 0, /*SET=*/0) != 0)
+        ::duetos::core::Panic("fs/route", "create-empty route readback seek failed");
+    char readback[kPayloadLen]{};
+    if (routing::ReadForProcess(&process, handle, readback, sizeof(readback)) != sizeof(readback))
+        ::duetos::core::Panic("fs/route", "create-empty route readback count mismatch");
+    for (u64 i = 0; i < sizeof(readback); ++i)
+    {
+        if (readback[i] != kPayload[i])
+            ::duetos::core::Panic("fs/route", "create-empty route payload mismatch");
+    }
+    routing::CloseForProcess(&process, handle);
+    if (!Fat32DeleteAtPath(volume, "/RTEMPTY.TXT"))
+        ::duetos::core::Panic("fs/route", "create-empty route cleanup failed");
+    if (!VfsUmount(mount_id))
+        ::duetos::core::Panic("fs/route", "create-empty route unmount failed");
+    arch::SerialWrite("[fs/route-selftest] empty-create-write PASS (RAM FAT32)\n");
 }
 } // namespace
 
@@ -783,9 +851,72 @@ void Fat32OwnershipSelfTest()
         SerialWrite("[fs/fat32] format-self-test FAILED: oversized append mutated EMPTY.BIN\n");
         return;
     }
+    if (Fat32WriteAtPath(fmt_v, "/EMPTY.BIN", 1, &empty_byte, 1) != -1 ||
+        Fat32WriteAtPath(fmt_v, "/EMPTY.BIN", 0, &empty_byte, internal::kFat32MaxFileSize + 1) != -1 ||
+        !Fat32LookupPath(fmt_v, "/EMPTY.BIN", &empty_after) || empty_after.size_bytes != 0 ||
+        empty_after.first_cluster >= 2)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: rejected empty write mutated EMPTY.BIN\n");
+        return;
+    }
+    constexpr u8 kEmptyWrite[] = {'e', 'm', 'p', 't', 'y', '-', 'g', 'r', 'o', 'w'};
+    if (Fat32WriteAtPath(fmt_v, "/EMPTY.BIN", 0, kEmptyWrite, sizeof(kEmptyWrite)) !=
+        static_cast<i64>(sizeof(kEmptyWrite)))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: write into EMPTY.BIN\n");
+        return;
+    }
+    DirEntry empty_grown;
+    u8 empty_grown_bytes[sizeof(kEmptyWrite)]{};
+    if (!Fat32LookupPath(fmt_v, "/EMPTY.BIN", &empty_grown) || empty_grown.size_bytes != sizeof(kEmptyWrite) ||
+        empty_grown.first_cluster < 2 ||
+        Fat32ReadAt(fmt_v, &empty_grown, 0, empty_grown_bytes, sizeof(empty_grown_bytes)) !=
+            static_cast<i64>(sizeof(empty_grown_bytes)))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: EMPTY.BIN growth metadata/readback\n");
+        return;
+    }
+    for (u64 i = 0; i < sizeof(kEmptyWrite); ++i)
+    {
+        if (empty_grown_bytes[i] != kEmptyWrite[i])
+        {
+            SerialWrite("[fs/fat32] format-self-test FAILED: EMPTY.BIN payload mismatch\n");
+            return;
+        }
+    }
     if (!Fat32DeleteInRoot(fmt_v, "EMPTY.BIN"))
     {
         SerialWrite("[fs/fat32] format-self-test FAILED: delete EMPTY.BIN\n");
+        return;
+    }
+
+    if (Fat32CreateInRoot(fmt_v, "ZEROGROW.BIN", nullptr, 0) != 0 ||
+        Fat32TruncateInRoot(fmt_v, "ZEROGROW.BIN", sizeof(kEmptyWrite)) != static_cast<i64>(sizeof(kEmptyWrite)))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: grow clusterless file by truncate\n");
+        return;
+    }
+    DirEntry zero_grown;
+    u8 zero_grown_bytes[sizeof(kEmptyWrite)]{};
+    if (!Fat32LookupPath(fmt_v, "/ZEROGROW.BIN", &zero_grown) || zero_grown.size_bytes != sizeof(kEmptyWrite) ||
+        zero_grown.first_cluster < 2 ||
+        Fat32ReadAt(fmt_v, &zero_grown, 0, zero_grown_bytes, sizeof(zero_grown_bytes)) !=
+            static_cast<i64>(sizeof(zero_grown_bytes)))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: truncated empty file metadata/readback\n");
+        return;
+    }
+    for (u64 i = 0; i < sizeof(zero_grown_bytes); ++i)
+    {
+        if (zero_grown_bytes[i] != 0)
+        {
+            SerialWrite("[fs/fat32] format-self-test FAILED: truncated empty file not zero-filled\n");
+            return;
+        }
+    }
+    if (!Fat32DeleteInRoot(fmt_v, "ZEROGROW.BIN"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: delete ZEROGROW.BIN\n");
         return;
     }
 
@@ -893,6 +1024,7 @@ void Fat32OwnershipSelfTest()
         SerialWrite("[fs/fat32] format-self-test FAILED: stale stage mislabeled or mutated\n");
         return;
     }
+    ExerciseEmptyFileRoute(fmt_v, fmt_idx);
     SerialWrite(
         "[fs/fat32] format-self-test OK (probe + owned + oversized append + stage-first replacement recovery)\n");
 

@@ -920,8 +920,6 @@ i64 TruncateInDir(const Volume* v, u32 dir_cluster, const char* name, u64 new_si
         static u8 zeros[1024];
         VZero(zeros, sizeof(zeros));
         u64 remain = grow;
-        if (e->first_cluster < 2)
-            return -1; // can't grow a truly-empty file in v0
         while (remain > 0)
         {
             const u64 chunk = (remain < sizeof(zeros)) ? remain : sizeof(zeros);
@@ -1105,14 +1103,23 @@ i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, c
     const DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1;
+
+    const u32 old_size = e->size_bytes;
+    if (offset > old_size)
+        return -1;
     if (e->first_cluster < 2)
-        return -1; // zero-byte files not supported in v0
+    {
+        // A valid empty FAT32 file has no cluster yet. At offset zero this is
+        // exactly an append, whose existing path allocates/zeros the first
+        // cluster and patches both the cluster and size fields under the
+        // caller's serialized FAT32 write guard.
+        if (old_size != 0 || offset != 0)
+            return -1;
+        return AppendInDir(v, dir_cluster, name, buf, len);
+    }
 
     const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
     if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
-        return -1;
-    const u32 old_size = e->size_bytes;
-    if (offset > old_size)
         return -1;
 
     u64 write_end = 0;

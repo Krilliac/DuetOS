@@ -1499,11 +1499,9 @@ void SelfTest()
     // Under a hypervisor, the routing self-test's open / read /
     // seek / write / close cycles each round-trip through the
     // emulated NVMe / AHCI front-end and dominate the boot smoke
-    // wall clock. The probe + open-handle path above already
-    // proved the routing layer can resolve "/disk/0/HELLO.TXT" to
-    // a backing volume and surface its size; the rest of the test
-    // is FAT32 R/W coverage that's better served by Fat32SelfTest
-    // (also gated under emulator) on bare metal.
+    // wall clock. The ownership self-test already covers FAT32
+    // read/write on a RAM-backed format fixture; the full physical-
+    // disk route remains a bare-metal-only diagnostic.
     if (::duetos::arch::IsEmulator())
     {
         SerialWrite("[fs/route-selftest] emulator detected — skipping read/write phases (probe only)\n");
@@ -1512,10 +1510,7 @@ void SelfTest()
 
     // Synthesise a thin Process so we can exercise the per-process
     // handle table without dragging the spawn pipeline in. Only the
-    // fields the routing layer reads are populated — `pid` for log
-    // breadcrumbs, the win32_handles array for slot allocation, and
-    // `root` so the ramfs fallback path doesn't deref nullptr if
-    // the test ever exercises it.
+    // fields the routing layer reads are populated.
     static Process s_test_proc = {};
     s_test_proc.pid = 0xFEEDU;
     s_test_proc.root = RamfsTrustedRoot();
