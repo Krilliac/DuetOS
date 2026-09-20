@@ -306,11 +306,11 @@ void DesktopIconsPaint()
             ++n;
         }
         label[n] = '\0';
-        while (n > 1u && ChromeTextMeasure(ChromeTextRole::Caption, label) > kCellW)
+        while (n > 1u && ChromeTextMeasure(ChromeTextRole::Caption, label, ChromeTextWeight::Bold) > kCellW)
         {
             label[--n] = '\0';
         }
-        const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, label);
+        const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, label, ChromeTextWeight::Bold);
         const u32 lx = cell_x + (kCellW > lw ? (kCellW - lw) / 2u : 0u);
         const u32 ly = tile_y + tile_side + 6u;
         ChromeTextDraw(ChromeTextRole::Caption, lx, ly, label, kWhite, kLabelChip, ChromeTextWeight::Bold);

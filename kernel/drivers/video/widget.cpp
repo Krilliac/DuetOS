@@ -2723,14 +2723,15 @@ void WindowDrawAllOrdered()
             // stuck onto the chrome instead of part of it. Unfocused
             // windows drop to `--ink-2`. Flat palettes keep white.
             const bool aurora_type = ThemeCurrent().glass_alpha != 0 && ThemeTactilityEffective();
+            const ChromeTextWeight title_weight = is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
             const u32 title_ink = aurora_type ? (is_active ? 0x00EEF3F9u : 0x00A7B3C2u) : 0x00FFFFFFu;
             ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, title_ink,
-                           drawn.colour_title, is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
+                           drawn.colour_title, title_weight);
             // Measure the title via the chrome-text dispatcher so
             // the subtitle anchor below is correct under both TTF
             // and bitmap themes (n * cell_w would only be right
             // for the bitmap path).
-            title_pixel_w = ChromeTextMeasure(ChromeTextRole::Title, g_windows[h].title);
+            title_pixel_w = ChromeTextMeasure(ChromeTextRole::Title, g_windows[h].title, title_weight);
         }
         // Subtitle slot (Duet-era "context tag"). Painted in a
         // dimmer ink immediately right of the title with a 12-px

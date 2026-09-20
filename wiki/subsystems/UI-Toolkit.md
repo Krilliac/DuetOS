@@ -80,6 +80,7 @@ and the compositor flushes through damage rects.
 | [`font8x8.h`](../../kernel/drivers/video/font8x8.h) / `.cpp` | 8×8 bitmap ASCII font (case-folded lowercase → uppercase). |
 | [`ttf.h`](../../kernel/drivers/video/ttf.h) / `.cpp` | TrueType parser. |
 | [`ttf_raster.h`](../../kernel/drivers/video/ttf_raster.h) / `.cpp` | TrueType outline rasteriser. |
+| [`chrome_text.h`](../../kernel/drivers/video/chrome_text.h) / `.cpp` | Role- and weight-aware chrome text dispatch. Measurement selects the same regular or bold face as painting so centred labels and title/subtitle anchors use the rendered advance. |
 | [`svg.h`](../../kernel/drivers/video/svg.h) / `.cpp` | Static SVG parser for icons + the device theme spec. |
 | [`wallpaper.h`](../../kernel/drivers/video/wallpaper.h) / `.cpp` | Desktop wallpaper renderer. |
 | [`theme.h`](../../kernel/drivers/video/theme.h) / `.cpp` | Theme engine — colour palettes, chrome look, cursor colours. |

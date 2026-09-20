@@ -992,6 +992,10 @@ add_host_test(blend)
 add_host_test(shadow_atlas)
 add_host_test(motion_math)
 add_host_test(chrome_text_measure)
+add_host_test(app_label_alignment)
+target_sources(test_app_label_alignment PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/app_widgets/app_label.cpp"
+)
 add_host_test(app_palette)
 add_host_test(app_widgets_bounds)
 add_host_test(app_widgets_paint)

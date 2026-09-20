@@ -154,7 +154,7 @@ void ChromeTextDraw(ChromeTextRole role, u32 x, u32 y, const char* text, u32 fg,
     }
 }
 
-u32 ChromeTextMeasure(ChromeTextRole role, const char* text)
+u32 ChromeTextMeasure(ChromeTextRole role, const char* text, ChromeTextWeight weight)
 {
     if (text == nullptr || text[0] == '\0')
     {
@@ -163,7 +163,7 @@ u32 ChromeTextMeasure(ChromeTextRole role, const char* text)
 
     const RoleSpec& spec = Spec(role);
 
-    if (UseTtf(ChromeTextWeight::Regular))
+    if (UseTtf(weight))
     {
         // Route through TtfMeasureString for the real per-glyph
         // advance sum. Pen advance matches what TtfDrawString will
@@ -171,7 +171,15 @@ u32 ChromeTextMeasure(ChromeTextRole role, const char* text)
         // hit-rects and centring math line up with the rasterizer
         // even on wide ASCII ("Mwwwwww..." runs) that the previous
         // chars * px * 0.55 estimate mis-sized by ~+15%.
-        const TtfFont* font = TtfChromeFontGet();
+        const TtfFont* font = nullptr;
+        if (weight == ChromeTextWeight::Bold)
+        {
+            font = TtfChromeBoldGet();
+        }
+        if (font == nullptr)
+        {
+            font = TtfChromeFontGet();
+        }
         if (font != nullptr)
         {
             return TtfMeasureString(*font, text, spec.ttf_px);

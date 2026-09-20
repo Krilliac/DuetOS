@@ -38,7 +38,7 @@ struct RoleSpec
 
 constexpr RoleSpec kRoles[] = {
     {72U, 8U}, // Display
-    {16U, 2U}, // Title
+    {13U, 2U}, // Title
     {13U, 1U}, // Body
     {11U, 1U}, // Caption
 };
@@ -87,23 +87,21 @@ int main()
     // when TtfChromeFontGet() returns nullptr. Catches a regression in
     // that branch's constant or order-of-operations.
     EXPECT_TRUE(MeasureTtfEstimate(72U, "X") == (1U * 72U * 55U) / 100U);                       // 39
-    EXPECT_TRUE(MeasureTtfEstimate(16U, "Sign in") == (7U * 16U * 55U) / 100U);                 // 61
+    EXPECT_TRUE(MeasureTtfEstimate(13U, "Sign in") == (7U * 13U * 55U) / 100U);                 // 50
     EXPECT_TRUE(MeasureTtfEstimate(13U, "OK") == (2U * 13U * 55U) / 100U);                      // 14
     EXPECT_TRUE(MeasureTtfEstimate(11U, "default: admin / admin") == (22U * 11U * 55U) / 100U); // 133
 
-    // ----- Monotonicity: Display > Title > Body > Caption for same string. -----
-    // Mirrors the kernel self-test (§3, check #3) but proves the
-    // monotone-in-role property STRICTLY for strings whose char
-    // count yields distinct quotients across the role table. "X"
-    // alone trips truncation collisions at small sizes, so use a
-    // multi-character probe.
+    // ----- Role ordering: Display > Title == Body > Caption. -----
+    // Title and Body intentionally share the 13 px em size; hierarchy comes
+    // from weight, not a larger title face. Use a multi-character probe so
+    // integer truncation does not collapse Caption into the 13 px roles.
     const char* probe = "Hello";
     const uint32_t d = MeasureTtfEstimate(kRoles[0].ttf_px, probe); // Display 72
-    const uint32_t t = MeasureTtfEstimate(kRoles[1].ttf_px, probe); // Title   16
+    const uint32_t t = MeasureTtfEstimate(kRoles[1].ttf_px, probe); // Title   13
     const uint32_t b = MeasureTtfEstimate(kRoles[2].ttf_px, probe); // Body    13
     const uint32_t c = MeasureTtfEstimate(kRoles[3].ttf_px, probe); // Caption 11
     EXPECT_TRUE(d > t);
-    EXPECT_TRUE(t > b);
+    EXPECT_EQ(t, b);
     EXPECT_TRUE(b > c);
 
     // ----- Empty string is always 0 on both paths. -----
