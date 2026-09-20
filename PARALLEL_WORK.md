@@ -674,3 +674,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Select the active static or DHCP interface for TCP and UDP sockets
 - **Claimed**: 2026-09-20T13:13:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-routing-l2
+- **Session**: `DESKTOP-950K3EI-233`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/net/tcp.cpp,kernel/net/net_smoke.cpp`
+- **Description**: Resolve TCP and forced smoke traffic through configured static IPv4 routes
+- **Claimed**: 2026-09-20T13:47:08Z
+- **Status**: IN PROGRESS
