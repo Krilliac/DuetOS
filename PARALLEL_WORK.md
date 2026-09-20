@@ -666,3 +666,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Route remaining DNS NTP wget and status surfaces through active IPv4 configuration
 - **Claimed**: 2026-09-20T13:08:28Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-socket-routing
+- **Session**: `Codex-DuetOS-Campaign-20260920`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/net/socket.cpp`
+- **Description**: Select the active static or DHCP interface for TCP and UDP sockets
+- **Claimed**: 2026-09-20T13:13:47Z
+- **Status**: IN PROGRESS
