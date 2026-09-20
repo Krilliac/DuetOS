@@ -35,7 +35,9 @@ ISO_IMAGE="${BUILD_DIR}/duetos.iso"
 OUT_PNG="${1:-${BUILD_DIR}/screen.png}"
 SERIAL_LOG="${BUILD_DIR}/screen.serial.log"
 PPM_OUT="${BUILD_DIR}/screen.ppm"
-MON_SOCK="${BUILD_DIR}/qemu-mon.sock"
+# Keep the monitor on a native Unix filesystem. WSL drvfs/v9fs mounts cannot
+# bind AF_UNIX sockets, and QEMU treats that optional-control failure as fatal.
+MON_SOCK="${DUETOS_SCREENSHOT_MONITOR_SOCK:-${XDG_RUNTIME_DIR:-/tmp}/duetos-qemu-mon-$$.sock}"
 SETTLE="${DUETOS_SETTLE:-5}"
 
 if [[ ! -f "${ISO_IMAGE}" ]]; then
@@ -349,58 +351,14 @@ if [[ ! -f "${PPM_OUT}" ]]; then
     exit 1
 fi
 
-# Convert PPM -> PNG. Prefer ImageMagick; fall back to a tiny pure-
-# python converter so this script works without extra deps.
+# Convert PPM -> PNG. Prefer ImageMagick; fall back to the shared pure-Python
+# converter so this script works without extra host packages.
 if command -v magick >/dev/null 2>&1; then
     magick "${PPM_OUT}" "${OUT_PNG}"
 elif command -v convert >/dev/null 2>&1; then
     convert "${PPM_OUT}" "${OUT_PNG}"
 else
-    python3 - <<PY "${PPM_OUT}" "${OUT_PNG}"
-import sys, zlib, struct
-ppm_path, png_path = sys.argv[1:3]
-with open(ppm_path, "rb") as f:
-    data = f.read()
-# Parse P6 header: magic, width, height, maxval, pixel data.
-def take(d, i):
-    while i < len(d) and d[i:i+1] in (b" ", b"\t", b"\r", b"\n"):
-        i += 1
-    if i < len(d) and d[i:i+1] == b"#":
-        while i < len(d) and d[i:i+1] != b"\n":
-            i += 1
-        return take(d, i + 1)
-    return i
-i = 0
-assert data[0:2] == b"P6"
-i += 2
-tokens = []
-for _ in range(3):
-    i = take(data, i)
-    j = i
-    while j < len(data) and data[j:j+1] not in (b" ", b"\t", b"\r", b"\n"):
-        j += 1
-    tokens.append(int(data[i:j]))
-    i = j
-i += 1  # single whitespace after maxval
-W, H, _ = tokens
-raw = data[i:]
-# Build PNG.
-def chunk(tag, payload):
-    return (struct.pack(">I", len(payload)) + tag + payload +
-            struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
-sig = b"\x89PNG\r\n\x1a\n"
-ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-rows = []
-for y in range(H):
-    row = raw[y*W*3:(y+1)*W*3]
-    rows.append(b"\x00" + row)
-idat = zlib.compress(b"".join(rows), 9)
-with open(png_path, "wb") as f:
-    f.write(sig)
-    f.write(chunk(b"IHDR", ihdr))
-    f.write(chunk(b"IDAT", idat))
-    f.write(chunk(b"IEND", b""))
-PY
+    python3 "${SCRIPT_DIR}/ppm-to-png.py" "${PPM_OUT}" "${OUT_PNG}"
 fi
 
 echo "screenshot: ${OUT_PNG}"
