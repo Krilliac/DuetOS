@@ -422,20 +422,44 @@ void TelemetrySelfTest()
     for (u32 i = 0; i < second.core_count; ++i)
         ok = ok && (second.core_busy_pct[i] <= 100);
 
-    // A poll that lands inside the minimum window must NOT consume the
-    // window. This is the regression that made the Task Manager rail
-    // read "CPU 0% / Core 0 0%" beside a graph showing 59%: prev_* was
-    // overwritten on every call, so with a caller painting faster than
-    // the 100Hz tick the window never grew past one tick and
-    // (dt - di)/dt could only ever land on 0% or 100%. Asserting the
-    // snapshot survives pins the fix without stalling boot for 250ms.
-    const u64 prev_snapshot = win.prev_total[0];
-    const TelemetryCpuUsage third = TelemetryCpuUsageSample(win);
-    ok = ok && (win.prev_total[0] == prev_snapshot);
-    // Nothing has yet been measured over a qualifying window, so there
-    // is no held reading to repeat and the sample must decline to
-    // report rather than hand back a quantised one.
-    ok = ok && !third.valid;
+    // A short poll must NOT consume the window. Use a synthetic
+    // counter-regression state rather than assuming two live samples always
+    // execute within 250 ms: a debug VM under host contention can legitimately
+    // cross that boundary and used to make this self-test fail despite correct
+    // sampler behavior. CounterDelta deliberately clamps regressions to zero,
+    // so the large future bias deterministically drives the short-window path.
+    TelemetryCpuWindow short_win = {};
+    short_win.seeded = true;
+    constexpr u64 kSyntheticFutureBias = 1ULL << 32;
+    for (u32 id = 0; id < cpu.core_count; ++id)
+    {
+        u64 total = 0;
+        u64 idle = 0;
+        if (!::duetos::sched::SchedStatsReadCpu(id, &total, &idle))
+            continue;
+        short_win.prev_total[id] = total + kSyntheticFutureBias;
+        short_win.prev_idle[id] = idle + kSyntheticFutureBias;
+    }
+    const u64 prev_total_snapshot = short_win.prev_total[0];
+    const u64 prev_idle_snapshot = short_win.prev_idle[0];
+    const TelemetryCpuUsage short_empty = TelemetryCpuUsageSample(short_win);
+    ok = ok && (short_win.prev_total[0] == prev_total_snapshot);
+    ok = ok && (short_win.prev_idle[0] == prev_idle_snapshot);
+    ok = ok && !short_empty.valid;
+
+    // Once a trustworthy value exists, the same short path must repeat that
+    // held value without consuming the synthetic window.
+    short_win.held_valid = true;
+    short_win.held_aggregate_pct = 37;
+    short_win.held_core_valid[0] = true;
+    short_win.held_core_pct[0] = 41;
+    const TelemetryCpuUsage short_held = TelemetryCpuUsageSample(short_win);
+    ok = ok && short_held.valid;
+    ok = ok && (short_held.aggregate_busy_pct == 37);
+    ok = ok && short_held.core_valid[0];
+    ok = ok && (short_held.core_busy_pct[0] == 41);
+    ok = ok && (short_win.prev_total[0] == prev_total_snapshot);
+    ok = ok && (short_win.prev_idle[0] == prev_idle_snapshot);
 
     // --- memory ---
     const TelemetryMemory mem = TelemetryMemorySample();
