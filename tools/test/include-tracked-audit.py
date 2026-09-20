@@ -46,6 +46,7 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -59,10 +60,36 @@ INCLUDE_ROOTS = ("", "kernel", "tests/host", "tools/vmm/src", "tools/pkg/src")
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*"([^"]+)"')
 
 
+def run_git(root, args, input_text=None):
+    commands = [(["git", "-C", root] + args, root)]
+    windows_git = shutil.which("git.exe")
+    wslpath = shutil.which("wslpath")
+    if os.name != "nt" and windows_git and wslpath:
+        converted = subprocess.run(
+            [wslpath, "-w", root], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+        if converted.returncode == 0 and converted.stdout.strip():
+            commands.append(([windows_git, "-C", converted.stdout.strip()] + args, converted.stdout.strip()))
+
+    last = None
+    for command, _ in commands:
+        last = subprocess.run(
+            command,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if last.returncode == 0:
+            return last
+    return last
+
+
 def git_lines(root, args):
-    out = subprocess.run(
-        ["git", "-C", root] + args, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    out = run_git(root, args)
+    if out is None:
+        return []
     return [ln for ln in out.stdout.splitlines() if ln]
 
 
@@ -74,14 +101,9 @@ def ignored_set(root, candidates):
     # One batched `check-ignore` instead of one process per path.
     if not candidates:
         return set()
-    proc = subprocess.run(
-        ["git", "-C", root, "check-ignore", "--stdin"],
-        input="\n".join(sorted(candidates)) + "\n",
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    proc = run_git(root, ["check-ignore", "--stdin"], "\n".join(sorted(candidates)) + "\n")
+    if proc is None:
+        return set()
     return {ln for ln in proc.stdout.splitlines() if ln}
 
 

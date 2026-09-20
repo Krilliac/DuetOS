@@ -84,8 +84,15 @@ if [[ ! -f "${VERDICT_SCRIPT}" ]]; then
     echo "FAIL: strict boot-verdict verifier missing: ${VERDICT_SCRIPT}" >&2
     exit 1
 fi
-if ! command -v python3 > /dev/null 2>&1; then
-    echo "SKIP: python3 not installed (required by strict boot-verdict verifier)" >&2
+PYTHON_BIN=""
+for candidate in python3 python; do
+    if command -v "${candidate}" > /dev/null 2>&1 && "${candidate}" -c 'import sys' > /dev/null 2>&1; then
+        PYTHON_BIN="$(command -v "${candidate}")"
+        break
+    fi
+done
+if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "SKIP: python3/python not installed (required by strict boot-verdict verifier)" >&2
     exit 2
 fi
 
@@ -415,7 +422,7 @@ fail=0
 missing=()
 
 VERDICT_OUTPUT=""
-if ! VERDICT_OUTPUT=$(python3 "${VERDICT_SCRIPT}" "${SERIAL_LOG}" \
+if ! VERDICT_OUTPUT=$("${PYTHON_BIN}" "${VERDICT_SCRIPT}" "${SERIAL_LOG}" \
     --expected-cpus "${EXPECTED_CPUS}" \
     --completion-sentinel "[smoke] profile=${PROFILE} complete" \
     --expected-exit-class pass); then
