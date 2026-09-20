@@ -850,3 +850,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize user-task address-space admission with process teardown
 - **Claimed**: 2026-09-20T19:12:34Z
 - **Status**: COMPLETED @ 2026-09-20T19:42:15Z
+
+### [ACTIVE] codex-duetos-fat32-empty-write
+- **Session**: `DESKTOP-950K3EI-537`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/fs/fat32_write.cpp,kernel/fs/fat32_selftest.cpp,kernel/fs/file_route.cpp`
+- **Description**: Support native writes and growth from clusterless empty FAT32 files
+- **Claimed**: 2026-09-20T19:42:34Z
+- **Status**: IN PROGRESS
