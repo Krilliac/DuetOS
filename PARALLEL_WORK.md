@@ -675,13 +675,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T13:13:47Z
 - **Status**: COMPLETED @ 2026-09-20T14:41:54Z
 
-### [ACTIVE] codex-duetos-static-routing-l2
+### [DONE] codex-duetos-static-routing-l2
 - **Session**: `DESKTOP-950K3EI-233`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/net/tcp.cpp,kernel/net/net_smoke.cpp`
 - **Description**: Resolve TCP and forced smoke traffic through configured static IPv4 routes
 - **Claimed**: 2026-09-20T13:47:08Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:41:58Z
 
 ### [ACTIVE] codex-duetos-static-routing-l2-api
 - **Session**: `DESKTOP-950K3EI-1030`
