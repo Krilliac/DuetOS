@@ -842,3 +842,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Diagnose and make the comprehensive Win32 stress tail complete deterministically
 - **Claimed**: 2026-09-20T19:03:02Z
 - **Status**: COMPLETED @ 2026-09-20T19:08:10Z
+
+### [ACTIVE] codex-duetos-sched-as-admission
+- **Session**: `DESKTOP-950K3EI-1983`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/sched/sched.cpp`
+- **Description**: Serialize user-task address-space admission with process teardown
+- **Claimed**: 2026-09-20T19:12:34Z
+- **Status**: IN PROGRESS
