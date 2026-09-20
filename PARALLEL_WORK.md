@@ -762,3 +762,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pass the actual mapped base into runtime import binding so ASLR-loaded DLLs patch their own IAT correctly
 - **Claimed**: 2026-09-20T16:31:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-runtime-dll-sxs-api
+- **Session**: `DESKTOP-950K3EI-1192`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/loader/sxs_dll.cpp`
+- **Description**: Pass the actual mapped base through the side-by-side DLL import resolver call
+- **Claimed**: 2026-09-20T16:35:25Z
+- **Status**: IN PROGRESS
