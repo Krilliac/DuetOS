@@ -237,6 +237,18 @@ EOF
     echo "[run.sh] smoke profile=${SMOKE_PROFILE} iso=${SMOKE_ISO}" >&2
 fi
 
+# Interactive/debug boots deliberately keep QEMU alive in the shutdown
+# runstate so a debugger can inspect registers after a triple fault.  Smoke
+# profiles and sidecar-ISO harnesses have a different lifecycle: the guest's
+# TestExit writes to isa-debug-exit and QEMU must be allowed to terminate.
+# Keeping -no-shutdown on those paths leaves QEMU paused in `shutdown` until
+# the outer timeout, even though the guest already reported a completed smoke.
+SHUTDOWN_ARGS=(-no-shutdown)
+if [[ -n "${SMOKE_PROFILE}" || -n "${DUETOS_SMOKE_ISO:-}" ]]; then
+    SHUTDOWN_ARGS=()
+    echo "[run.sh] smoke profile: allowing QEMU to exit on guest TestExit" >&2
+fi
+
 # Scratch NVMe + SATA images. GPT-formatted raw files with one
 # FAT32 data partition seeded by make-gpt-image.py. The FS self-
 # tests mutate these images (fatwrite / fatappend / fatnew); an
@@ -579,7 +591,7 @@ QEMU_ARGS=(
     # `-gdb` flag (which is QEMU's hypervisor-side debugger).
     -serial   "${DUETOS_GDB_TRANSPORT_QEMU}"
     "${REBOOT_ARGS[@]}"
-    -no-shutdown
+    "${SHUTDOWN_ARGS[@]}"
     -d        int,cpu_reset
     -D        qemu.log
     -debugcon "file:${MINIDUMP_FILE}"
@@ -651,7 +663,10 @@ QEMU_ARGS=(
 )
 
 if [[ -n "${TIMEOUT_SECS}" ]]; then
-    exec timeout --foreground --preserve-status --signal=TERM "${TIMEOUT_SECS}" \
+    # Do not preserve QEMU's status after timeout: QEMU handles SIGTERM and
+    # normally returns 0, which would turn a timed-out boot into a false pass.
+    # GNU timeout returns 124 on expiry and escalates if the child wedges.
+    exec timeout --foreground --signal=TERM --kill-after=5 "${TIMEOUT_SECS}" \
          qemu-system-x86_64 "${QEMU_ARGS[@]}" "$@"
 else
     exec qemu-system-x86_64 "${QEMU_ARGS[@]}" "$@"

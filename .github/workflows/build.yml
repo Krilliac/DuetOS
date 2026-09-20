@@ -141,6 +141,7 @@ jobs:
           python3 tools/test/test-profile-boot-verdict-integration.py
           python3 tools/test/test-smoke-profile-order.py
           python3 tools/test/test-browser-smoke-profile-contract.py
+          python3 tools/test/test-qemu-run-shutdown-contract.py
           python3 tools/test/test-service-boot-order.py
           python3 tools/test/test-smp-ap-handshake.py
           python3 tools/test/test-tlb-shootdown-contract.py
