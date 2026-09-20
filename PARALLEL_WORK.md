@@ -755,13 +755,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T16:00:29Z
 - **Status**: COMPLETED @ 2026-09-20T17:07:27Z
 
-### [ACTIVE] codex-duetos-runtime-dll-loader-api
+### [DONE] codex-duetos-runtime-dll-loader-api
 - **Session**: `DESKTOP-950K3EI-187`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/loader/pe_loader.cpp,kernel/loader/pe_loader.h`
 - **Description**: Pass the actual mapped base into runtime import binding so ASLR-loaded DLLs patch their own IAT correctly
 - **Claimed**: 2026-09-20T16:31:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:07:33Z
 
 ### [ACTIVE] codex-duetos-runtime-dll-sxs-api
 - **Session**: `DESKTOP-950K3EI-1192`
