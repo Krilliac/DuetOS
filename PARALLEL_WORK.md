@@ -699,13 +699,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T13:58:55Z
 - **Status**: COMPLETED @ 2026-09-20T14:42:09Z
 
-### [ACTIVE] codex-duetos-syscall-doc-sync
+### [DONE] codex-duetos-syscall-doc-sync
 - **Session**: `DESKTOP-950K3EI-1055`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `docs/sync-wiki.sh,tools/build/gen-syscall-doc.py`
 - **Description**: Preserve curated syscall ABI cells while adding newly generated rows
 - **Claimed**: 2026-09-20T14:07:17Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:42:13Z
 
 ### [ACTIVE] codex-duetos-ole32-warning
 - **Session**: `DESKTOP-950K3EI-1123`
