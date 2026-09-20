@@ -14,11 +14,16 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 LOCK_TIMEOUT="${DUETOS_PARALLEL_LOCK_TIMEOUT:-15}"
 LOCK_STALE_AFTER="${DUETOS_PARALLEL_LOCK_STALE_AFTER:-600}"
 
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON_BIN="python"
-else
+PYTHON_BIN=""
+for candidate in "${DUETOS_PYTHON:-}" python3 python; do
+    [[ -n "${candidate}" ]] || continue
+    command -v "${candidate}" >/dev/null 2>&1 || continue
+    if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        PYTHON_BIN="${candidate}"
+        break
+    fi
+done
+if [[ -z "${PYTHON_BIN}" ]]; then
     echo "Error: Python 3 is required for parallel release validation." >&2
     exit 1
 fi

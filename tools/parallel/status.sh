@@ -7,11 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON_BIN="python"
-else
+PYTHON_BIN=""
+for candidate in "${DUETOS_PYTHON:-}" python3 python; do
+    [[ -n "${candidate}" ]] || continue
+    command -v "${candidate}" >/dev/null 2>&1 || continue
+    if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        PYTHON_BIN="${candidate}"
+        break
+    fi
+done
+if [[ -z "${PYTHON_BIN}" ]]; then
     echo "Error: Python 3 is required for parallel status validation." >&2
     exit 1
 fi

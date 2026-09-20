@@ -48,6 +48,11 @@ This will:
 - Register the claim, make a signed coordinator-only commit, push normally,
   and verify the exact remote head.
 
+The helpers require Python 3.11 or newer. They probe each interpreter by
+executing it (rather than trusting `command -v`, which can resolve a broken
+WindowsApps alias under Git Bash); set `DUETOS_PYTHON` to an explicit working
+interpreter when the host has a non-standard layout.
+
 **Step 3 — Verify publication before proceeding.**
 Only the `Claimed and published:` verdict grants ownership. A conflict, dirty
 coordinator, remote divergence, commit failure, push rejection, or remote-head
