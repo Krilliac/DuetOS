@@ -874,3 +874,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Replace fake overlapped-result success with real x64 completion semantics and live CI coverage
 - **Claimed**: 2026-09-20T21:13:57Z
 - **Status**: COMPLETED @ 2026-09-20T22:46:02Z
+
+### [ACTIVE] codex-duetos-critical-gsbase-fallback
+- **Session**: `DESKTOP-950K3EI-1487`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/cpu/critical.cpp,kernel/cpu/critical.h`
+- **Description**: Prevent critical counter updates from bypassing CurrentCpu stale-GS recovery
+- **Claimed**: 2026-09-20T22:46:31Z
+- **Status**: IN PROGRESS
