@@ -650,3 +650,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make browser DNS and socket network-info consume static IPv4 state
 - **Claimed**: 2026-09-20T12:45:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-network-abi
+- **Session**: `Codex-DuetOS-Campaign-20260920`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/syscall/syscall.h,userland/libs/iphlpapi/iphlpapi.c`
+- **Description**: Expose active static or DHCP IPv4 configuration through the existing network-info ABI
+- **Claimed**: 2026-09-20T12:46:53Z
+- **Status**: IN PROGRESS
