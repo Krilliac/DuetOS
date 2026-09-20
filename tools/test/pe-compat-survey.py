@@ -82,11 +82,16 @@ def load_surface(repo):
     if not os.path.isdir(libs):
         sys.exit("error: no userland/libs under %s" % repo)
 
-    for entry in sorted(os.listdir(libs)):
+    entries = {
+        entry for entry in os.listdir(libs) if os.path.isdir(os.path.join(libs, entry))
+    }
+    for entry in sorted(entries):
         libdir = os.path.join(libs, entry)
-        if not os.path.isdir(libdir):
-            continue
-        is32 = entry.endswith("_32")
+        # A production x64 DLL can itself end in `_32` (for example
+        # `ws2_32`).  The i386 companion convention is an additional `_32`
+        # suffix, so only classify a directory as a companion when its
+        # unsuffixed sibling is present (`ws2_32_32` -> `ws2_32`).
+        is32 = entry.endswith("_32") and entry[:-3] in entries
         bits = 32 if is32 else 64
         base = entry[:-3] if is32 else entry
         dll = base.lower() + ".dll"
