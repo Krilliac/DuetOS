@@ -867,10 +867,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T20:38:18Z
 - **Status**: COMPLETED @ 2026-09-20T21:13:47Z
 
-### [ACTIVE] codex-duetos-overlapped-result
+### [DONE] codex-duetos-overlapped-result
 - **Session**: `DESKTOP-950K3EI-203`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `userland/libs/kernel32/kernel32_io.c,userland/libs/ntdll/ntdll_rtl.c,tools/build/build-kernel32-dll.sh,kernel/subsystems/win32/thunks_table.inc,kernel/subsystems/win32/thunk_retirement_wave1.inc,userland/libs/kernelbase/kernelbase.def,userland/apps/iocp_overlapped_smoke/iocp_overlapped_smoke.c,kernel/proc/ring3_smoke.cpp`
 - **Description**: Replace fake overlapped-result success with real x64 completion semantics and live CI coverage
 - **Claimed**: 2026-09-20T21:13:57Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T22:46:02Z
