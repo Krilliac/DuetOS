@@ -642,3 +642,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add generic boot-configured static IPv4 state for isolated bare-metal control
 - **Claimed**: 2026-09-20T12:26:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-network-consumers
+- **Session**: `Codex-DuetOS-Campaign-20260920`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/apps/browser.cpp,kernel/syscall/syscall.cpp`
+- **Description**: Make browser DNS and socket network-info consume static IPv4 state
+- **Claimed**: 2026-09-20T12:45:44Z
+- **Status**: IN PROGRESS
