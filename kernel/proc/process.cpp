@@ -3771,7 +3771,7 @@ i64 ProcessPeekStdin(Process* proc, void* dst_user, u64 cap)
     return static_cast<i64>(available);
 }
 
-void ProcessFeedStdinFocusChar(char c)
+bool ProcessStdinFocusActive()
 {
     Process* process = nullptr;
     {
@@ -3784,11 +3784,30 @@ void ProcessFeedStdinFocusChar(char c)
     }
     ScopedProcessRef focus_pin(process);
     if (!focus_pin)
-        return;
+        return false;
+
+    ScopedProcessRuntimeAccess runtime_access(process);
+    return static_cast<bool>(runtime_access);
+}
+
+bool ProcessFeedStdinFocusChar(char c)
+{
+    Process* process = nullptr;
+    {
+        sync::SpinLockGuard focus_guard(g_stdin_focus_lock);
+        if (g_stdin_focus != nullptr)
+        {
+            ProcessRetain(g_stdin_focus);
+            process = g_stdin_focus;
+        }
+    }
+    ScopedProcessRef focus_pin(process);
+    if (!focus_pin)
+        return false;
 
     ScopedProcessRuntimeAccess runtime_access(process);
     if (!runtime_access)
-        return;
+        return false;
 
     Process::StdinRing& r = process->stdin_ring;
     {
@@ -3803,6 +3822,7 @@ void ProcessFeedStdinFocusChar(char c)
     // Wake after publishing and after dropping the ring lock: waiter enqueue
     // and this wake serialize on the scheduler lock without a lock inversion.
     sched::WaitQueueWakeOne(&r.waiters);
+    return true;
 }
 
 bool ProcessSnapshotLinuxCwd(const Process* process, LinuxCwdSnapshot* snapshot_out)

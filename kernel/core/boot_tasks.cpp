@@ -1903,58 +1903,54 @@ void KbdReaderTask(void*)
             }
         }
 
-        // Feed the shell instead of writing to the console
-        // directly. ShellFeedChar echoes the char; Backspace
-        // rubs out the last input; Enter submits + dispatches.
-        // Mirror input chars to COM1 so a headless session is
-        // still diagnosable end-to-end.
-        //
-        // In parallel, push the cooked byte into the
-        // registered ring-3 stdin focus (if any) so userland
-        // binaries calling SYS_STDIN_READ see real keystrokes.
-        // The kernel-shell + ring-3-stdin paths are
-        // independent; a userland program that reads stdin
-        // doesn't suppress the kernel-shell line editor (and
-        // vice versa). v0 policy is intentionally permissive
-        // — the userland shell is a peer of the kernel shell,
-        // not a replacement. ProcessFeedStdinFocusChar reads
-        // the focus pointer + does the push under a single
-        // IRQ-off section so the reaper can't free the
-        // process between the two operations.
+        // Route normal cooked input to exactly one foreground consumer. A live
+        // ring-3 stdin focus (normally usershell) wins; otherwise the kernel
+        // shell remains the fallback. ProcessFeedStdinFocusChar pins and admits
+        // the focus before returning true, so there is no check-then-feed race.
+        // Emergency kernel chords are handled above this block and remain
+        // independent of foreground ownership.
         if (ev.code == kKeyBackspace)
         {
-            duetos::core::ShellBackspace();
-            duetos::core::ProcessFeedStdinFocusChar('\x7F');
+            if (!duetos::core::ProcessFeedStdinFocusChar('\x7F'))
+                duetos::core::ShellBackspace();
             dirty = true;
         }
         else if (ev.code == kKeyEnter)
         {
-            duetos::core::ShellSubmit();
-            duetos::core::ProcessFeedStdinFocusChar('\n');
+            if (!duetos::core::ProcessFeedStdinFocusChar('\n'))
+                duetos::core::ShellSubmit();
             dirty = true;
         }
         else if (ev.code == kKeyArrowUp)
         {
-            duetos::core::ShellHistoryPrev();
+            // usershell has no CSI parser yet. A foreground ring-3 owner still
+            // owns this key; consume it rather than corrupting its line with
+            // "[A" or mutating the background kernel-shell history.
+            if (!duetos::core::ProcessStdinFocusActive())
+                duetos::core::ShellHistoryPrev();
             dirty = true;
         }
         else if (ev.code == kKeyArrowDown)
         {
-            duetos::core::ShellHistoryNext();
+            if (!duetos::core::ProcessStdinFocusActive())
+                duetos::core::ShellHistoryNext();
             dirty = true;
         }
         else if (ev.code == kKeyTab)
         {
-            duetos::core::ShellTabComplete();
+            if (!duetos::core::ProcessFeedStdinFocusChar('\t'))
+                duetos::core::ShellTabComplete();
             dirty = true;
         }
         else if (ev.code >= 0x20 && ev.code <= 0x7E)
         {
             const char ch = static_cast<char>(ev.code);
-            duetos::core::ShellFeedChar(ch);
-            duetos::core::ProcessFeedStdinFocusChar(ch);
-            const char buf[2] = {ch, '\0'};
-            SerialWrite(buf);
+            if (!duetos::core::ProcessFeedStdinFocusChar(ch))
+            {
+                duetos::core::ShellFeedChar(ch);
+                const char buf[2] = {ch, '\0'};
+                SerialWrite(buf);
+            }
             dirty = true;
         }
     app_key_recompose:

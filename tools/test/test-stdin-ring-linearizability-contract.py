@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PROCESS_H = ROOT / "kernel" / "proc" / "process.h"
 PROCESS_CPP = ROOT / "kernel" / "proc" / "process.cpp"
+BOOT_TASKS_CPP = ROOT / "kernel" / "core" / "boot_tasks.cpp"
 
 
 def code_only(source: str) -> str:
@@ -167,6 +168,7 @@ class StdinRingLinearizabilityContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.process_h = PROCESS_H.read_text(encoding="utf-8")
         cls.process_cpp = PROCESS_CPP.read_text(encoding="utf-8")
+        cls.boot_tasks_cpp = BOOT_TASKS_CPP.read_text(encoding="utf-8")
 
     def test_ring_owns_lock_atomic_epoch_and_power_of_two_capacity(self) -> None:
         ring = type_body(self.process_h, r"struct\s+StdinRing")
@@ -194,7 +196,7 @@ class StdinRingLinearizabilityContractTests(unittest.TestCase):
         self.assertNotIn("ProcessRelease", advance)
 
     def test_producer_mutates_and_publishes_under_ring_lock_then_wakes(self) -> None:
-        feed = function_body(self.process_cpp, r"void\s+ProcessFeedStdinFocusChar")
+        feed = function_body(self.process_cpp, r"bool\s+ProcessFeedStdinFocusChar")
         locked = guarded_block(feed, "SpinLockGuard ring_guard(r.lock)")
         assert_ordered(
             self,
@@ -217,6 +219,8 @@ class StdinRingLinearizabilityContractTests(unittest.TestCase):
         assert_ordered(self, feed, "StdinAdvanceEventLocked(r)", "WaitQueueWakeOne(&r.waiters)")
         self.assertNotIn("arch::Cli", feed)
         self.assertNotIn("arch::Sti", feed)
+        self.assertIn("return false", feed)
+        self.assertIn("return true", feed)
 
     def test_reader_snapshots_or_drains_under_lock_and_conditionally_blocks(self) -> None:
         read = function_body(self.process_cpp, r"i64\s+ProcessReadStdinBlocking")
@@ -272,7 +276,7 @@ class StdinRingLinearizabilityContractTests(unittest.TestCase):
         self.assertNotIn("ProcessRelease", locked)
         assert_ordered(self, clear, "g_stdin_focus = nullptr", "ProcessRelease(detached)")
 
-        feed = function_body(self.process_cpp, r"void\s+ProcessFeedStdinFocusChar")
+        feed = function_body(self.process_cpp, r"bool\s+ProcessFeedStdinFocusChar")
         assert_ordered(
             self,
             feed,
@@ -281,6 +285,30 @@ class StdinRingLinearizabilityContractTests(unittest.TestCase):
             "ScopedProcessRef focus_pin(process)",
             "ScopedProcessRuntimeAccess runtime_access(process)",
         )
+
+    def test_keyboard_routes_normal_input_to_one_foreground_consumer(self) -> None:
+        keyboard = function_body(self.boot_tasks_cpp, r"void\s+KbdReaderTask")
+        self.assertGreaterEqual(keyboard.count("if (!duetos::core::ProcessFeedStdinFocusChar("), 4)
+        for kernel_consumer in (
+            "duetos::core::ShellBackspace()",
+            "duetos::core::ShellSubmit()",
+            "duetos::core::ShellHistoryPrev()",
+            "duetos::core::ShellHistoryNext()",
+            "duetos::core::ShellTabComplete()",
+            "duetos::core::ShellFeedChar(ch)",
+        ):
+            self.assertEqual(keyboard.count(kernel_consumer), 1)
+        self.assertNotRegex(
+            keyboard,
+            r"Shell(?:Backspace|Submit|FeedChar)\s*\([^;]*;\s*duetos::core::ProcessFeedStdinFocusChar",
+        )
+
+    def test_unsupported_arrows_do_not_corrupt_ring3_or_background_history(self) -> None:
+        keyboard = function_body(self.boot_tasks_cpp, r"void\s+KbdReaderTask")
+        self.assertEqual(keyboard.count("if (!duetos::core::ProcessStdinFocusActive())"), 2)
+        self.assertNotIn("ProcessFeedStdinFocusBytes", keyboard)
+        self.assertNotIn("kArrowUp", keyboard)
+        self.assertNotIn("kArrowDown", keyboard)
 
 
 if __name__ == "__main__":

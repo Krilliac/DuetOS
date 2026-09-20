@@ -2437,12 +2437,17 @@ i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap);
 /// without ever having to block first. Never blocks.
 i64 ProcessPeekStdin(Process* proc, void* dst_user, u64 cap);
 
-/// Push one cooked byte into whatever process currently owns the
-/// stdin focus. The global focus owns a Process reference; this call
-/// takes a temporary pin under the focus lock and admits the mutable
-/// runtime before touching its ring. No-op when no live focus is
-/// registered. This is the sole kbd-reader producer entry point.
-void ProcessFeedStdinFocusChar(char c);
+/// Return true when a live process owns stdin at the call's linearization
+/// point. KbdReaderTask uses this for non-text keys that usershell does not yet
+/// interpret, preventing them from mutating the background kernel-shell state.
+bool ProcessStdinFocusActive();
+
+/// Push one cooked byte into whatever process currently owns stdin. The global
+/// focus owns a Process reference; this call takes a temporary pin under the
+/// focus lock and admits the mutable runtime before touching its ring. Returns
+/// true only when the byte was published; callers use false to route the same
+/// key to the fallback kernel shell. This is the sole stdin-ring producer.
+bool ProcessFeedStdinFocusChar(char c);
 
 // =========================================================================
 // Linux current-working-directory helpers.

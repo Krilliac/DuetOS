@@ -28,18 +28,24 @@
 #
 # ENV: DUETOS_PRESET (x86_64-debug) DUETOS_SETTLE (20)
 #      DUETOS_BOOT_TIMEOUT (600)
+#      DUETOS_DISPLAY (vnc=127.0.0.1:0,to=99)
 set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 INSTANCE="${1:?usage: desktop-qmp-session.sh INSTANCE DRIVER_PY}"
 DRIVER_PY="${2:?usage: desktop-qmp-session.sh INSTANCE DRIVER_PY}"
+[[ "${INSTANCE}" =~ ^[A-Za-z0-9_-]+$ ]] || {
+    echo "error: INSTANCE must contain only letters, digits, '_' or '-'" >&2
+    exit 2
+}
 [[ -f "${DRIVER_PY}" ]] || { echo "error: driver not found: ${DRIVER_PY}" >&2; exit 2; }
 
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
 SETTLE="${DUETOS_SETTLE:-20}"
 BOOT_TIMEOUT="${DUETOS_BOOT_TIMEOUT:-600}"
 SMP="${DUETOS_SMP:-1}"
+DISPLAY_BACKEND="${DUETOS_DISPLAY:-vnc=127.0.0.1:0,to=99}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
@@ -49,7 +55,10 @@ PFX="${BUILD_DIR}/sess-${INSTANCE}"
 STAGE="${PFX}-stage"
 ISO="${PFX}.iso"
 SERIAL_LOG="${PFX}.serial.log"
-MON_SOCK="${PFX}-mon.sock"
+# AF_UNIX bind is unsupported on WSL's DrvFs mounts. Keep the short-lived
+# control socket in the Linux runtime directory while durable evidence remains
+# under build/${PRESET}. INSTANCE names keep concurrent sessions isolated.
+MON_SOCK="${XDG_RUNTIME_DIR:-/tmp}/duetos-${INSTANCE}-mon.sock"
 VARS="${PFX}-ovmf-vars.fd"
 NVME="${PFX}-nvme.img"
 SATA="${PFX}-sata.img"
@@ -93,7 +102,7 @@ rm -f "${MON_SOCK}" "${SERIAL_LOG}"
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${VARS}" \
-    -machine q35 -cpu max -m 512M -smp "${SMP}" -vga virtio -display none \
+    -machine q35 -cpu max -m 512M -smp "${SMP}" -vga virtio -display "${DISPLAY_BACKEND}" \
     -serial "file:${SERIAL_LOG}" -monitor "unix:${MON_SOCK},server,nowait" \
     -no-reboot -no-shutdown \
     -drive "file=${NVME},if=none,id=nvme0,format=raw" -device "nvme,serial=cafebabe,drive=nvme0" \
@@ -109,7 +118,7 @@ import runpy, sys, time
 mon, slog, boot_to, settle, driver = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 def logtext():
     try: return open(slog, "rb").read().decode("utf-8", "replace")
-    except FileNotFoundError: return ""
+    except OSError: return ""
 end = time.time() + boot_to
 while time.time() < end and "bringup-complete" not in logtext():
     time.sleep(0.5)

@@ -548,7 +548,7 @@ case SYS_VM_FREE: { return; }
             "ProcessRelease(detached)",
         )
 
-        feed = function_body(self.process_cpp, r"void\s+ProcessFeedStdinFocusChar")
+        feed = function_body(self.process_cpp, r"bool\s+ProcessFeedStdinFocusChar")
         require_order(
             feed,
             "SpinLockGuard focus_guard(g_stdin_focus_lock)",
