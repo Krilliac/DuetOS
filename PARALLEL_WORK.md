@@ -746,3 +746,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bind runtime-loaded DLL imports before publication and prove an imported export
 - **Claimed**: 2026-09-20T15:59:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-runtime-dll-fixture
+- **Session**: `DESKTOP-950K3EI-534`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `userland/libs/customdll2/customdll2.c,tools/build/build-customdll2.sh`
+- **Description**: Make runtime LoadLibrary fixture import kernel32 and expose a verdict export
+- **Claimed**: 2026-09-20T16:00:29Z
+- **Status**: IN PROGRESS
