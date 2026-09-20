@@ -51,10 +51,11 @@ enum class ChromeTextWeight : u8
 void ChromeTextDraw(ChromeTextRole role, u32 x, u32 y, const char* text, u32 fg, u32 bg,
                     ChromeTextWeight weight = ChromeTextWeight::Regular);
 
-/// Pixel width the string occupies at the role under the active theme.
-/// TTF path sums per-glyph advances; bitmap path returns
-/// strlen * scale * 8. Returns 0 for null/empty text.
-u32 ChromeTextMeasure(ChromeTextRole role, const char* text);
+/// Pixel width the string occupies at the role and weight under the active
+/// theme. TTF measurement uses the same regular/bold face that Draw selects;
+/// bitmap measurement returns strlen * scale * 8. Returns 0 for null/empty
+/// text.
+u32 ChromeTextMeasure(ChromeTextRole role, const char* text, ChromeTextWeight weight = ChromeTextWeight::Regular);
 
 /// Pixel height (ascent + descent) for the role under the active theme.
 u32 ChromeTextRoleHeight(ChromeTextRole role);
