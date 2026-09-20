@@ -740,36 +740,17 @@ typedef struct ClsidDllEntry
     const char* dll_name;
 } ClsidDllEntry;
 
-/* CLSID_ComTest — {1234ABCD-0001-0001-0001-000000000001}. Test
- * coclass served by comtest.dll for end-to-end COM smoke. */
-static const struct Guid kCLSID_ComTest = {
-    0x1234ABCDu, 0x0001u, 0x0001u, {0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u}};
-
-/* CLSID_MMDeviceEnumerator — {BCDE0395-E52F-467C-8E3D-C4579291692E}.
- * Audio device enumeration; served by mmdevapi.dll on Windows. */
-static const struct Guid kCLSID_MMDeviceEnumerator = {
-    0xBCDE0395u, 0xE52Fu, 0x467Cu, {0x8Eu, 0x3Du, 0xC4u, 0x57u, 0x92u, 0x91u, 0x69u, 0x2Eu}};
-
-/* CLSID_ShellLink — {00021401-0000-0000-C000-000000000046}.
- * Shell link objects; served by shell32.dll on Windows. */
-static const struct Guid kCLSID_ShellLink = {
-    0x00021401u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
-
-/* CLSID_TaskbarList — {56FDF344-FD6D-11D0-958A-006097C9A090}.
- * Taskbar list; served by shell32.dll on Windows. */
-static const struct Guid kCLSID_TaskbarList = {
-    0x56FDF344u, 0xFD6Du, 0x11D0u, {0x95u, 0x8Au, 0x00u, 0x60u, 0x97u, 0xC9u, 0xA0u, 0x90u}};
-
 static const ClsidDllEntry g_clsid_dll_table[] = {
-    {/* ComTest */ {0x1234ABCDu, 0x0001u, 0x0001u, {0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u}},
+    {/* CLSID_ComTest — end-to-end COM smoke coclass. */
+     {0x1234ABCDu, 0x0001u, 0x0001u, {0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u}},
      "comtest.dll"},
-    {/* MMDeviceEnumerator */
+    {/* CLSID_MMDeviceEnumerator — audio device enumeration. */
      {0xBCDE0395u, 0xE52Fu, 0x467Cu, {0x8Eu, 0x3Du, 0xC4u, 0x57u, 0x92u, 0x91u, 0x69u, 0x2Eu}},
      "mmdevapi.dll"},
-    {/* ShellLink */
+    {/* CLSID_ShellLink — shell link objects. */
      {0x00021401u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}},
      "shell32.dll"},
-    {/* TaskbarList */
+    {/* CLSID_TaskbarList — taskbar integration. */
      {0x56FDF344u, 0xFD6Du, 0x11D0u, {0x95u, 0x8Au, 0x00u, 0x60u, 0x97u, 0xC9u, 0xA0u, 0x90u}},
      "shell32.dll"},
 };
