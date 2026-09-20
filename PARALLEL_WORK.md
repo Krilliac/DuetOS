@@ -770,3 +770,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pass the actual mapped base through the side-by-side DLL import resolver call
 - **Claimed**: 2026-09-20T16:35:25Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-telemetry-selftest-stability
+- **Session**: `DESKTOP-950K3EI-1681`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/diag/telemetry.cpp`
+- **Description**: Make the CPU usage short-window self-test deterministic under slow or contended VMs
+- **Claimed**: 2026-09-20T16:43:44Z
+- **Status**: IN PROGRESS
