@@ -52,6 +52,7 @@ namespace
 {
 
 constexpr const char kCfgPath[] = "SESSION.CFG";
+constexpr const char kStagingPath[] = "SESSION.TMP";
 // Sized for: theme + every role window (two lines each) + the
 // system-knob keys (mouse / kbd / sound / tz / calc / imageview).
 // The 12-role window block alone is ~600 bytes; the knob block
@@ -743,23 +744,40 @@ void SessionRestoreApply()
     {
         return;
     }
-    fat::DirEntry e;
-    if (!fat::Fat32LookupPath(vol, kCfgPath, &e))
-    {
-        return; // first boot — no file yet
-    }
-    if (e.size_bytes == 0 || e.size_bytes > kPayloadCap)
-    {
-        KLOG_WARN("session", "SESSION.CFG size out of range, ignoring");
-        return;
-    }
     char buf[kPayloadCap];
-    const i64 n = fat::Fat32ReadAt(vol, &e, 0, buf, e.size_bytes);
-    if (n <= 0)
+    i64 n = -1;
+    bool from_staging = false;
+    const auto read_candidate = [&](const char* path) -> bool
     {
-        KLOG_WARN("session", "SESSION.CFG read failed");
-        return;
+        fat::DirEntry entry;
+        if (!fat::Fat32LookupPath(vol, path, &entry) || (entry.attributes & 0x10) != 0 || entry.size_bytes == 0 ||
+            entry.size_bytes > kPayloadCap)
+            return false;
+        n = fat::Fat32ReadAt(vol, &entry, 0, buf, entry.size_bytes);
+        return n == static_cast<i64>(entry.size_bytes);
+    };
+
+    // The final name remains authoritative while it exists: both names means
+    // the save stopped before crossing the delete-old commit boundary (or only
+    // staging cleanup failed). The staging name becomes the recovery source
+    // only when the final name is absent.
+    if (read_candidate(kCfgPath))
+    {
+        fat::DirEntry stale_staging;
+        if (fat::Fat32LookupPath(vol, kStagingPath, &stale_staging) && !fat::Fat32DeleteAtPath(vol, kStagingPath))
+        {
+            KLOG_WARN("session", "SESSION.TMP stale cleanup deferred");
+        }
     }
+    else if (read_candidate(kStagingPath))
+    {
+        from_staging = true;
+    }
+    else
+    {
+        return; // first boot, or neither candidate is a complete payload
+    }
+
     ApplyPayload(buf, static_cast<u64>(n));
     // Seed g_last_payload with what was just applied so the
     // first autosave doesn't write a no-op file.
@@ -768,7 +786,24 @@ void SessionRestoreApply()
         g_last_payload[i] = buf[i];
     }
     g_last_len = static_cast<u64>(n);
-    KLOG_INFO("session", "applied SESSION.CFG");
+    if (from_staging)
+    {
+        const fat::Fat32ReplaceStatus recovered =
+            fat::Fat32ReplaceAtPathPreservingOld(vol, kCfgPath, kStagingPath, buf, static_cast<u64>(n));
+        if (recovered == fat::Fat32ReplaceStatus::Committed ||
+            recovered == fat::Fat32ReplaceStatus::CommittedStagingRetained)
+        {
+            KLOG_INFO("session", "applied and promoted SESSION.TMP recovery");
+        }
+        else
+        {
+            KLOG_WARN("session", "applied SESSION.TMP; promotion deferred");
+        }
+    }
+    else
+    {
+        KLOG_INFO("session", "applied SESSION.CFG");
+    }
 }
 
 void SessionRestoreSave()
@@ -790,18 +825,19 @@ void SessionRestoreSave()
     {
         return; // unchanged; skip the FAT32 write
     }
-    // Replace the file: delete + create, since Fat32CreateAtPath
-    // doesn't truncate-on-exist.
-    fat::DirEntry pre;
-    if (fat::Fat32LookupPath(vol, kCfgPath, &pre))
+    const fat::Fat32ReplaceStatus replace = fat::Fat32ReplaceAtPathPreservingOld(vol, kCfgPath, kStagingPath, buf, len);
+    if (replace != fat::Fat32ReplaceStatus::Committed && replace != fat::Fat32ReplaceStatus::CommittedStagingRetained)
     {
-        fat::Fat32DeleteAtPath(vol, kCfgPath);
-    }
-    if (fat::Fat32CreateAtPath(vol, kCfgPath, buf, static_cast<u32>(len)) < 0)
-    {
-        KLOG_WARN("session", "SESSION.CFG create failed");
+        if (replace == fat::Fat32ReplaceStatus::OldPreserved)
+            KLOG_WARN("session", "SESSION.CFG save not staged; existing config preserved");
+        else if (replace == fat::Fat32ReplaceStatus::RecoveryStaged)
+            KLOG_WARN("session", "SESSION.CFG commit failed; SESSION.TMP recovery retained");
+        else
+            KLOG_WARN("session", "SESSION.CFG replacement rejected");
         return;
     }
+    if (replace == fat::Fat32ReplaceStatus::CommittedStagingRetained)
+        KLOG_WARN("session", "SESSION.CFG committed; SESSION.TMP cleanup deferred");
     for (u64 i = 0; i < len; ++i)
     {
         g_last_payload[i] = buf[i];

@@ -342,6 +342,27 @@ i64 Fat32WriteAtPath(const Volume* v, const char* path, u64 offset, const void* 
 /// I/O error.
 bool Fat32MkdirAtPath(const Volume* v, const char* path);
 
+enum class Fat32ReplaceStatus : u8
+{
+    Committed,
+    CommittedStagingRetained,
+    OldPreserved,
+    RecoveryStaged,
+    Invalid,
+};
+
+/// Replace one regular file using `staging_path` as a verified recovery copy.
+/// The staging and final paths must be distinct. The new bytes are created,
+/// read back byte-for-byte, and flushed at the staging name before the old
+/// final path is touched. If final creation/readback then fails,
+/// `RecoveryStaged` guarantees the verified staging file remains available.
+/// `OldPreserved` means failure occurred before the old final was removed.
+/// `CommittedStagingRetained` means the final is verified but cleanup of the
+/// duplicate staging name failed. The whole sequence holds Fat32Guard, so two
+/// callers cannot interleave their delete/create phases.
+Fat32ReplaceStatus Fat32ReplaceAtPathPreservingOld(const Volume* v, const char* final_path, const char* staging_path,
+                                                   const void* buf, u64 len);
+
 /// Rename a regular file from `src_path` to `dst_path`. v0
 /// implementation is a copy-then-delete: read the source's
 /// bytes via Fat32ReadFile, Fat32CreateAtPath the destination

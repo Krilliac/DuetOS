@@ -170,6 +170,7 @@ common_expected=(
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
     "[fs/vfs] self-test OK"
+    "[fs/fat32] format-self-test OK (probe + owned + oversized append + stage-first replacement recovery)"
 )
 forbidden=(
     "PANIC"
@@ -187,6 +188,7 @@ forbidden=(
     # silently. Fixed-string match is safe because nothing in kernel/
     # or userland/ emits "] FAILED" / "] FAILURE" to collide with.
     "] FAIL"
+    "self-test FAILED"
 )
 
 # `scenario` = the per-profile scenario output (NOT covered by the
@@ -411,6 +413,7 @@ selftest_sigs=(
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
     "[fs/vfs] self-test OK"
+    "[fs/fat32] format-self-test OK (probe + owned + oversized append + stage-first replacement recovery)"
 )
 
 # ----------------------------------------------------------------------

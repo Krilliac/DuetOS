@@ -829,6 +829,111 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path)
     return true;
 }
 
+Fat32ReplaceStatus Fat32ReplaceAtPathPreservingOld(const Volume* v, const char* final_path, const char* staging_path,
+                                                   const void* buf, u64 len)
+{
+    Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
+    if (v == nullptr || final_path == nullptr || staging_path == nullptr || (buf == nullptr && len != 0))
+        return Fat32ReplaceStatus::Invalid;
+
+    const char* final_key = final_path;
+    const char* staging_key = staging_path;
+    while (*final_key == '/')
+        ++final_key;
+    while (*staging_key == '/')
+        ++staging_key;
+    if (*final_key == '\0' || *staging_key == '\0' || NameIEqual(final_key, staging_key))
+        return Fat32ReplaceStatus::Invalid;
+
+    const auto file_matches = [&](const char* path) -> bool
+    {
+        DirEntry entry;
+        if (!Fat32LookupPath(v, path, &entry) || (entry.attributes & 0x10) != 0 || entry.size_bytes != len)
+            return false;
+        const auto* expected = static_cast<const u8*>(buf);
+        u8 verify[256];
+        u64 offset = 0;
+        while (offset < len)
+        {
+            const u64 take = (len - offset < sizeof(verify)) ? (len - offset) : sizeof(verify);
+            if (Fat32ReadAt(v, &entry, offset, verify, take) != static_cast<i64>(take))
+                return false;
+            for (u64 i = 0; i < take; ++i)
+            {
+                if (verify[i] != expected[offset + i])
+                    return false;
+            }
+            offset += take;
+        }
+        return true;
+    };
+
+    bool staging_ready = false;
+    DirEntry staging_probe;
+    if (Fat32LookupPath(v, staging_path, &staging_probe))
+    {
+        // A matching regular file is a previous post-delete recovery copy;
+        // resume its promotion. Never destroy a non-matching or directory
+        // staging object merely to make room: it may be the only durable copy.
+        if ((staging_probe.attributes & 0x10) != 0)
+        {
+            DirEntry final_probe;
+            return Fat32LookupPath(v, final_path, &final_probe) ? Fat32ReplaceStatus::OldPreserved
+                                                                : Fat32ReplaceStatus::Invalid;
+        }
+        if (!file_matches(staging_path))
+        {
+            DirEntry final_probe;
+            return Fat32LookupPath(v, final_path, &final_probe) ? Fat32ReplaceStatus::OldPreserved
+                                                                : Fat32ReplaceStatus::Invalid;
+        }
+        staging_ready = true;
+    }
+    else
+    {
+        if (Fat32CreateAtPath(v, staging_path, buf, len) != static_cast<i64>(len))
+            return Fat32ReplaceStatus::OldPreserved;
+        if (!file_matches(staging_path))
+        {
+            (void)Fat32DeleteAtPath(v, staging_path);
+            return Fat32ReplaceStatus::OldPreserved;
+        }
+        staging_ready = true;
+    }
+
+    if (!staging_ready)
+        return Fat32ReplaceStatus::OldPreserved;
+    // The recovery copy must reach stable storage before the old name is
+    // touched. Backends without a volatile cache implement Flush as a no-op.
+    if (drivers::storage::BlockDeviceFlush(v->block_handle) != 0)
+    {
+        (void)Fat32DeleteAtPath(v, staging_path);
+        return Fat32ReplaceStatus::OldPreserved;
+    }
+
+    DirEntry existing;
+    if (Fat32LookupPath(v, final_path, &existing))
+    {
+        if ((existing.attributes & 0x10) != 0 || !Fat32DeleteAtPath(v, final_path))
+            return Fat32ReplaceStatus::RecoveryStaged;
+    }
+
+    if (Fat32CreateAtPath(v, final_path, buf, len) != static_cast<i64>(len))
+        return Fat32ReplaceStatus::RecoveryStaged;
+    if (!file_matches(final_path))
+    {
+        (void)Fat32DeleteAtPath(v, final_path);
+        return Fat32ReplaceStatus::RecoveryStaged;
+    }
+    if (drivers::storage::BlockDeviceFlush(v->block_handle) != 0)
+        return Fat32ReplaceStatus::RecoveryStaged;
+
+    if (!Fat32DeleteAtPath(v, staging_path))
+        return Fat32ReplaceStatus::CommittedStagingRetained;
+    return Fat32ReplaceStatus::Committed;
+}
+
 namespace
 {
 // Bounce buffer cap for v0 rename (copy-then-delete). 256 KiB

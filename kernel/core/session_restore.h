@@ -5,7 +5,8 @@
 /*
  * Session persistence — theme + per-app window positions across
  * logins / reboots. Backing store is `SESSION.CFG` on the FAT32
- * root volume; format is plain ASCII `key=value\n` lines so it
+ * root volume; `SESSION.TMP` is the verified recovery copy used
+ * during replacement. Format is plain ASCII `key=value\n` lines so it
  * can be read with `dmesg f` style streaming or hand-edited from
  * recovery.
  *
@@ -46,9 +47,12 @@
 namespace duetos::core
 {
 
-/// Read SESSION.CFG and apply it: ThemeSet + WindowMoveTo for
-/// every recognised line. No-op if FAT32 isn't mounted or the
-/// file doesn't exist (first boot path). Call AFTER every app's
+/// Read SESSION.CFG when present; if the replacement crossed its delete-old
+/// boundary and the final name is absent, recover from SESSION.TMP. Apply the
+/// selected payload via ThemeSet + WindowMoveTo for every recognised line. A
+/// recovered staging file is promoted back to SESSION.CFG after its payload is
+/// applied. No-op if FAT32 isn't mounted or neither file exists.
+/// Call AFTER every app's
 /// initial WindowRegister and AFTER ThemeRegisterWindow has run
 /// for each role — otherwise WindowMoveTo silently no-ops on
 /// invalid handles. Idempotent — calling twice applies the same
@@ -56,16 +60,19 @@ namespace duetos::core
 void SessionRestoreApply();
 
 /// Snapshot the current theme + every registered role-window's
-/// bounds and write them to SESSION.CFG. Throttles internally:
+/// bounds and write them to SESSION.CFG through a verified, flushed
+/// SESSION.TMP staging copy. A pre-commit failure preserves the old final;
+/// a post-delete failure preserves the staging copy for boot recovery.
+/// Throttles internally:
 /// if the resulting payload matches the last successful save
 /// byte-for-byte, the FAT32 write is skipped (so the 1 Hz
 /// autosave doesn't beat the FAT mirror). Safe to call when no
 /// FAT32 volume is mounted (no-op).
 void SessionRestoreSave();
 
-/// Boot self-test. Saves a probe state under a temp file, reads
-/// it back, asserts the theme + a synthetic window position
-/// round-trip exactly, deletes the probe. Skipped if FAT32 is
+/// Boot self-test. Exercises the parser/formatter in memory without changing
+/// SESSION.CFG. The FAT32 format self-test separately verifies stage-first
+/// replacement failure on its private RAM-backed volume. Skipped if FAT32 is
 /// unavailable. Prints PASS / FAIL / SKIP to COM1.
 void SessionRestoreSelfTest();
 

@@ -69,6 +69,16 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
   its end with subtraction-first checked arithmetic and rejects anything
   beyond FAT32's 32-bit file-size ceiling before allocating or patching
   metadata.
+- **Stage-first config replacement** — `Fat32ReplaceAtPathPreservingOld`
+  creates the new bytes under a distinct staging name, reads them back,
+  flushes them, and only then removes the old final name. A failure before
+  that boundary leaves the old file untouched; a later create/readback
+  failure leaves the verified staging file for recovery. Session persistence
+  uses `SESSION.TMP` this way and promotes it back to `SESSION.CFG` on boot.
+  FAT32 still has no journal or atomic rename-over-existing primitive, so a
+  sudden power loss may leave both names. The final name remains authoritative
+  when both exist (the delete-old boundary was not crossed); staging is used
+  only when the final name is absent.
 - **No FAT16 / FAT12 fallback.** FAT32 only.
 - **exFAT lives in [`kernel/fs/exfat.{h,cpp}`](../../kernel/fs/exfat.h)**
   as a sibling backend — probe + root-directory walk are wired

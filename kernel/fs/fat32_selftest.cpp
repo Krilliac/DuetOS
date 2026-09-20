@@ -788,7 +788,113 @@ void Fat32OwnershipSelfTest()
         SerialWrite("[fs/fat32] format-self-test FAILED: delete EMPTY.BIN\n");
         return;
     }
-    SerialWrite("[fs/fat32] format-self-test OK (probe + owned + oversized append side-effect-free)\n");
+
+    // A replacement that cannot create its staging file must leave the
+    // last-known-good destination untouched. A directory at the staging path
+    // deterministically forces the create leg to fail without filling the RAM
+    // disk or relying on allocator pressure.
+    constexpr u8 kOldSession[] = "theme=classic\n";
+    constexpr u8 kNewSession[] = "theme=amber\n";
+    constexpr u64 kOldSessionLen = sizeof(kOldSession) - 1;
+    constexpr u64 kNewSessionLen = sizeof(kNewSession) - 1;
+    if (Fat32CreateAtPath(fmt_v, "/SAVE.CFG", kOldSession, kOldSessionLen) != static_cast<i64>(kOldSessionLen) ||
+        !Fat32MkdirAtPath(fmt_v, "/SAVE.TMP"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: replacement fixture setup\n");
+        return;
+    }
+    const Fat32ReplaceStatus replace =
+        Fat32ReplaceAtPathPreservingOld(fmt_v, "/SAVE.CFG", "/SAVE.TMP", kNewSession, kNewSessionLen);
+    DirEntry saved;
+    u8 saved_bytes[sizeof(kOldSession)]{};
+    const bool old_still_present =
+        Fat32LookupPath(fmt_v, "/SAVE.CFG", &saved) && saved.size_bytes == kOldSessionLen &&
+        Fat32ReadAt(fmt_v, &saved, 0, saved_bytes, kOldSessionLen) == static_cast<i64>(kOldSessionLen);
+    bool old_matches = old_still_present;
+    for (u64 i = 0; i < kOldSessionLen && old_matches; ++i)
+        old_matches = saved_bytes[i] == kOldSession[i];
+    if (replace != Fat32ReplaceStatus::OldPreserved || !old_matches)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: replacement destroyed old file on staging failure\n");
+        return;
+    }
+    if (!Fat32RmdirAtPath(fmt_v, "/SAVE.TMP"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: remove blocked staging fixture\n");
+        return;
+    }
+    const Fat32ReplaceStatus committed =
+        Fat32ReplaceAtPathPreservingOld(fmt_v, "/SAVE.CFG", "/SAVE.TMP", kNewSession, kNewSessionLen);
+    DirEntry replaced;
+    u8 replaced_bytes[sizeof(kNewSession)]{};
+    const bool new_present =
+        Fat32LookupPath(fmt_v, "/SAVE.CFG", &replaced) && replaced.size_bytes == kNewSessionLen &&
+        Fat32ReadAt(fmt_v, &replaced, 0, replaced_bytes, kNewSessionLen) == static_cast<i64>(kNewSessionLen);
+    bool new_matches = new_present;
+    for (u64 i = 0; i < kNewSessionLen && new_matches; ++i)
+        new_matches = replaced_bytes[i] == kNewSession[i];
+    DirEntry stale_stage;
+    if (committed != Fat32ReplaceStatus::Committed || !new_matches || Fat32LookupPath(fmt_v, "/SAVE.TMP", &stale_stage))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: verified replacement did not commit cleanly\n");
+        return;
+    }
+    // Simulate a crash after staging but before final creation: only the
+    // verified recovery name remains. A retry with the same bytes must promote
+    // it to the final name and remove the staging entry.
+    if (!Fat32DeleteAtPath(fmt_v, "/SAVE.CFG") ||
+        Fat32CreateAtPath(fmt_v, "/SAVE.TMP", kOldSession, kOldSessionLen) != static_cast<i64>(kOldSessionLen))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: staged-recovery fixture setup\n");
+        return;
+    }
+    const Fat32ReplaceStatus recovered =
+        Fat32ReplaceAtPathPreservingOld(fmt_v, "/SAVE.CFG", "/SAVE.TMP", kOldSession, kOldSessionLen);
+    DirEntry recovered_entry;
+    u8 recovered_bytes[sizeof(kOldSession)]{};
+    const bool recovered_present =
+        Fat32LookupPath(fmt_v, "/SAVE.CFG", &recovered_entry) && recovered_entry.size_bytes == kOldSessionLen &&
+        Fat32ReadAt(fmt_v, &recovered_entry, 0, recovered_bytes, kOldSessionLen) == static_cast<i64>(kOldSessionLen);
+    bool recovered_matches = recovered_present;
+    for (u64 i = 0; i < kOldSessionLen && recovered_matches; ++i)
+        recovered_matches = recovered_bytes[i] == kOldSession[i];
+    if (recovered != Fat32ReplaceStatus::Committed || !recovered_matches ||
+        Fat32LookupPath(fmt_v, "/SAVE.TMP", &stale_stage))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: staged recovery did not promote cleanly\n");
+        return;
+    }
+    if (!Fat32DeleteAtPath(fmt_v, "/SAVE.CFG"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: replacement fixture cleanup\n");
+        return;
+    }
+    // A stale staging file for a DIFFERENT payload is not proof that the
+    // requested save is recoverable. With no final file, the helper must reject
+    // it without deleting or relabeling it as the current recovery copy.
+    if (Fat32CreateAtPath(fmt_v, "/SAVE.TMP", kOldSession, kOldSessionLen) != static_cast<i64>(kOldSessionLen))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: stale-stage fixture setup\n");
+        return;
+    }
+    const Fat32ReplaceStatus stale =
+        Fat32ReplaceAtPathPreservingOld(fmt_v, "/SAVE.CFG", "/SAVE.TMP", kNewSession, kNewSessionLen);
+    DirEntry stale_entry;
+    u8 stale_bytes[sizeof(kOldSession)]{};
+    const bool stale_present =
+        Fat32LookupPath(fmt_v, "/SAVE.TMP", &stale_entry) && stale_entry.size_bytes == kOldSessionLen &&
+        Fat32ReadAt(fmt_v, &stale_entry, 0, stale_bytes, kOldSessionLen) == static_cast<i64>(kOldSessionLen);
+    bool stale_matches = stale_present;
+    for (u64 i = 0; i < kOldSessionLen && stale_matches; ++i)
+        stale_matches = stale_bytes[i] == kOldSession[i];
+    if (stale != Fat32ReplaceStatus::Invalid || !stale_matches ||
+        Fat32LookupPath(fmt_v, "/SAVE.CFG", &recovered_entry) || !Fat32DeleteAtPath(fmt_v, "/SAVE.TMP"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: stale stage mislabeled or mutated\n");
+        return;
+    }
+    SerialWrite(
+        "[fs/fat32] format-self-test OK (probe + owned + oversized append + stage-first replacement recovery)\n");
 
     // Retract the fixture from the registry now that the owned-adoption
     // assertions have passed. Critical: this self-test runs on EVERY
