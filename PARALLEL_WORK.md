@@ -658,3 +658,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Expose active static or DHCP IPv4 configuration through the existing network-info ABI
 - **Claimed**: 2026-09-20T12:46:53Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-network-surfaces
+- **Session**: `Codex-DuetOS-Campaign-20260920`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/shell/shell_wget.cpp,kernel/apps/settings_datetime.cpp,kernel/apps/netstatus.cpp`
+- **Description**: Route remaining DNS NTP wget and status surfaces through active IPv4 configuration
+- **Claimed**: 2026-09-20T13:08:28Z
+- **Status**: IN PROGRESS
