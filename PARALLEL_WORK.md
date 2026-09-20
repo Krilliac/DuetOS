@@ -618,3 +618,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-13T13:59:54Z
 - **Status**: COMPLETED @ 2026-08-13T14:03:08Z
+
+### [ACTIVE] codex-duetos-campaign
+- **Session**: `Codex-DuetOS-Campaign-20260920`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `.github/workflows/build.yml,CLAUDE.md,CLAUDE_PARALLEL.md,tools/parallel/*,kernel/drivers/video/*,kernel/drivers/net/*,kernel/net/drsh/*,kernel/CMakeLists.txt,tests/host/*,tools/qemu/run.sh,tools/test/*,tools/security/*,tools/image/*,wiki/_Sidebar.md,wiki/subsystems/UI-Toolkit.md,wiki/networking/DRSH-Remote-Access.md,wiki/drivers/*,wiki/reference/*,wiki/tooling/*,docs/plans/*`
+- **Description**: Integrate audited UI QEMU PE DRSH removable-media and RTL8125 campaign work
+- **Claimed**: 2026-09-20T11:14:23Z
+- **Status**: IN PROGRESS
