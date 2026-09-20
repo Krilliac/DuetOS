@@ -787,13 +787,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T17:12:58Z
 - **Status**: COMPLETED @ 2026-09-20T17:51:48Z
 
-### [ACTIVE] codex-duetos-fat32-safe-replace
+### [DONE] codex-duetos-fat32-safe-replace
 - **Session**: `DESKTOP-950K3EI-180`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/fs/fat32_create.cpp,kernel/fs/fat32.h,kernel/fs/fat32_selftest.cpp`
 - **Description**: Add verified stage-first FAT32 replacement with recovery-file semantics
 - **Claimed**: 2026-09-20T17:13:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:51:52Z
 
 ### [ACTIVE] codex-duetos-session-safe-save-docs
 - **Session**: `DESKTOP-950K3EI-1814`
