@@ -819,10 +819,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T18:29:57Z
 - **Status**: COMPLETED @ 2026-09-20T18:52:31Z
 
-### [ACTIVE] codex-duetos-createprocess-parser-header
+### [DONE] codex-duetos-createprocess-parser-header
 - **Session**: `DESKTOP-950K3EI-376`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `userland/libs/kernel32/createprocess_cmdline.h`
 - **Description**: Add a shared bounded parser for CreateProcess executable selection
 - **Claimed**: 2026-09-20T18:30:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T18:52:35Z
