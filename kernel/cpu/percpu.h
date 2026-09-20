@@ -373,11 +373,13 @@ struct PerCpu
     //     invokes Schedule() synchronously.
     //
     // Written only by the owning CPU (CriticalEnter/Exit and the
-    // tick-time DeferPreemptIfCritical path), so the
-    // `arch::ThisCpu*` single-instruction `gs:` operators are correct
-    // for the read-modify-writes. Cross-CPU reads (for the stats
-    // sum-walk) are READ_ONCE-style: a stale value is fine — these
-    // are diagnostic counters, not synchronisation primitives.
+    // tick-time DeferPreemptIfCritical path). Those paths update the
+    // `PerCpu*` returned by CurrentCpu() so its LAPIC-based stale-GS
+    // recovery remains authoritative, while retaining a single
+    // pointer-relative increment instruction for nested-IRQ safety.
+    // Cross-CPU reads (for the stats sum-walk) are READ_ONCE-style:
+    // a stale value is fine — these are diagnostic counters, not
+    // synchronisation primitives.
     u32 critnest;
     u32 deferred_preempt;
 

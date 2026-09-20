@@ -25,11 +25,12 @@
  *   - on CriticalExit, if the deferred flag is set, Schedule() is
  *     invoked synchronously.
  *
- * Cost vs spinlock-IRQ-off: two single-instruction `gs:`-relative
- * memory ops (inc / dec via `arch::ThisCpuInc64` / `ThisCpuAdd64`) on
- * the hot path, vs `pushfq + cli + ... + popfq + sti` (~10x cost on
- * modern Intel). The deferred-preempt check on Exit costs one extra
- * load + branch; it's predictable (deferred==0 in the common case).
+ * Cost vs spinlock-IRQ-off: a few pointer-relative per-CPU memory
+ * operations on the hot path, vs `pushfq + cli + ... + popfq + sti`
+ * (~10x cost on modern Intel). `CurrentCpu()` also provides the safe
+ * fallback when kernel C++ is reached with a stale user GSBASE. The
+ * deferred-preempt check on Exit costs one extra load + branch; it's
+ * predictable (deferred==0 in the common case).
  *
  * When to use:
  *   - Reading per-CPU data and you must not migrate to another CPU

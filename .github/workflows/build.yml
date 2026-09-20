@@ -160,6 +160,7 @@ jobs:
           python3 tools/test/test-stdin-ring-linearizability-contract.py
           python3 tools/test/test-process-runtime-access-contract.py
           python3 tools/test/test-process-task-publication-contract.py
+          python3 tools/test/test-fat32-empty-write-contract.py
           python3 tools/test/test-job-member-completion-contract.py
           python3 tools/test/test-job-userland-ingress-contract.py
           python3 tools/test/test-job-scheduler-linearization-contract.py
@@ -183,6 +184,8 @@ jobs:
           python3 tools/test/test-process-child-wait-cancellation-contract.py
           python3 tools/test/test-win32-thread-wait-cancellation-contract.py
           python3 tools/test/test-win32-directory-address-wait-cancellation-contract.py
+          python3 tools/test/test-win32-close-lifecycle-contract.py
+          python3 tools/test/test-overlapped-result-contract.py
           python3 tools/test/test-pidfd-strong-identity-contract.py
           python3 tools/test/test-epoll-fd-identity-contract.py
           python3 tools/test/test-process-handle-generation-contract.py
@@ -192,6 +195,7 @@ jobs:
           python3 tools/test/test-breakpoint-address-space-read-contract.py
           python3 tools/test/test-dbg-core-scan-coherence-contract.py
           python3 tools/test/test-ap-bootstrap-stack-contract.py
+          python3 tools/test/test-critical-gsbase-fallback-contract.py
           python3 tools/test/test-win32-heap-vm-safety-contract.py
           python3 tools/test/test-win32-thread-tls-vm-safety-contract.py
           python3 tools/test/test-loader-image-patch-vm-receipt-contract.py

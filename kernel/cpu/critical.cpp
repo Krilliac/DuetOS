@@ -1,7 +1,6 @@
 #include "cpu/critical.h"
 
 #include "arch/x86_64/cpu.h"
-#include "arch/x86_64/percpu_ops.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "core/panic.h"
@@ -14,20 +13,13 @@
  *
  * See kernel/cpu/critical.h for the design rationale.
  *
- * The hot path uses the single-instruction `arch::ThisCpu*` operators
- * to read-modify-write the four per-CPU u32/u64 slots
- * (critnest, deferred_preempt, critical_enter_count,
- * critical_exit_count, critical_deferred_count, critical_max_nesting).
- *
- * critnest and deferred_preempt are u32 — the `arch::ThisCpu*`
- * helpers operate on u64; we access these slots via the normal
- * `cpu::CurrentCpu()` pointer (which is also one instruction: a GS
- * load + offset). The cost difference between a `mov %gs:off, %reg`
- * via the pointer-deref and a hand-written `gs:`-relative
- * read-modify-write is negligible at this granularity; using the
- * normal access keeps the code readable and avoids partial-word
- * `gs:` access tricks. The stat counters ARE u64 and use the
- * `arch::ThisCpu*` operators.
+ * Every field update goes through the `PerCpu*` returned by
+ * `cpu::CurrentCpu()`. That accessor normally resolves the kernel
+ * GSBASE directly, but can safely recover a stale user GSBASE via
+ * LAPIC identity. Mixing the recovered pointer with a later raw
+ * GS-relative update would bypass that recovery and fault against
+ * the user TEB, so the pointer is the single source of truth for the
+ * whole operation.
  */
 
 namespace duetos::cpu
@@ -36,12 +28,13 @@ namespace duetos::cpu
 namespace
 {
 
-// One-instruction increment of the per-CPU enter / exit / deferred
-// counters via the GS segment override. These are u64 fields, so
-// the `arch::ThisCpu*` helpers apply directly.
-constexpr u64 kOffEnterCount = DUETOS_THIS_CPU_OFFSET(PerCpu, critical_enter_count);
-constexpr u64 kOffExitCount = DUETOS_THIS_CPU_OFFSET(PerCpu, critical_exit_count);
-constexpr u64 kOffDeferredCount = DUETOS_THIS_CPU_OFFSET(PerCpu, critical_deferred_count);
+// Preserve the old single-instruction, same-CPU read-modify-write semantics
+// without consulting GSBASE a second time. `counter` belongs to the PerCpu
+// pointer already resolved (and, if necessary, recovered) by CurrentCpu().
+inline void IncrementResolvedCounter(u64* counter)
+{
+    asm volatile("incq %0" : "+m"(*counter) : : "cc", "memory");
+}
 
 } // namespace
 
@@ -78,7 +71,7 @@ void CriticalEnter()
         p->critical_max_nesting = new_nest;
     }
 
-    arch::ThisCpuInc64(kOffEnterCount);
+    IncrementResolvedCounter(&p->critical_enter_count);
 }
 
 void CriticalExit()
@@ -98,7 +91,7 @@ void CriticalExit()
 
     const u32 new_nest = p->critnest - 1;
     p->critnest = new_nest;
-    arch::ThisCpuInc64(kOffExitCount);
+    IncrementResolvedCounter(&p->critical_exit_count);
 
     if (new_nest != 0)
     {
@@ -150,7 +143,7 @@ bool DeferPreemptIfCritical()
     // bump the diagnostic counter. CriticalExit's drain will pick
     // it up.
     p->deferred_preempt = 1;
-    arch::ThisCpuInc64(kOffDeferredCount);
+    IncrementResolvedCounter(&p->critical_deferred_count);
     return true;
 }
 
