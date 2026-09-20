@@ -763,13 +763,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T16:31:37Z
 - **Status**: COMPLETED @ 2026-09-20T17:07:33Z
 
-### [ACTIVE] codex-duetos-runtime-dll-sxs-api
+### [DONE] codex-duetos-runtime-dll-sxs-api
 - **Session**: `DESKTOP-950K3EI-1192`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/loader/sxs_dll.cpp`
 - **Description**: Pass the actual mapped base through the side-by-side DLL import resolver call
 - **Claimed**: 2026-09-20T16:35:25Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:07:38Z
 
 ### [ACTIVE] codex-duetos-telemetry-selftest-stability
 - **Session**: `DESKTOP-950K3EI-1681`
