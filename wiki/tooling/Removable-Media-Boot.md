@@ -53,11 +53,25 @@ The image contains one GPT FAT32 EFI System Partition with:
 ```text
 /EFI/BOOT/BOOTX64.EFI
 /boot/duetos-kernel.elf
+/boot/grub/grub.cfg
 ```
 
 `BOOTX64.EFI` is a GRUB standalone image with an embedded configuration.  It
 searches for `/boot/duetos-kernel.elf` and starts it with the Multiboot2
-`boot=desktop autologin=1 smoke=bringup` command line.
+`boot=desktop autologin=1` command line. The same generated configuration is
+copied to `/boot/grub/grub.cfg` so an operator can audit the exact boot mode
+without unpacking the standalone EFI binary.
+
+The default is an interactive physical boot and deliberately omits `smoke=`;
+a smoke profile calls `arch::TestExit` and therefore halts on real hardware.
+The QEMU gate opts into the terminating CI profile explicitly:
+
+```bash
+tools/image/build-removable-media.sh \
+  --kernel build/x86_64-debug/kernel/duetos-kernel.elf \
+  --output build/x86_64-debug/duetos-removable-smoke.img \
+  --boot-mode smoke
+```
 
 An existing regular output is refused unless `--force` is supplied.  `--force`
 never relaxes the physical-device rejection.

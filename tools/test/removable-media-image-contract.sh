@@ -28,7 +28,7 @@ expect_refusal()
         echo "FAIL: ${label} was accepted" >&2
         exit 1
     fi
-    if ! grep -Fq "${needle}" "${stderr_file}"; then
+    if ! grep -Fq -- "${needle}" "${stderr_file}"; then
         echo "FAIL: ${label} did not report '${needle}'" >&2
         cat "${stderr_file}" >&2
         exit 1
@@ -52,11 +52,14 @@ readonly EXISTING_LINK="${TMP_DIR}/existing-link.img"
 ln -s "${EXISTING}" "${EXISTING_LINK}"
 expect_refusal "existing-symlink-force" "refusing non-regular output" \
     --output "${EXISTING_LINK}" --force
+expect_refusal "invalid-boot-mode" "--boot-mode must be interactive or smoke" \
+    --output "${TMP_DIR}/invalid-mode.img" --boot-mode unsafe
 
 if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
     readonly IMAGE="${TMP_DIR}/Duet OS removable.img"
     readonly EXTRACTED_KERNEL="${TMP_DIR}/extracted-kernel.elf"
     readonly EXTRACTED_EFI="${TMP_DIR}/BOOTX64.EFI"
+    readonly EXTRACTED_GRUB_CFG="${TMP_DIR}/grub.cfg"
 
     "${BUILDER}" --kernel "${DUETOS_KERNEL_ELF}" --output "${IMAGE}" --size-mib 128
 
@@ -69,11 +72,22 @@ if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
 
     mcopy -i "${IMAGE}@@1048576" ::/EFI/BOOT/BOOTX64.EFI "${EXTRACTED_EFI}"
     mcopy -i "${IMAGE}@@1048576" ::/boot/duetos-kernel.elf "${EXTRACTED_KERNEL}"
+    mcopy -i "${IMAGE}@@1048576" ::/boot/grub/grub.cfg "${EXTRACTED_GRUB_CFG}"
     [[ -s "${EXTRACTED_EFI}" ]] || { echo "FAIL: BOOTX64.EFI is empty" >&2; exit 1; }
     cmp --silent "${DUETOS_KERNEL_ELF}" "${EXTRACTED_KERNEL}" || {
         echo "FAIL: staged kernel differs from the input ELF" >&2
         exit 1
     }
+    grep -Fq 'multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1' "${EXTRACTED_GRUB_CFG}" || {
+        echo "FAIL: interactive kernel command line missing" >&2
+        cat "${EXTRACTED_GRUB_CFG}" >&2
+        exit 1
+    }
+    if grep -Fq 'smoke=' "${EXTRACTED_GRUB_CFG}"; then
+        echo "FAIL: default removable image must not halt through a smoke profile" >&2
+        cat "${EXTRACTED_GRUB_CFG}" >&2
+        exit 1
+    fi
 fi
 
 echo "PASS: removable-media image safety contract"

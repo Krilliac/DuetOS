@@ -12,7 +12,7 @@ usage()
     cat >&2 <<'USAGE'
 usage: tools/image/build-removable-media.sh \
        --kernel <duetos-kernel.elf> --output <regular-file.img> \
-       [--size-mib 128] [--force]
+       [--size-mib 128] [--boot-mode interactive|smoke] [--force]
 USAGE
     exit 2
 }
@@ -20,6 +20,7 @@ USAGE
 KERNEL=""
 OUTPUT=""
 SIZE_MIB=128
+BOOT_MODE="interactive"
 FORCE=0
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,11 @@ while [[ $# -gt 0 ]]; do
         SIZE_MIB="$2"
         shift 2
         ;;
+    --boot-mode)
+        [[ $# -ge 2 ]] || usage
+        BOOT_MODE="$2"
+        shift 2
+        ;;
     --force)
         FORCE=1
         shift
@@ -54,6 +60,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${KERNEL}" && -n "${OUTPUT}" ]] || usage
+
+if [[ "${BOOT_MODE}" != "interactive" && "${BOOT_MODE}" != "smoke" ]]; then
+    echo "error: --boot-mode must be interactive or smoke" >&2
+    exit 2
+fi
 
 # This gate deliberately precedes every prerequisite check and file-opening
 # operation. --force can replace a regular file, never weaken target identity.
@@ -109,14 +120,19 @@ readonly GRUB_CFG="${TMP_DIR}/grub.cfg"
 readonly EFI_BINARY="${TMP_DIR}/BOOTX64.EFI"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
-cat >"${GRUB_CFG}" <<'GRUB'
+KERNEL_ARGS="boot=desktop autologin=1"
+if [[ "${BOOT_MODE}" == "smoke" ]]; then
+    KERNEL_ARGS+=" smoke=bringup"
+fi
+
+cat >"${GRUB_CFG}" <<GRUB
 set timeout=0
 set default=0
 
 search --no-floppy --file --set=root /boot/duetos-kernel.elf
 
-menuentry "DuetOS removable-media smoke" {
-    multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1 smoke=bringup
+menuentry "DuetOS removable media" {
+    multiboot2 /boot/duetos-kernel.elf ${KERNEL_ARGS}
     boot
 }
 GRUB
@@ -143,8 +159,10 @@ mformat -F -T "${PARTITION_SECTORS}" -i "${IMAGE_TMP}@@1048576" -v DUETOS ::
 mmd -i "${IMAGE_TMP}@@1048576" ::/EFI
 mmd -i "${IMAGE_TMP}@@1048576" ::/EFI/BOOT
 mmd -i "${IMAGE_TMP}@@1048576" ::/boot
+mmd -i "${IMAGE_TMP}@@1048576" ::/boot/grub
 mcopy -i "${IMAGE_TMP}@@1048576" "${EFI_BINARY}" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "${IMAGE_TMP}@@1048576" "${KERNEL}" ::/boot/duetos-kernel.elf
+mcopy -i "${IMAGE_TMP}@@1048576" "${GRUB_CFG}" ::/boot/grub/grub.cfg
 
 # Construction happens in a sibling temporary directory. The final rename is
 # the only operation that touches OUTPUT, so a failed tool never leaves a

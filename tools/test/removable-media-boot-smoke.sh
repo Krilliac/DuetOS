@@ -48,7 +48,7 @@ readonly IMAGE="${TMP_DIR}/duetos-removable.img"
 readonly SERIAL_LOG="${TMP_DIR}/serial.log"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
-"${BUILDER}" --kernel "${KERNEL_ELF}" --output "${IMAGE}" --size-mib 128
+"${BUILDER}" --kernel "${KERNEL_ELF}" --output "${IMAGE}" --size-mib 128 --boot-mode smoke
 
 echo "[removable-smoke] booting regular-file image under OVMF"
 set +e
