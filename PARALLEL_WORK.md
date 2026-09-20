@@ -771,10 +771,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T16:35:25Z
 - **Status**: COMPLETED @ 2026-09-20T17:07:38Z
 
-### [ACTIVE] codex-duetos-telemetry-selftest-stability
+### [DONE] codex-duetos-telemetry-selftest-stability
 - **Session**: `DESKTOP-950K3EI-1681`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/diag/telemetry.cpp`
 - **Description**: Make the CPU usage short-window self-test deterministic under slow or contended VMs
 - **Claimed**: 2026-09-20T16:43:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T17:07:42Z
