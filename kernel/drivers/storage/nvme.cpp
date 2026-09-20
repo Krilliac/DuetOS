@@ -1228,8 +1228,7 @@ u64 PanicWriteChunked(u64 base_lba, const u8* bytes, u64 len)
     // The reserved region's bounds, beyond which a write would
     // wrap into a different namespace area. NvmeDumpReservedLba
     // consults GPT for a recorded reservation; sector_count comes
-    // from the same source if GPT hit, otherwise falls back to
-    // kNvmeDumpReservedSectors at the namespace tail.
+    // from that same owned GPT entry. There is no namespace-tail fallback.
     const u64 reserved_first = NvmeDumpReservedLba();
     if (reserved_first == 0)
     {
