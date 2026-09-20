@@ -682,3 +682,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Resolve TCP and forced smoke traffic through configured static IPv4 routes
 - **Claimed**: 2026-09-20T13:47:08Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-static-routing-l2-api
+- **Session**: `DESKTOP-950K3EI-1030`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/net/net_smoke.h`
+- **Description**: Synchronize the live network smoke API contract with static or DHCP routes
+- **Claimed**: 2026-09-20T13:51:58Z
+- **Status**: IN PROGRESS
