@@ -835,10 +835,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T18:52:46Z
 - **Status**: COMPLETED @ 2026-09-20T19:08:02Z
 
-### [ACTIVE] codex-duetos-pe-winapi-stress-tail
+### [DONE] codex-duetos-pe-winapi-stress-tail
 - **Session**: `DESKTOP-950K3EI-1979`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `userland/apps/hello_winapi/hello.c`
 - **Description**: Diagnose and make the comprehensive Win32 stress tail complete deterministically
 - **Claimed**: 2026-09-20T19:03:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T19:08:10Z
