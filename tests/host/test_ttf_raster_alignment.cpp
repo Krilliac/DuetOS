@@ -45,11 +45,10 @@ struct InkBounds
     int bottom;
 };
 
-InkBounds RenderInkBounds(const duetos::drivers::video::TtfFont& font, char ch)
+InkBounds RenderInkBounds(const duetos::drivers::video::TtfFont& font, char ch, duetos::u32 pixel_height)
 {
     using namespace duetos::drivers::video;
 
-    constexpr duetos::u32 kPixelHeight = 13;
     constexpr duetos::u8 kVisibleInk = 64;
 
     std::array<duetos::u8, 128U * 128U> pixels{};
@@ -58,7 +57,7 @@ InkBounds RenderInkBounds(const duetos::drivers::video::TtfFont& font, char ch)
     TtfRenderedGlyph rendered{};
 
     const bool ok =
-        TtfRenderGlyph(font, static_cast<duetos::u32>(static_cast<unsigned char>(ch)), kPixelHeight, pixels.data(),
+        TtfRenderGlyph(font, static_cast<duetos::u32>(static_cast<unsigned char>(ch)), pixel_height, pixels.data(),
                        static_cast<duetos::u32>(pixels.size()), points.data(), static_cast<duetos::u32>(points.size()),
                        endpoints.data(), static_cast<duetos::u16>(endpoints.size()), &rendered);
     if (!ok)
@@ -88,35 +87,52 @@ int main()
 {
     using namespace duetos::drivers::video;
 
-    const char* const font_path = DUETOS_SOURCE_DIR "/userland/assets/fonts/duet-chrome-bold.ttf";
-    std::ifstream file(font_path, std::ios::binary | std::ios::ate);
-    ASSERT_TRUE(file.is_open());
-    const std::streamsize size = file.tellg();
-    ASSERT_TRUE(size > 0);
-    file.seekg(0, std::ios::beg);
-
-    std::vector<duetos::u8> bytes(static_cast<std::size_t>(size));
-    ASSERT_TRUE(file.read(reinterpret_cast<char*>(bytes.data()), size).good());
-
-    auto font_result = TtfLoad(bytes.data(), static_cast<duetos::u32>(bytes.size()));
-    ASSERT_TRUE(font_result.has_value());
-    const TtfFont font = font_result.value();
-
-    // Pillow/FreeType's grid-fitted reference for this bundled face at 13 px
-    // puts all of these capitals on the same visible cap and baseline rows.
-    // The literal expectation is deliberately independent of our rasterizer.
-    constexpr char kCapitals[] = "BIGTXCLOCK";
-    const InkBounds reference = RenderInkBounds(font, kCapitals[0]);
-    ASSERT_TRUE(reference.top != std::numeric_limits<int>::max());
-
-    for (std::size_t i = 1; i < sizeof(kCapitals) - 1U; ++i)
+    struct RasterCase
     {
-        const InkBounds actual = RenderInkBounds(font, kCapitals[i]);
-        if (actual.top != reference.top || actual.bottom != reference.bottom)
+        const char* path;
+        duetos::u32 pixel_height;
+        InkBounds expected;
+    };
+
+    // Literal baseline-relative rows derived from the bundled face's design-
+    // unit bounds using the documented unhinted em scale and symmetric nearest
+    // pixel rounding. Pillow/FreeType independently confirms that every listed
+    // capital shares one cap and baseline row, although its bytecode hinting
+    // promotes the 13 px cap to row -10. DuetOS intentionally has no bytecode
+    // hinter, so its 13 px cap row is -9. The last visible row is -1.
+    constexpr RasterCase kCases[] = {
+        {DUETOS_SOURCE_DIR "/userland/assets/fonts/duet-chrome.ttf", 11, {-8, -1}},
+        {DUETOS_SOURCE_DIR "/userland/assets/fonts/duet-chrome.ttf", 13, {-9, -1}},
+        {DUETOS_SOURCE_DIR "/userland/assets/fonts/duet-chrome-bold.ttf", 11, {-8, -1}},
+        {DUETOS_SOURCE_DIR "/userland/assets/fonts/duet-chrome-bold.ttf", 13, {-9, -1}},
+    };
+    constexpr char kCapitals[] = "BIGTXCLOCK";
+
+    for (const RasterCase& test_case : kCases)
+    {
+        std::ifstream file(test_case.path, std::ios::binary | std::ios::ate);
+        ASSERT_TRUE(file.is_open());
+        const std::streamsize size = file.tellg();
+        ASSERT_TRUE(size > 0);
+        file.seekg(0, std::ios::beg);
+
+        std::vector<duetos::u8> bytes(static_cast<std::size_t>(size));
+        ASSERT_TRUE(file.read(reinterpret_cast<char*>(bytes.data()), size).good());
+
+        auto font_result = TtfLoad(bytes.data(), static_cast<duetos::u32>(bytes.size()));
+        ASSERT_TRUE(font_result.has_value());
+        const TtfFont font = font_result.value();
+
+        for (std::size_t i = 0; i < sizeof(kCapitals) - 1U; ++i)
         {
-            std::fprintf(stderr, "glyph %c ink rows [%d,%d], expected [%d,%d]\n", kCapitals[i], actual.top,
-                         actual.bottom, reference.top, reference.bottom);
-            ++::duetos_host_test::failure_count();
+            const InkBounds actual = RenderInkBounds(font, kCapitals[i], test_case.pixel_height);
+            if (actual.top != test_case.expected.top || actual.bottom != test_case.expected.bottom)
+            {
+                std::fprintf(stderr, "%s %u px glyph %c ink rows [%d,%d], expected [%d,%d]\n", test_case.path,
+                             test_case.pixel_height, kCapitals[i], actual.top, actual.bottom, test_case.expected.top,
+                             test_case.expected.bottom);
+                ++::duetos_host_test::failure_count();
+            }
         }
     }
 
