@@ -1,4 +1,5 @@
 #include "net/drsh/drsh_internal.h"
+#include "net/drsh/drsh_desktop_wire.h"
 
 #include "diag/fix_journal.h"
 #include "drivers/input/ps2kbd.h"
@@ -52,12 +53,12 @@ namespace duetos::net::drsh::internal
 namespace
 {
 
-constexpr u8 kSubTileBlit = 0;
-constexpr u8 kSubFrameStart = 1;
-constexpr u8 kSubFrameEnd = 2;
-constexpr u8 kSubInputKey = 3;
-constexpr u8 kSubInputMouse = 4;
-constexpr u8 kSubResizeAck = 5;
+constexpr u8 kSubTileBlit = desktop_wire::kTileBlit;
+constexpr u8 kSubFrameStart = desktop_wire::kFrameStart;
+constexpr u8 kSubFrameEnd = desktop_wire::kFrameEnd;
+constexpr u8 kSubInputKey = desktop_wire::kInputKey;
+constexpr u8 kSubInputMouse = desktop_wire::kInputMouse;
+constexpr u8 kSubResizeAck = desktop_wire::kResizeAck;
 
 // Largest tile a single frame can carry, in pixels. Header is 8
 // bytes (sub-type byte + 4 u16 coords + sub-byte adjustment). We
@@ -100,9 +101,8 @@ bool SendFrameEnd(DrshTransport& t, DrshSession& s, u8 channel_id)
 }
 
 bool SendTile(DrshTransport& t, DrshSession& s, u8 channel_id, u16 x, u16 y, u16 w, u16 h, const u8* fb_base,
-              u32 fb_pitch)
+              u32 fb_pitch, u32 source_width, u32 source_height, u32 output_width, u32 output_height, u8* payload)
 {
-    static u8 payload[kDrshMaxPayload];
     u32 off = 0;
     payload[off++] = kSubTileBlit;
     WriteU16Be(&payload[off], x);
@@ -113,15 +113,22 @@ bool SendTile(DrshTransport& t, DrshSession& s, u8 channel_id, u16 x, u16 y, u16
     off += 2;
     WriteU16Be(&payload[off], h);
     off += 2;
-    // Copy pixels row-by-row to compress out the framebuffer pitch
-    // padding. w * h * 4 bytes contiguous on the wire — the client
-    // pastes back into its own surface with its own pitch.
+    // Copy pixels row-by-row and nearest-neighbour scale from the native
+    // framebuffer into the dimensions negotiated in ChannelOpen. Native-size
+    // requests naturally map each output coordinate to itself.
     for (u32 row = 0; row < h; ++row)
     {
-        const u8* src = fb_base + static_cast<u64>(static_cast<u32>(y) + row) * fb_pitch +
-                        static_cast<u64>(static_cast<u32>(x)) * 4u;
-        for (u32 i = 0; i < static_cast<u32>(w) * 4u; ++i)
-            payload[off + i] = src[i];
+        const u32 source_y = desktop_wire::ScaleCoordinate(static_cast<u32>(y) + row, output_height, source_height);
+        for (u32 col = 0; col < w; ++col)
+        {
+            const u32 source_x = desktop_wire::ScaleCoordinate(static_cast<u32>(x) + col, output_width, source_width);
+            const u8* src = fb_base + static_cast<u64>(source_y) * fb_pitch + static_cast<u64>(source_x) * 4u;
+            const u32 destination = off + col * 4u;
+            payload[destination + 0] = src[0];
+            payload[destination + 1] = src[1];
+            payload[destination + 2] = src[2];
+            payload[destination + 3] = src[3];
+        }
         off += static_cast<u32>(w) * 4u;
     }
     return SendFrame(t, s, kDrshFrameChannelData, channel_id, payload, off);
@@ -129,13 +136,13 @@ bool SendTile(DrshTransport& t, DrshSession& s, u8 channel_id, u16 x, u16 y, u16
 
 void HandleInputKey(const u8* p, u32 plen)
 {
-    if (plen < 4)
+    desktop_wire::KeyInput input{};
+    if (!desktop_wire::DecodeKeyInput(p, plen, &input))
         return;
     duetos::drivers::input::KeyEvent ev{};
-    ev.code = static_cast<u16>((static_cast<u16>(p[1]) << 8) | static_cast<u16>(p[0])); // LE on the wire
-    ev.modifiers = p[2];
-    // payload[3] is "press" (1) or "release" (0); is_release is the inverse.
-    ev.is_release = (p[3] == 0);
+    ev.code = input.code;
+    ev.modifiers = input.modifiers;
+    ev.is_release = !input.pressed;
     duetos::drivers::input::KeyboardInjectEvent(ev);
 }
 
@@ -167,30 +174,26 @@ void HandleInputMouse(const u8* p, u32 plen)
 {
     if (plen < 6)
         return;
-    const i16 dx = ReadI16Be(&p[1]);
-    const i16 dy = ReadI16Be(&p[3]);
+    i32 remaining_x = ReadI16Be(&p[1]);
+    i32 remaining_y = ReadI16Be(&p[3]);
     const u8 buttons = p[5];
-    // Saturate i16 deltas to i8 for the PS/2 shape. Anything beyond
-    // +/-127 is delivered in successive packets; clients that send
-    // bigger deltas accept the slower glide.
-    auto sat8 = [](i16 v) -> i8
+    // Preserve the full i16 wire delta across the PS/2 driver's i8 packet
+    // shape. Repeating the same button mask does not create extra edges.
+    do
     {
-        if (v > 127)
-            return 127;
-        if (v < -128)
-            return -128;
-        return static_cast<i8>(v);
-    };
-    duetos::drivers::input::MousePacket pk{};
-    pk.buttons = buttons;
-    pk.dx = sat8(dx);
-    pk.dy = sat8(dy);
-    duetos::drivers::input::MouseInjectPacket(pk);
+        duetos::drivers::input::MousePacket pk{};
+        pk.buttons = buttons;
+        pk.dx = desktop_wire::MouseDeltaStep(remaining_x);
+        pk.dy = desktop_wire::MouseDeltaStep(remaining_y);
+        duetos::drivers::input::MouseInjectPacket(pk);
+        remaining_x -= pk.dx;
+        remaining_y -= pk.dy;
+    } while (remaining_x != 0 || remaining_y != 0);
 }
 
 } // namespace
 
-bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
+bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id, u16 requested_width, u16 requested_height)
 {
     const auto fb = duetos::drivers::video::FramebufferGet();
     if (!duetos::drivers::video::FramebufferAvailable() || fb.bpp != 32)
@@ -202,13 +205,20 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
         return true;
     }
 
-    const u32 width = fb.width;
-    const u32 height = fb.height;
+    const u32 source_width = fb.width;
+    const u32 source_height = fb.height;
+    const u32 width =
+        requested_width == 0 ? source_width : ((requested_width < source_width) ? requested_width : source_width);
+    const u32 height =
+        requested_height == 0 ? source_height : ((requested_height < source_height) ? requested_height : source_height);
+    if (!desktop_wire::FitsWireDimensions(width, height))
+    {
+        (void)SendFrameStart(t, s, channel_id, 0, 0, 0);
+        (void)SendFrame(t, s, kDrshFrameChannelClose, channel_id, nullptr, 0);
+        return true;
+    }
     const u32 pitch = fb.pitch;
     const u8* fb_base = reinterpret_cast<const u8*>(fb.virt);
-
-    if (!SendFrameStart(t, s, channel_id, width, height, 32))
-        return false;
 
     // Tile geometry: maximise pixels-per-tile without exceeding
     // the per-frame payload budget. kMaxPixelsPerTile = (4096-9)/4
@@ -217,6 +227,9 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
     constexpr u32 kTileW = 32;
     constexpr u32 kTileH = 30;
     static_assert(kTileW * kTileH <= kMaxPixelsPerTile, "tile too big for one DRSH frame");
+    // One staging buffer per session. A function-static buffer would let two
+    // authenticated desktop workers corrupt each other's encrypted tiles.
+    u8 payload[kDrshMaxPayload];
 
     // ----------------------------- Main desktop loop.
     // Server pushes one full frame, then drains any pending input
@@ -225,6 +238,9 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
     // refresh per round-trip + input batch.
     while (true)
     {
+        if (!SendFrameStart(t, s, channel_id, width, height, 32))
+            return false;
+
         // ----- Push a full frame as a sequence of tiles.
         for (u32 y = 0; y < height; y += kTileH)
         {
@@ -233,7 +249,8 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
             {
                 const u32 tw = (x + kTileW > width) ? (width - x) : kTileW;
                 if (!SendTile(t, s, channel_id, static_cast<u16>(x), static_cast<u16>(y), static_cast<u16>(tw),
-                              static_cast<u16>(th), fb_base, pitch))
+                              static_cast<u16>(th), fb_base, pitch, source_width, source_height, width, height,
+                              payload))
                     return false;
             }
         }
@@ -245,7 +262,6 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
         //       budget is "one Recv" — single non-blocking attempt
         //       would be cleaner, but the transport is blocking; we
         //       give the client a brief window via SchedSleepTicks.
-        u8 payload[kDrshMaxPayload];
         u32 plen = 0;
         u8 type = 0;
         u8 chan = 0;

@@ -37,8 +37,12 @@ struct SocketCtx
     bool closed;
 };
 
-constexpr u32 kReadsInClientHelloFrame = 3;          // header, payload, MAC.
-constexpr u64 kPostClientHelloRecvTimeoutTicks = 20; // 200 ms at the 100 Hz scheduler tick.
+constexpr u32 kReadsInClientHelloFrame = 3; // header, payload, MAC.
+// A peer that has delivered a complete, well-formed ClientHello is no longer
+// a silent slowloris. Give its host-side PBKDF + Auth frame enough room under
+// loaded TCG and commodity-hardware scheduling. The pre-hello timeout remains
+// the listener's strict 50 ms boundary.
+constexpr u64 kPostClientHelloRecvTimeoutTicks = 200; // 2 s at the 100 Hz scheduler tick.
 
 bool SocketReadExact(void* opaque, u8* buf, u32 len)
 {

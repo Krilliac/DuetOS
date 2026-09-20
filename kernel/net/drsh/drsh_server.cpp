@@ -1,4 +1,5 @@
 #include "net/drsh/drsh.h"
+#include "net/drsh/drsh_desktop_wire.h"
 #include "net/drsh/drsh_internal.h"
 
 #include "arch/x86_64/serial.h"
@@ -264,11 +265,13 @@ bool HandleSessionFrames(DrshTransport& t, DrshSession& sess, volatile bool* sto
         }
         if (type != kDrshFrameChannelOpen)
             return false;
-        if (plen != 1)
+        if (plen < 1)
             return false;
         const u8 kind = payload[0];
         if (kind == kDrshKindShell)
         {
+            if (plen != 1)
+                return false;
             u8 ack = kDrshChannelShell;
             if (!SendFrame(t, sess, kDrshFrameChannelOpenAck, kDrshChannelControl, &ack, 1))
                 return false;
@@ -277,10 +280,13 @@ bool HandleSessionFrames(DrshTransport& t, DrshSession& sess, volatile bool* sto
         }
         else if (kind == kDrshKindDesktop)
         {
+            desktop_wire::DesktopOpenRequest request{};
+            if (!desktop_wire::DecodeOpenRequest(payload, plen, &request))
+                return false;
             u8 ack = kDrshChannelDesktop;
             if (!SendFrame(t, sess, kDrshFrameChannelOpenAck, kDrshChannelControl, &ack, 1))
                 return false;
-            if (!DesktopChannelService(t, sess, kDrshChannelDesktop))
+            if (!DesktopChannelService(t, sess, kDrshChannelDesktop, request.width, request.height))
                 return false;
         }
         else
