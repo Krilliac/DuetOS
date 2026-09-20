@@ -643,13 +643,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T12:26:34Z
 - **Status**: COMPLETED @ 2026-09-20T14:41:35Z
 
-### [ACTIVE] codex-duetos-static-network-consumers
+### [DONE] codex-duetos-static-network-consumers
 - **Session**: `Codex-DuetOS-Campaign-20260920`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/apps/browser.cpp,kernel/syscall/syscall.cpp`
 - **Description**: Make browser DNS and socket network-info consume static IPv4 state
 - **Claimed**: 2026-09-20T12:45:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:41:41Z
 
 ### [ACTIVE] codex-duetos-static-network-abi
 - **Session**: `Codex-DuetOS-Campaign-20260920`
