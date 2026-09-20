@@ -401,11 +401,33 @@ __declspec(dllexport) HWND __stdcall CreateWindowExW(DWORD ex, const wchar_t16* 
     return hwnd;
 }
 
+static HWND s_destroying_window;
+
 __declspec(dllexport) BOOL __stdcall DestroyWindow(HWND h)
 {
-    user32_dialog_on_destroy(h);
-    user32_record_destroy(h);
-    return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)h) ? 1 : 0;
+    struct user32_rect probe = {0, 0, 0, 0};
+    if (!h || s_destroying_window == h ||
+        !duet_syscall3(SYS_WIN_GET_RECT, (unsigned)(unsigned long)h, 0, (unsigned)(unsigned long)&probe))
+    {
+        return 0;
+    }
+
+    HWND previous_destroy = s_destroying_window;
+    s_destroying_window = h;
+    WNDPROC proc = (WNDPROC)(unsigned long)user32_get_long(h, GWLP_WNDPROC);
+    if (proc)
+        (void)proc(h, WM_DESTROY, 0, 0);
+
+    const BOOL destroyed = duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)h) ? 1 : 0;
+    if (destroyed)
+    {
+        if (proc)
+            (void)proc(h, WM_NCDESTROY, 0, 0);
+        user32_dialog_on_destroy(h);
+        user32_record_destroy(h);
+    }
+    s_destroying_window = previous_destroy;
+    return destroyed;
 }
 
 __declspec(dllexport) BOOL __stdcall ShowWindow(HWND h, INT cmd)
@@ -565,16 +587,14 @@ __declspec(dllexport) LRESULT __stdcall SendMessageW(HWND h, UINT msg, WPARAM w,
     return user32_send_core(h, msg, w, l);
 }
 
-/* DefWindowProc is the caller's fallback for messages its WNDPROC
- * does not handle. The compositor owns chrome, hit-testing and
- * repaint, so there is no default behaviour left to run in ring 3;
- * 0 ("handled, nothing to do") is what every message resolves to. */
+/* DefWindowProc owns the standard close default. Applications can cancel by
+ * handling WM_CLOSE themselves; delegating it destroys the HWND. */
 __declspec(dllexport) LRESULT __stdcall DefWindowProcA(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
     (void)w;
     (void)l;
+    if (msg == WM_CLOSE && h)
+        (void)DestroyWindow(h);
     return 0;
 }
 

@@ -98,7 +98,10 @@ typedef LRESULT(__stdcall* WNDPROC)(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
 #define USER32_LONG_STYLE 2
 #define USER32_LONG_EXSTYLE 3
 
+#define WM_DESTROY 0x0002
+#define WM_CLOSE 0x0010
 #define WM_QUIT 0x0012
+#define WM_NCDESTROY 0x0082
 #define PM_REMOVE 0x0001
 
 /* Longest window title the kernel stores (kWinTitleMax). Titles are

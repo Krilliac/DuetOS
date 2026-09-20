@@ -1635,8 +1635,12 @@ void KbdReaderTask(void*)
                 }
                 else
                 {
-                    duetos::drivers::video::WindowClose(active);
-                    SerialWrite("[ui] alt-f4 close window=");
+                    // Win32 applications own their close policy. Deliver the
+                    // same WM_CLOSE used by the title-bar button so the WndProc
+                    // can save/cancel or delegate to DefWindowProc.
+                    constexpr duetos::u32 kWmClose = 0x0010;
+                    duetos::drivers::video::WindowPostMessage(active, kWmClose, 0, 0);
+                    SerialWrite("[ui] alt-f4 post WM_CLOSE window=");
                 }
                 SerialWriteHex(active);
                 SerialWrite("\n");

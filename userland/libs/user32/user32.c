@@ -13,7 +13,8 @@
  *     dequeues WM_QUIT — the caller's canonical `while (GetMessage)`
  *     loop exits cleanly.
  *   - PeekMessage is non-blocking.
- *   - DefWindowProcA/W returns 0 (caller accepts).
+ *   - DefWindowProcA/W performs the standard WM_CLOSE default by
+ *     destroying the target window; other messages return 0.
  *   - PostQuitMessage posts HWND-less WM_QUIT (0x0012) to the exact
  *     calling task queue.
  *   - CreateWindowExA/W returns a PE32-safe slot+generation HWND; a
@@ -113,6 +114,9 @@ typedef void* HANDLE;
  * the queue — but pasting the common ones here lets the pump
  * implement WM_QUIT termination without a shared header. */
 #define WM_QUIT 0x0012
+#define WM_DESTROY 0x0002
+#define WM_CLOSE 0x0010
+#define WM_NCDESTROY 0x0082
 
 #define WIN_TITLE_MAX 64
 
@@ -157,21 +161,19 @@ __declspec(dllexport) LRESULT CallWindowProcW(void* proc, HANDLE h, UINT msg, WP
     (void)l;
     return 0;
 }
+__declspec(dllexport) BOOL DestroyWindow(HANDLE h);
+__declspec(dllexport) BOOL IsWindow(HANDLE h);
 __declspec(dllexport) LRESULT DefWindowProcA(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
     (void)w;
     (void)l;
+    if (msg == WM_CLOSE && h)
+        (void)DestroyWindow(h);
     return 0;
 }
 __declspec(dllexport) LRESULT DefWindowProcW(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 0;
+    return DefWindowProcA(h, msg, w, l);
 }
 
 /* Kernel-wire MSG slice. Matches the first 32 bytes the
@@ -529,7 +531,7 @@ __declspec(dllexport) BOOL PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPA
  * result. v1 implements this by pulling the target's WNDPROC
  * out of GWLP_WNDPROC and calling it directly. Cross-process and
  * cross-thread SendMessage return 0 until a kernel broker exists. */
-static LRESULT user32_send_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
+static WNDPROC user32_wndproc_for_window(HANDLE h)
 {
     long long rv;
     __asm__ volatile("int $0x80"
@@ -537,10 +539,13 @@ static LRESULT user32_send_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
                      : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)h),
                        "S"((long long)GWLP_WNDPROC)
                      : "memory");
-    void* proc_raw = (void*)(unsigned long long)rv;
-    if (!proc_raw)
+    return (WNDPROC)(unsigned long long)rv;
+}
+static LRESULT user32_send_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
+{
+    WNDPROC proc = user32_wndproc_for_window(h);
+    if (!proc)
         return 0;
-    LRESULT(__stdcall * proc)(HANDLE, UINT, WPARAM, LPARAM) = proc_raw;
     return proc(h, msg, w, l);
 }
 __declspec(dllexport) LRESULT SendMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l)
@@ -658,13 +663,27 @@ __declspec(dllexport) HANDLE CreateWindowExW(DWORD ex, const wchar_t16* cls, con
     return hwnd;
 }
 
+static HANDLE s_destroying_window;
+
 __declspec(dllexport) BOOL DestroyWindow(HANDLE h)
 {
+    if (!h || s_destroying_window == h || !IsWindow(h))
+        return 0;
+
+    HANDLE previous_destroy = s_destroying_window;
+    s_destroying_window = h;
+    WNDPROC proc = user32_wndproc_for_window(h);
+    if (proc)
+        (void)proc(h, WM_DESTROY, 0, 0);
+
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)SYS_WIN_DESTROY), "D"((long long)(unsigned long long)h)
                      : "memory");
+    if (rv && proc)
+        (void)proc(h, WM_NCDESTROY, 0, 0);
+    s_destroying_window = previous_destroy;
     return rv ? 1 : 0;
 }
 
@@ -1275,8 +1294,6 @@ typedef INT_PTR(__stdcall* DLGPROC)(HANDLE, UINT, WPARAM, LPARAM);
 /* Win32 message IDs and style bits used by the dialog manager. */
 #define WM_INITDIALOG 0x0110
 #define WM_COMMAND 0x0111
-#define WM_CLOSE 0x0010
-#define WM_DESTROY 0x0002
 #define WM_PAINT 0x000F
 #define WM_SETTEXT 0x000C
 #define WM_GETTEXT 0x000D

@@ -99,7 +99,10 @@ typedef struct
 } WNDCLASS32;
 
 #define WM_PAINT 0x000F
+#define WM_CLOSE 0x0010
 #define WM_QUIT 0x0012
+#define WM_DESTROY 0x0002
+#define WM_NCDESTROY 0x0082
 #define WM_APP 0x8000
 #define PM_REMOVE 0x0001
 #define SW_SHOW 5
@@ -120,6 +123,8 @@ static volatile unsigned g_wndproc_calls = 0;
 static volatile UINT g_last_msg = 0;
 static volatile WPARAM g_last_wparam = 0;
 static volatile LPARAM g_last_lparam = 0;
+static volatile unsigned g_destroy_calls = 0;
+static volatile unsigned g_nc_destroy_calls = 0;
 static HANDLE g_paint_hwnd = 0;
 
 static void paint_window(HANDLE hwnd);
@@ -135,6 +140,10 @@ static LRESULT __stdcall TestWndProc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
         paint_window(hwnd);
         return 0;
     }
+    if (msg == WM_DESTROY)
+        ++g_destroy_calls;
+    if (msg == WM_NCDESTROY)
+        ++g_nc_destroy_calls;
     return DefWindowProcA(hwnd, msg, w, l);
 }
 
@@ -345,8 +354,32 @@ void mainCRTStartup(void)
         fail(21);
     say("[pe32-window] quit ok\r\n");
 
-    if (!DestroyWindow(hwnd))
+    /* 11. Default WM_CLOSE handling must synchronously destroy the HWND and
+     *     deliver exactly one WM_DESTROY / WM_NCDESTROY pair to this WndProc. */
+    if (!PostMessageA(hwnd, WM_CLOSE, 0, 0))
         fail(22);
+    MSG32 close_msg;
+    int saw_close = 0;
+    for (int i = 0; i < 32 && !saw_close; ++i)
+    {
+        if (!PeekMessageA(&close_msg, hwnd, 0, 0, PM_REMOVE))
+            break;
+        if (close_msg.message == WM_CLOSE)
+            saw_close = 1;
+        (void)DispatchMessageA(&close_msg);
+    }
+    if (!saw_close)
+        fail(23);
+    if (g_destroy_calls != 1)
+        fail_val(24, g_destroy_calls);
+    if (g_nc_destroy_calls != 1)
+        fail_val(25, g_nc_destroy_calls);
+    RECT gone = {-1, -1, -1, -1};
+    if (GetClientRect(hwnd, &gone))
+        fail(26);
+    if (DestroyWindow(hwnd))
+        fail(27);
+    say("[pe32-window] close lifecycle ok\r\n");
 
     say("[pe32-window] all checks passed — exit rc=0x42\r\n");
     say("[ring3-pe32-window] PASS\r\n");
