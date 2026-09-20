@@ -690,3 +690,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize the live network smoke API contract with static or DHCP routes
 - **Claimed**: 2026-09-20T13:51:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-wiki-autosync
+- **Session**: `DESKTOP-950K3EI-549`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `wiki/Home.md,wiki/subsystems/Win32-DLLs.md,wiki/specifications/Syscall-ABI.md`
+- **Description**: Refresh generated wiki inventories after the integrated networking slice
+- **Claimed**: 2026-09-20T13:58:55Z
+- **Status**: IN PROGRESS
