@@ -32,6 +32,7 @@
 #include "drivers/net/iwlwifi.h"
 #include "drivers/net/mt76.h"
 #include "drivers/net/pcnet.h"
+#include "drivers/net/rtl8125.h"
 #include "drivers/net/rtl88xx.h"
 #include "drivers/net/wireless_watch.h"
 #include "drivers/pci/pci.h"
@@ -1139,6 +1140,12 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
         wireless_shell = Mt76BringUp(n);
         brought_up = wireless_shell;
     }
+    else if (n.vendor_id == kVendorRealtek && nic_ids::Realtek8125BringUpEligible(n.device_id, n.subsystem_vendor_id,
+                                                                                     n.subsystem_device_id,
+                                                                                     n.revision_id))
+    {
+        brought_up = Rtl8125BringUp(n, iface_index);
+    }
     else if (n.vendor_id == kVendorAmd && n.device_id == 0x2000)
     {
         brought_up = PcnetBringUp(n, iface_index);
@@ -1288,8 +1295,15 @@ bool NicRecordIsWireless(const NicInfo& nic)
         // metadata records BAR2 for future split backends, but its safe-probe
         // gate is closed, so no speculative register read occurs.
         nic.mmio_bar = d.vendor_id == kVendorRealtek ? nic_ids::RealtekWirelessPreferredMmioBar(d.device_id) : 0;
+        if (d.vendor_id == kVendorRealtek &&
+            nic_ids::Realtek8125BringUpEligible(d.device_id, d.subsystem_vendor_id, d.subsystem_device_id,
+                                                d.revision_id))
+            nic.mmio_bar = 0;
         const bool requires_mapped_mmio =
             (d.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(d.device_id)) ||
+            (d.vendor_id == kVendorRealtek &&
+             nic_ids::Realtek8125BringUpEligible(d.device_id, d.subsystem_vendor_id, d.subsystem_device_id,
+                                                 d.revision_id)) ||
             IwlwifiMatches(d.vendor_id, d.device_id) || Rtl88xxMatches(d.vendor_id, d.device_id) ||
             Bcm43xxMatches(nic) || Mt76Matches(d.vendor_id, d.device_id);
         if (requires_mapped_mmio)
@@ -1466,6 +1480,10 @@ bool HasOnlineBackendWithoutRestartContract()
             continue;
         if (nic.vendor_id == kVendorAmd && nic.device_id == 0x2000)
             continue;
+        if (nic.vendor_id == kVendorRealtek &&
+            nic_ids::Realtek8125BringUpEligible(nic.device_id, nic.subsystem_vendor_id, nic.subsystem_device_id,
+                                                nic.revision_id))
+            continue;
         if (nic.vendor_id == kVendorRedHatVirt && nic_ids::VirtioNetBringUpEligible(nic.device_id))
             continue;
         KLOG_WARN_V("drivers/net", "shutdown refused for live backend without teardown contract", nic.device_id);
@@ -1493,8 +1511,9 @@ bool HasOnlineBackendWithoutRestartContract()
     const bool unsupported_online = HasOnlineBackendWithoutRestartContract();
     const bool pcnet_quiesced = PcnetQuiesceAll();
     const bool e1000_quiesced = E1000QuiesceAll();
+    const bool rtl8125_quiesced = Rtl8125QuiesceAll();
     const bool virtio_net_quiesced = ::duetos::drivers::virtio::VirtioNetQuiesce();
-    if (unsupported_online || !pcnet_quiesced || !e1000_quiesced || !virtio_net_quiesced)
+    if (unsupported_online || !pcnet_quiesced || !e1000_quiesced || !rtl8125_quiesced || !virtio_net_quiesced)
     {
         sync::SpinLockGuard guard(g_nic_registry_lock);
         g_nic_registry_state = NicRegistryState::Quarantined;

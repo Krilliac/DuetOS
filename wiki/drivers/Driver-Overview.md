@@ -23,7 +23,7 @@ directly.
 | VirtIO | `kernel/drivers/virtio/` | Shared transport + virtio-rng, virtio-blk, virtio-net (virtqueues + I/O) |
 | Storage | `kernel/drivers/storage/` | NVMe, AHCI |
 | USB | `kernel/drivers/usb/` | xHCI host + HID/MSC/CDC-ECM/RNDIS class |
-| Network | `kernel/drivers/net/` | AMD PCnet (wired); mt76 / iwlwifi / rtl88xx / bcm43xx / ath9k_htc (wireless shells) |
+| Network | `kernel/drivers/net/` | AMD PCnet and exact-identity RTL8125 (wired); mt76 / iwlwifi / rtl88xx / bcm43xx / ath9k_htc (wireless shells) |
 | GPU | `kernel/drivers/gpu/` | virtio-gpu, Intel/AMD/NVIDIA discovery |
 | Audio | `kernel/drivers/audio/` | Intel HDA |
 | Input | `kernel/drivers/input/` | PS/2 keyboard/mouse |
@@ -58,7 +58,7 @@ tier 3 the dev/QEMU-only path.
 |-------|--------|--------|--------------|
 | CPU | Intel x86_64 (Coffee Lake → Sapphire Rapids), AMD Zen+ | Intel pre-Coffee Lake, AMD pre-Zen+ | QEMU TCG |
 | GPU | Intel iGPU (Gen9+), AMD Radeon (GFX9+), NVIDIA (Turing+) | Older Intel/AMD/NVIDIA | virtio-gpu |
-| NIC | AMD PCnet (implemented); Intel e1000 / e1000e (planned, not yet implemented) | Realtek rtl8169, Broadcom bcm57xx | virtio-net, AMD PCnet |
+| NIC | AMD PCnet; exact-identity Realtek RTL8125 | Realtek rtl8169, Broadcom bcm57xx | virtio-net, AMD PCnet |
 | Wi-Fi | iwlwifi (Intel), rtl88xx, bcm43xx | (none yet) | (none) |
 | USB | xHCI 1.0+ | EHCI (legacy fallback) | (none) |
 | Storage | NVMe, AHCI/SATA | (legacy IDE deferred) | virtio-blk |
