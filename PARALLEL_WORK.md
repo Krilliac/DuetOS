@@ -883,10 +883,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T22:46:31Z
 - **Status**: COMPLETED @ 2026-09-20T23:29:12Z
 
-### [ACTIVE] codex-duetos-critical-gsbase-contract
+### [DONE] codex-duetos-critical-gsbase-contract
 - **Session**: `DESKTOP-950K3EI-443`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/cpu/percpu.h`
 - **Description**: Keep PerCpu critical-counter ownership documentation aligned with stale-GS recovery
 - **Claimed**: 2026-09-20T23:00:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T23:29:23Z
