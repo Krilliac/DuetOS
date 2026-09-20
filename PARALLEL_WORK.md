@@ -723,13 +723,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T15:15:27Z
 - **Status**: COMPLETED @ 2026-09-20T15:55:16Z
 
-### [ACTIVE] codex-duetos-storage-bounds-header
+### [DONE] codex-duetos-storage-bounds-header
 - **Session**: `DESKTOP-950K3EI-1373`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/fs/fat32_write_bounds.h`
 - **Description**: Add checked FAT32 write-range helper used by production and hosted tests
 - **Claimed**: 2026-09-20T15:17:13Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T15:55:31Z
 
 ### [ACTIVE] codex-duetos-storage-doc-sync
 - **Session**: `DESKTOP-950K3EI-757`
