@@ -250,16 +250,32 @@ class DrshSession:
         return plaintext
 
     def open_shell(self) -> None:
-        if self.active_channel is not None:
-            raise DrshProtocolError("a DRSH channel is already active")
-        self.send_authenticated(FRAME_CHANNEL_OPEN, CH_CONTROL, bytes([KIND_SHELL]))
-        channel_id = self.expect_authenticated(FRAME_CHANNEL_ACK, CH_CONTROL)
-        if channel_id != bytes([CH_SHELL]):
-            raise DrshProtocolError("invalid shell channel ACK payload")
+        self.open_channel(KIND_SHELL, CH_SHELL)
         greeting = self.expect_authenticated(FRAME_CHANNEL_DATA, CH_SHELL)
         if greeting != SHELL_PROMPT:
             raise DrshProtocolError("shell channel did not begin with the DRSH prompt")
-        self.active_channel = CH_SHELL
+
+    def open_channel(self, kind: int, expected_channel: int, parameters: bytes = b"") -> None:
+        if self.active_channel is not None:
+            raise DrshProtocolError("a DRSH channel is already active")
+        if not 0 <= kind <= 0xFF or not 1 <= expected_channel <= 0xFF:
+            raise ValueError("invalid DRSH channel kind or identifier")
+        if len(parameters) > 255:
+            raise ValueError("DRSH channel parameters are too large")
+        self.send_authenticated(FRAME_CHANNEL_OPEN, CH_CONTROL, bytes([kind]) + parameters)
+        channel_id = self.expect_authenticated(FRAME_CHANNEL_ACK, CH_CONTROL)
+        if channel_id != bytes([expected_channel]):
+            raise DrshProtocolError("invalid channel ACK payload")
+        self.active_channel = expected_channel
+
+    def open_desktop(self, width: int = 0, height: int = 0) -> None:
+        if width == 0 and height == 0:
+            parameters = b""
+        elif 1 <= width <= 0xFFFF and 1 <= height <= 0xFFFF:
+            parameters = struct.pack(">HH", width, height)
+        else:
+            raise ValueError("desktop dimensions must both be zero or fit u16")
+        self.open_channel(KIND_DESKTOP, CH_DESKTOP, parameters)
 
     def run_shell_command(self, command: str, timeout: float = 3.0) -> str:
         if self.active_channel != CH_SHELL:

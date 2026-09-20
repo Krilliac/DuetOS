@@ -160,6 +160,18 @@ add_test(
             --root "${CMAKE_SOURCE_DIR}/../.."
 )
 
+add_test(
+    NAME drsh_desktop_client
+    COMMAND Python3::Interpreter -B
+            "${CMAKE_SOURCE_DIR}/../../tools/test/test-drsh-desktop.py"
+)
+
+add_test(
+    NAME drsh_agent_client
+    COMMAND Python3::Interpreter -B
+            "${CMAKE_SOURCE_DIR}/../../tools/test/test-drsh-agent.py"
+)
+
 # The VMM's own vmm-tests target only builds on a WHP-capable
 # Windows host; this models the same GDB packet length rules in
 # Python so the untrusted-socket contract is checked everywhere.
@@ -223,6 +235,7 @@ if(MINGW)
 endif()
 
 add_host_test(result)
+add_host_test(drsh_desktop_wire)
 add_host_test(syscall_error)
 target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/syscall/error.cpp")
 add_host_test(message_abi)

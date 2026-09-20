@@ -146,7 +146,7 @@ void DeriveSessionKeys(const u8 pmk[kDrshPmkBytes], const u8 nonce_s[kDrshNonceB
 bool ShellChannelService(DrshTransport& t, DrshSession& s, u8 channel_id);
 
 // drsh_desktop.cpp — service the desktop channel.
-bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id);
+bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id, u16 requested_width, u16 requested_height);
 
 // drsh_server.cpp — accept loop, handshake invocation, channel demux.
 // Spawned as a kernel task by DrshServerStart. Returns when the

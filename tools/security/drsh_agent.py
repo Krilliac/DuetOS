@@ -19,6 +19,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Sequence
 
 from drsh_wire import DrshDisconnected, DrshProtocolError, DrshSession
 
@@ -108,11 +109,18 @@ def command_plan(args: argparse.Namespace) -> list[str]:
     return commands
 
 
-def connect(host: str, port: int, password: bytes, retries: int, retry_delay: float) -> DrshSession:
+def connect(
+    host: str,
+    port: int,
+    password: bytes,
+    retries: int,
+    retry_delay: float,
+    connect_timeout: float,
+) -> DrshSession:
     last_error: BaseException | None = None
     for attempt in range(retries):
         try:
-            session = DrshSession.connect(host, port, password, timeout=5.0)
+            session = DrshSession.connect(host, port, password, timeout=connect_timeout)
             session.open_shell()
             return session
         except DrshProtocolError:
@@ -127,7 +135,7 @@ def connect(host: str, port: int, password: bytes, retries: int, retry_delay: fl
     raise last_error
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one real authenticated DRSH agent session")
     parser.add_argument("--agent", default=os.environ.get("DRSH_AGENT", "agent"), help="stable agent name for logs")
     parser.add_argument("--host", default=os.environ.get("DRSH_HOST", "127.0.0.1"))
@@ -137,18 +145,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--command", action="append", default=[], help="guest shell command; may be repeated")
     parser.add_argument("--commands-file", type=Path, help="UTF-8 file containing one guest command per line")
     parser.add_argument("--connect-retries", type=int, default=8)
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=15.0,
+        help="TCP and authentication timeout; TCG guests can need several seconds",
+    )
     parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--command-timeout", type=float, default=10.0)
     parser.add_argument("--max-output", type=int, default=16_384, help="cap captured output per command")
     parser.add_argument("--jsonl", action="store_true", help="emit machine-readable event records")
     parser.add_argument("--allow-guest-control", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without logging in")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
     args = parse_args()
-    if args.connect_retries < 1 or args.retry_delay < 0 or args.command_timeout <= 0 or args.max_output < 1:
+    if (
+        args.connect_retries < 1
+        or args.connect_timeout <= 0
+        or args.retry_delay < 0
+        or args.command_timeout <= 0
+        or args.max_output < 1
+    ):
         print("invalid retry, timeout, or output limits", file=sys.stderr)
         return 2
     custom_input = bool(args.command or args.commands_file or (args.profile is None and not sys.stdin.isatty()))
@@ -172,7 +192,14 @@ def main() -> int:
 
     session: DrshSession | None = None
     try:
-        session = connect(args.host, args.port, args.password.encode("utf-8"), args.connect_retries, args.retry_delay)
+        session = connect(
+            args.host,
+            args.port,
+            args.password.encode("utf-8"),
+            args.connect_retries,
+            args.retry_delay,
+            args.connect_timeout,
+        )
         emit(args.jsonl, "login", agent=args.agent, host=args.host, port=args.port, ok=True)
         for command in commands:
             try:

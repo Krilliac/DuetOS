@@ -120,6 +120,50 @@ For a deliberately externally reachable QEMU test forward, add
 `127.0.0.1` to `0.0.0.0`; it is independent of, and should be paired with,
 the guest's `drshd start --external` policy.
 
+## Desktop capture and bounded control
+
+`tools/security/drsh_desktop.py` is the host-side desktop client. It performs
+the same authenticated handshake as the shell agent, requests a bounded
+framebuffer stream, validates complete tile coverage, and writes a PNG or PPM
+without third-party image dependencies. Supply the password through the
+environment so it does not appear in shell history:
+
+```text
+DRSH_PASSWORD='<password>' python3 tools/security/drsh_desktop.py \
+  --host 127.0.0.1 --port 4322 \
+  --screenshot capture.png --jsonl
+```
+
+The default request is 256 x 192, downscaled by the guest before transmission.
+Use `--width 0 --height 0` only when a native-size frame is required; a
+1024 x 768 frame carries hundreds of encrypted tiles and is substantially
+slower under TCG. The host rejects frames larger than 3840 x 2160 to bound
+memory use. `--connect-timeout` and `--frame-timeout` bound the two phases
+independently.
+
+Input is an explicit opt-in. Provide a bounded JSON array and
+`--allow-guest-control`; without that acknowledgement the client refuses to
+send key or mouse events:
+
+```json
+[
+  {"type": "mouse", "dx": 40, "dy": 20, "buttons": 0},
+  {"type": "key", "code": 65, "modifiers": 0, "pressed": true},
+  {"type": "key", "code": 65, "modifiers": 0, "pressed": false}
+]
+```
+
+```text
+DRSH_PASSWORD='<password>' python3 tools/security/drsh_desktop.py \
+  --host 127.0.0.1 --port 4322 --screenshot after.png \
+  --actions actions.json --allow-guest-control --jsonl
+```
+
+JSONL output records the authenticated login, each action followed by a
+complete returned frame, and the final screenshot dimensions and SHA-256.
+The client does not expose a listener or change `drshd` access policy; making
+the guest reachable beyond loopback remains a separate operator decision.
+
 ## Threat model
 
 DRSH defends against an attacker on the wire — passive eavesdropping
@@ -276,6 +320,12 @@ Inbound `CHANNEL_DATA` carries input events; outbound `CHANNEL_DATA`
 carries framebuffer tile updates. The payload's first byte is a
 sub-type:
 
+The desktop `CHANNEL_OPEN` payload is either the legacy one-byte desktop kind
+or `kind(1) width_be(2) height_be(2)`. Non-zero dimensions request a
+nearest-neighbour downscaled stream, clamped to the native framebuffer; the
+legacy form requests native dimensions. Every refresh begins with a new
+`FrameStart`, so a client can validate each frame independently.
+
 | Sub-type | Direction | Payload (after sub-type byte) |
 |---|---|---|
 | 0 `TileBlit` | S → C | `x_be(2) y_be(2) w_be(2) h_be(2)` + `w*h*4` BGRA bytes |
@@ -333,5 +383,7 @@ explicit `PASS` line so CI can grep for it:
 - [`kernel/net/drsh/drsh_transport.cpp`](../../kernel/net/drsh/drsh_transport.cpp) — socket-backed transport wrapper.
 - [`kernel/net/drsh/drsh_shell.cpp`](../../kernel/net/drsh/drsh_shell.cpp) — shell channel service.
 - [`kernel/net/drsh/drsh_desktop.cpp`](../../kernel/net/drsh/drsh_desktop.cpp) — desktop channel service.
+- [`kernel/net/drsh/drsh_desktop_wire.h`](../../kernel/net/drsh/drsh_desktop_wire.h) — validated desktop wire decoders and scaling helpers.
 - [`kernel/net/drsh/drsh_server.cpp`](../../kernel/net/drsh/drsh_server.cpp) — accept loop, session orchestration, self-test.
 - [`kernel/shell/shell_drsh.cpp`](../../kernel/shell/shell_drsh.cpp) — `drshd` shell command.
+- [`tools/security/drsh_desktop.py`](../../tools/security/drsh_desktop.py) — authenticated host capture and bounded input client.
