@@ -827,13 +827,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T18:30:39Z
 - **Status**: COMPLETED @ 2026-09-20T18:52:35Z
 
-### [ACTIVE] codex-duetos-pe-winapi-budget
+### [DONE] codex-duetos-pe-winapi-budget
 - **Session**: `DESKTOP-950K3EI-1287`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/test/smoke_profile.cpp`
 - **Description**: Give the comprehensive pe-winapi smoke enough deterministic time under full TCG instrumentation
 - **Claimed**: 2026-09-20T18:52:46Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T19:08:02Z
 
 ### [ACTIVE] codex-duetos-pe-winapi-stress-tail
 - **Session**: `DESKTOP-950K3EI-1979`
