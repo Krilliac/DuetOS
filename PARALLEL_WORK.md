@@ -730,3 +730,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add checked FAT32 write-range helper used by production and hosted tests
 - **Claimed**: 2026-09-20T15:17:13Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-storage-doc-sync
+- **Session**: `DESKTOP-950K3EI-757`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `wiki/filesystem/VFS.md,wiki/security/Hardware-Safety.md`
+- **Description**: Synchronize VFS and hardware-safety docs with bounded FAT32 growth semantics
+- **Claimed**: 2026-09-20T15:53:43Z
+- **Status**: IN PROGRESS
