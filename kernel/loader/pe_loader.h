@@ -165,12 +165,16 @@ void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len);
 /// (zero / placeholder) values and any export that calls one
 /// of its imports crashes on the first indirect call.
 ///
+/// `loaded_base` is the image's actual mapped base. Callers must pass it
+/// explicitly because the image may not be present in `preloaded_dlls` yet
+/// (runtime LoadLibrary binds before publishing the image table row).
+///
 /// Returns true iff every import resolved. Returns false on a
 /// header parse failure or an unresolvable import that had no
 /// catch-all fallback. The pattern matches `PeLoad`'s
 /// internal import-walk; this is the same code reused on a
 /// loaded-DLL basis.
-bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
+bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, u64 loaded_base,
                                     const DllImage* preloaded_dlls, u64 preloaded_dll_count);
 
 /// True iff `dll_name` is a Windows API-set contract name —

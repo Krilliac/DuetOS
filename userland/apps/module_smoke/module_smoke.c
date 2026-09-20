@@ -112,13 +112,16 @@ void __cdecl mainCRTStartup(void)
 
     /* LoadLibraryW("customdll2.dll") — exercises the
      * disk-load path via SYS_DLL_LOAD_FROM_PATH. Under emulator,
-     * customdll2.dll is NOT in the preload set (essential=false),
-     * so GetModuleHandleW misses and the kernel falls through to
-     * the /lib/customdll2.dll ramfs lookup + DllLoad. Under bare
-     * metal, it IS preloaded, and the fast path returns the
+     * customdll2.dll is deliberately skipped by both the curated
+     * preload and the generic /lib fallback (essential=false), so
+     * GetModuleHandleW misses and the kernel reaches the
+     * /lib/customdll2.dll ramfs lookup + DllLoad. Under bare
+     * metal, it is preloaded and the fast path returns the
      * existing base. Either way the call returns a valid handle
      * and GetProcAddress(CustomDouble) yields a function that
-     * doubles its argument. */
+     * doubles its argument. CustomImportedTick calls an imported
+     * kernel32!GetTickCount from INSIDE customdll2, proving the runtime
+     * loader patched the DLL's own IAT before publishing it. */
     {
         HMODULE m = LoadLibraryW(L"customdll2.dll");
         Out("[module_smoke] LoadLibraryW(cdll2)    = ");
@@ -138,6 +141,31 @@ void __cdecl mainCRTStartup(void)
             {
                 int v = fn(21);
                 Out(v == 42 ? "PASS\r\n" : "FAIL/wrong-result\r\n");
+            }
+
+            typedef DWORD(__stdcall * CustomImportedTickFn)(void);
+            CustomImportedTickFn tick_fn = (CustomImportedTickFn)GetProcAddress(m, "CustomImportedTick");
+            Out("[module_smoke] runtime DLL IAT        = ");
+            if (tick_fn == NULL)
+            {
+                Out("FAIL/no-export\r\n");
+            }
+            else
+            {
+                DWORD tick = tick_fn();
+                if (tick != 0)
+                {
+                    Out("PASS tick=");
+                    OutHex((unsigned long long)tick);
+                    Out("\r\n");
+                    /* One WriteConsole call keeps the verdict intact even
+                     * when SMP diagnostics interleave with the detail line. */
+                    Out("[module_smoke] runtime-dll-iat PASS\r\n");
+                }
+                else
+                {
+                    Out("FAIL/zero-tick\r\n");
+                }
             }
         }
     }

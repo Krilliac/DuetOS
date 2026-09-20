@@ -24,6 +24,12 @@ OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/customdll2"
 SRC_C="${SRC_DIR}/customdll2.c"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
+KERNEL32_LIB="$(dirname "${OUT_HEADER}")/kernel32/kernel32.lib"
+
+if [[ ! -s "${KERNEL32_LIB}" ]]; then
+    echo "build-customdll2.sh: missing import lib ${KERNEL32_LIB}" >&2
+    exit 1
+fi
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/customdll2"
 mkdir -p "${WORK_DIR}"
@@ -54,12 +60,14 @@ rm -f "${DLL}"
 set +e
 "${LLD_LINK}" \
     /dll \
+    /dynamicbase \
     /noentry \
     /nodefaultlib \
     /base:0x10010000 \
     /export:CustomDouble \
+    /export:CustomImportedTick \
     /out:"${DLL}" \
-    "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    "${OBJ}" "${KERNEL32_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then

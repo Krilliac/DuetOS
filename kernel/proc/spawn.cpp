@@ -988,8 +988,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 // without this, N is loaded but its IAT is
                 // never patched and the first import call
                 // from N's exports crashes.
-                (void)duetos::core::PeResolveImportsForLoadedImage(dll.image.file, dll.image.file_len, as,
-                                                                   preloaded_dlls, preloaded_count - 1);
+                (void)duetos::core::PeResolveImportsForLoadedImage(
+                    dll.image.file, dll.image.file_len, as, dll.image.base_va, preloaded_dlls, preloaded_count - 1);
                 arch::SerialLineGuard guard;
                 SerialWrite("[ring3] pre-loaded ");
                 SerialWrite(active_set[i].name);
@@ -1072,6 +1072,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                     continue;
                 if (!ends_with_dll_ci(child->name))
                     continue;
+                // The ramfs `/lib` directory also contains every baked-in
+                // curated DLL. Do not let this generic fallback undo the
+                // preload policy above: under emulation, non-essential entries
+                // are deliberately left unmapped so LoadLibrary can exercise
+                // the runtime path, while essential entries were already
+                // handled by the curated loop. The fallback is for genuinely
+                // additional DLLs, not a second pass over either bitness's
+                // built-in table.
+                bool curated_ramfs_entry = false;
+                for (u64 j = 0; j < kPreloadTableCount && !curated_ramfs_entry; ++j)
+                    curated_ramfs_entry = base_name_ci_eq(kPreloadTable[j].name, child->name);
+                for (u64 j = 0; j < kPreloadTablePe32Count && !curated_ramfs_entry; ++j)
+                    curated_ramfs_entry = base_name_ci_eq(kPreloadTablePe32[j].name, child->name);
+                if (curated_ramfs_entry)
+                    continue;
                 // Skip if a DLL with this name is already preloaded.
                 bool already = false;
                 for (u64 j = 0; j < preloaded_count; ++j)
@@ -1129,8 +1144,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 {
                     preloaded_dlls[preloaded_count] = dyn.image;
                     ++preloaded_count;
-                    (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
-                                                                       preloaded_dlls, preloaded_count - 1);
+                    (void)duetos::core::PeResolveImportsForLoadedImage(
+                        dyn.image.file, dyn.image.file_len, as, dyn.image.base_va, preloaded_dlls, preloaded_count - 1);
                     arch::SerialLineGuard guard;
                     SerialWrite("[ring3] /lib auto-preload ");
                     SerialWrite(child->name);
@@ -1214,7 +1229,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         const DllImage& img = preloaded_dlls[i];
         if (img.file == nullptr || img.file_len == 0)
             continue;
-        (void)duetos::core::PeResolveImportsForLoadedImage(img.file, img.file_len, as, preloaded_dlls, preloaded_count);
+        (void)duetos::core::PeResolveImportsForLoadedImage(img.file, img.file_len, as, img.base_va, preloaded_dlls,
+                                                           preloaded_count);
     }
     // Import-free and TLS-only PEs do not preload any DLLs and remain
     // valid freestanding executables. Imported PE32+ images must prove

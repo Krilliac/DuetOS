@@ -45,6 +45,18 @@ runtime `SYS_DLL_LOAD_FROM_PATH` (`LoadLibraryW`) read that one field,
 so there is a single search path per process rather than a bind-time
 and a run-time answer that can disagree.
 
+Runtime loading is one serialized VM transaction: it acquires
+`ScopedProcessRuntimeAccess`, maps the image, patches the DLL's own IAT
+against the process's existing DLL set, and only then publishes the image in
+`Process::dll_images[]`. The `customdll2.dll` fixture imports
+`kernel32!GetTickCount`; `module_smoke` calls that import through a dynamically
+resolved export, so a mapped-but-unbound DLL faults instead of printing the
+`runtime-dll-iat PASS` oracle. In the strict QEMU profile the fixture is marked
+non-essential and the generic `/lib` fallback excludes all curated-table
+entries, forcing `LoadLibraryW` through the runtime map/bind/publish path. The
+profile requires both `[dll-load] runtime-map PASS` and the imported-call oracle,
+so the preloaded fast path cannot satisfy this test by accident.
+
 Resolution is **import-name driven**, not speculative: only DLLs the
 image (or one of its dependencies) actually names are read, so pointing
 the loader at a game folder does not drag the folder in. It is also
@@ -317,11 +329,19 @@ false` because it dies by design).
   so the bytes must outlive every process that mapped them. The cache
   is bounded rather than reclaimed; a refcounted unload path lands with
   process-teardown DLL unmapping, which does not exist yet.
+- **Runtime `LoadLibrary` does not dispatch `DllMain`.** The image is mapped,
+  its own imports are bound before publication, and exports are callable, but
+  `DLL_PROCESS_ATTACH` / `_DETACH`, per-DLL TLS, refcounts, and unload rollback
+  need a pending-attach + user-trampoline + finalize protocol. A direct jump
+  from the load syscall would be unsafe because `DllMain(FALSE)` must roll the
+  mapping and module-table row back, and no VM lock may be held while user code
+  executes.
 - **No SEH unwinding by the loader**. SEH tables are mapped (so the
   `__C_specific_handler` finds them) but DuetOS does not unwind on
   exception — exceptions inside a PE produce a process kill.
-- **TLS callbacks on DETACH**: `DLL_PROCESS_ATTACH` and
-  `DLL_THREAD_ATTACH` are both delivered (see
+- **Main-image TLS callbacks on DETACH**: `DLL_PROCESS_ATTACH` and
+  `DLL_THREAD_ATTACH` are both delivered for the executable's TLS callback
+  array (see
   [TLS](#tls-static-data-and-callbacks) below), but neither
   `DLL_THREAD_DETACH` nor `DLL_PROCESS_DETACH` is — thread and
   process teardown do not walk the callback array. A CRT that frees

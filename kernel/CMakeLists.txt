@@ -1232,7 +1232,8 @@ duetos_embed_blob(generated_customdll.h
 duetos_embed_blob(generated_customdll2.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-customdll2.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/customdll2/customdll2.c"
-    COMMENT "Compiling + embedding customdll2.dll (multi-DLL preload fixture)")
+    EXTRA_DEPS "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
+    COMMENT "Compiling + embedding customdll2.dll (runtime IAT-binding fixture; links kernel32.lib)")
 
 duetos_embed_blob(generated_kernel32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-dll.sh"

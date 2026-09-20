@@ -157,6 +157,12 @@ add_test(
 )
 
 add_test(
+    NAME runtime_dll_load_contract
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/test-runtime-dll-load-contract.py"
+)
+
+add_test(
     NAME win32_syscall_numbers
     COMMAND Python3::Interpreter
             "${CMAKE_SOURCE_DIR}/../../tools/test/check-syscall-numbers.py"

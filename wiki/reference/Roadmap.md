@@ -1046,52 +1046,31 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
 4. **WSOCK32 / WININET** (realm/login networking) and **FMOD** audio —
    later rungs once it renders.
 
-### Runtime LoadLibrary sees only a hand-picked subset of the shipped DLLs
+### Runtime LoadLibrary lifecycle — attach, TLS, refcount, unload
 
-`spawn.cpp`'s preload set is the authoritative list of ~44 DLLs the
-kernel embeds, but the **runtime** `SYS_DLL_LOAD_FROM_PATH` path resolves
-against ramfs `/lib/`, which `kernel/fs/ramfs.cpp` populates with a
-hand-written `constinit` node per DLL - `customdll`, `customdll2` and
-(2026-07-28) `vulkan-1`. Every other embedded DLL is unreachable by name
-at runtime, even though its bytes are already linked into the image and
-the node costs nothing (the node borrows the blob pointer).
+The old whitelist gap is closed: ramfs `/lib` is derived from the same
+authoritative preload tables as `spawn.cpp`, and side-by-side DLLs use the
+process's recorded image directory. Runtime mapping now runs under process VM
+admission and binds the new DLL's own imports **before** publishing it;
+`customdll2.dll` imports `kernel32!GetTickCount` and `module_smoke` proves the
+call through the runtime-loaded image.
 
-This bit for real: stock `vulkaninfo.exe` `LoadLibrary`s `vulkan-1.dll`
-rather than importing it, missed, and died with an unhandled C++
-exception on a kernel whose Vulkan ICD was online and self-tested. It
-was only reachable at all because `vulkan-1` is marked non-essential and
-the `arch::IsEmulator()` preload trim skips it - so the preload fast path
-did not paper over the gap.
+Still open is the Windows loader lifecycle around that callable image:
 
-Adding one node per observed miss is the whitelist-incompleteness bug
-class: the next app to `LoadLibrary` a shipped DLL by name hits the same
-wall. The fix is to derive the `/lib` node set from the SAME list
-`spawn.cpp` uses, so a DLL cannot be preloadable-but-not-loadable. Doing
-that needs the preload table hoisted out of its enclosing function to
-file scope (it is a function-local `static const` today) and exposed
-through `proc/spawn.h`; that refactor is the whole item.
+1. Build a pending-attach record and a user-mode trampoline for
+   `DllMain(hModule, DLL_PROCESS_ATTACH, nullptr)` without holding the VM
+   transaction lock while user code executes.
+2. Finalize through a syscall: commit on TRUE; on FALSE remove the module-table
+   row and unmap every receipt from the failed load. Nested loads must serialize
+   without deadlocking.
+3. Add module-indexed TLS templates plus thread attach/detach ordering. The
+   existing TLS model belongs to the main executable only.
+4. Add per-process reference counts, `DLL_PROCESS_DETACH`, and real
+   `FreeLibrary` unmapping.
 
-**Amendment (2026-07-29, side-by-side DLL slice).** Two corrections to
-the diagnosis above, from reading the live path rather than the `/lib`
-node list:
-
-1. The exposure is narrower than "every other embedded DLL is
-   unreachable". `SYS_DLL_LOAD_FROM_PATH` consults
-   `ProcessFindDllBaseByName` FIRST, and `SpawnPeFile` registers every
-   preloaded DLL into `proc->dll_images[]` — so for an import-bearing PE
-   a runtime `LoadLibrary("user32.dll")` already hits the process image
-   table and never reaches `/lib`. The real hole is exactly the case the
-   `vulkaninfo` story describes: a DLL that the `arch::IsEmulator()`
-   preload trim skipped (`essential = false`) was never registered, so
-   there was nothing in the table to find. Deriving `/lib` from the
-   preload list still fixes it; so would not trimming.
-2. There is now a third answer for the same shape: a DLL shipped on the
-   volume beside the `.exe` is reachable at runtime via the same
-   syscall, because `SYS_DLL_LOAD_FROM_PATH` falls through to the
-   side-by-side resolver using `Process::sxs_dir`. That does not close
-   this item — it covers app-supplied DLLs, not kernel-shipped ones —
-   but it removes the "the app must ask us to embed it" pressure that
-   made this item urgent.
+**Proof:** an import-bearing DLL sees its attach-initialized global; a FALSE
+fixture returns NULL and leaves no discoverable module or mapped residue; a
+load/free loop does not grow the process's region or DLL tables.
 
 ### BattleBit's next blocker: the guard default-denies UnityPlayer.dll
 

@@ -357,6 +357,8 @@ case "${PROFILE}" in
         scenario=(
             'pe spawn name="ring3-winkill"'
             "Windows Kill "
+            "[dll-load] runtime-map PASS"
+            "[module_smoke] runtime-dll-iat PASS"
         )
         ;;
     linux)

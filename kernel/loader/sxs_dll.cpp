@@ -262,8 +262,8 @@ u64 MapAndAppend(const char* label, const u8* bytes, u64 len, duetos::mm::Addres
     // Bind the new DLL's own IAT against everything loaded so far.
     // Without this its exports call through unpatched slots and the
     // first indirect call from inside it faults.
-    (void)core::PeResolveImportsForLoadedImage(loaded.image.file, loaded.image.file_len, as, set.images,
-                                               *set.count - 1);
+    (void)core::PeResolveImportsForLoadedImage(loaded.image.file, loaded.image.file_len, as, loaded.image.base_va,
+                                               set.images, *set.count - 1);
     {
         SerialLineGuard guard;
         SerialWrite("[sxs] loaded name=\"");

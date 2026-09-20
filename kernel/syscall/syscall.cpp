@@ -1195,6 +1195,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // name is expensive; a miss named wrongly is worse.
         const u64 ret_addr = frame->rdi;
         Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ScopedProcessRuntimeAccess runtime_access(proc);
+        if (!runtime_access)
+        {
+            frame->rax = 0;
+            return;
+        }
 
         u64 slot_va = 0;
         // Why the decode failed, when it did. Kept as a string so
@@ -1294,7 +1305,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, slot_va != 0 ? slot_va : ret_addr);
 
         const char* name = nullptr;
-        if (proc != nullptr && slot_va != 0)
+        if (slot_va != 0)
         {
             for (u64 i = 0; i < proc->win32_iat_miss_count; ++i)
             {
@@ -1312,7 +1323,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Attribute the call site to a module so the line says WHO
         // called, not just WHAT. `ProcessFindModuleBaseByVa` already
         // owns the EXE + DLL range map used by the SEH frame walk.
-        const u64 caller_base = (proc != nullptr) ? ProcessFindModuleBaseByVa(proc, ret_addr) : 0;
+        const u64 caller_base = ProcessFindModuleBaseByVa(proc, ret_addr);
 
         arch::SerialWrite("[win32-miss] fn=\"");
         arch::SerialWrite(name != nullptr ? name : "<unnamed>");
@@ -4401,6 +4412,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        ScopedProcessRuntimeAccess runtime_access(proc);
+        if (!runtime_access)
+        {
+            frame->rax = 0;
+            return;
+        }
         frame->rax = ProcessFindDllBaseByName(proc, kname);
         return;
     }
@@ -4411,6 +4428,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // base (EXE or preloaded DLL), or 0 if no module matches.
         Process* proc = CurrentProcess();
         if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        ScopedProcessRuntimeAccess runtime_access(proc);
+        if (!runtime_access)
         {
             frame->rax = 0;
             return;
@@ -4509,6 +4532,16 @@ void SyscallDispatch(arch::TrapFrame* frame)
             }
         }
 
+        // Runtime DLL loads mutate both the process address space and its
+        // public DLL image table. Serialize the whole lookup/map/bind/publish
+        // transaction against sibling LoadLibrary calls and process teardown.
+        ScopedProcessRuntimeAccess runtime_access(proc);
+        if (!runtime_access)
+        {
+            frame->rax = 0;
+            return;
+        }
+
         // Idempotent: if the DLL is already in the process's image
         // table (matched by its EAT-stamped DLL name vs the
         // requested basename, both `.dll`-suffix-tolerant), return
@@ -4591,10 +4624,51 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     src.dir[di] = proc->sxs_dir[di];
                 src.dir[di] = '\0';
 
+                const u64 first_new_image = proc->dll_image_count;
                 const ::duetos::loader::DllSet set{proc->dll_images, &proc->dll_image_count, Process::kDllImageCap};
                 const u64 base = ::duetos::loader::SxsLoadNamed(src, kname, proc->as, set);
                 if (base != 0)
                 {
+                    const DllImage* root_image = nullptr;
+                    for (u64 i = first_new_image; i < proc->dll_image_count; ++i)
+                    {
+                        if (proc->dll_images[i].base_va == base)
+                        {
+                            root_image = &proc->dll_images[i];
+                            break;
+                        }
+                    }
+                    bool imports_ok = root_image != nullptr;
+                    if (root_image != nullptr)
+                    {
+                        (void)::duetos::loader::SxsResolveImports(src, root_image->file, root_image->file_len, proc->as,
+                                                                  set, 1);
+                        for (u64 i = first_new_image; i < proc->dll_image_count; ++i)
+                        {
+                            const DllImage& image = proc->dll_images[i];
+                            if (!PeResolveImportsForLoadedImage(image.file, image.file_len, proc->as, image.base_va,
+                                                                proc->dll_images, proc->dll_image_count))
+                            {
+                                imports_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!imports_ok)
+                    {
+                        // GAP: DllLoad has already committed the address-space
+                        // mappings. Hide every tentative table row so no export
+                        // is callable; exact receipt-backed unmap belongs to the
+                        // pending-attach/rollback loader transaction.
+                        for (u64 i = first_new_image; i < proc->dll_image_count; ++i)
+                            proc->dll_images[i] = DllImage{};
+                        proc->dll_image_count = first_new_image;
+                        arch::SerialWrite("[dll-load] side-by-side import bind FAIL name=\"");
+                        arch::SerialWrite(kname);
+                        arch::SerialWrite("\"\n");
+                        frame->rax = 0;
+                        return;
+                    }
                     arch::SerialWrite("[dll-load] OK (side-by-side) name=\"");
                     arch::SerialWrite(kname);
                     arch::SerialWrite("\" base=");
@@ -4700,6 +4774,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        // DllLoad maps sections and parses the EAT only. Patch the DLL's own
+        // IAT against the process's already-published DLL set before making
+        // this image discoverable through GetModuleHandle/GetProcAddress.
+        // Publishing first would let a sibling thread call an export while
+        // its imported call slots still contain on-disk placeholders.
+        if (!PeResolveImportsForLoadedImage(dl.image.file, dl.image.file_len, proc->as, dl.image.base_va,
+                                            proc->dll_images, proc->dll_image_count))
+        {
+            // GAP: DllLoad has committed the hidden mapping. The image is not
+            // published, so no caller can execute it; receipt-backed unmap is
+            // part of the pending-attach/rollback loader transaction.
+            arch::SerialWrite("[dll-load] import bind FAIL path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = 0;
+            return;
+        }
         if (!ProcessRegisterDllImage(proc, dl.image))
         {
             arch::SerialWrite("[dll-load] image-table FULL pid=");
@@ -4708,6 +4799,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        // Atomic scenario oracle: the strict VM profile combines this with
+        // module_smoke's imported-export call, proving the slow path actually
+        // mapped, bound, and published a DLL instead of taking the preloaded
+        // GetModuleHandle fast path.
+        arch::SerialWrite("[dll-load] runtime-map PASS\n");
         arch::SerialWrite("[dll-load] OK name=\"");
         arch::SerialWrite(kname);
         arch::SerialWrite("\" base=");
@@ -5208,6 +5304,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         char name_buf[kDllFuncNameMax + 1];
         if (frame->rsi == 0 ||
             !mm::CopyUserCString(name_buf, sizeof(name_buf), reinterpret_cast<const void*>(frame->rsi)).ok())
+        {
+            frame->rax = 0;
+            return;
+        }
+        ScopedProcessRuntimeAccess runtime_access(proc);
+        if (!runtime_access)
         {
             frame->rax = 0;
             return;
