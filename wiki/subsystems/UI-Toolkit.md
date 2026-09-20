@@ -80,6 +80,7 @@ and the compositor flushes through damage rects.
 | [`font8x8.h`](../../kernel/drivers/video/font8x8.h) / `.cpp` | 8×8 bitmap ASCII font (case-folded lowercase → uppercase). |
 | [`ttf.h`](../../kernel/drivers/video/ttf.h) / `.cpp` | TrueType parser. |
 | [`ttf_raster.h`](../../kernel/drivers/video/ttf_raster.h) / `.cpp` | TrueType outline rasteriser. |
+| [`chrome_text.h`](../../kernel/drivers/video/chrome_text.h) / `.cpp` | Role- and weight-aware chrome text dispatch. Measurement selects the same regular or bold face as painting so centred labels and title/subtitle anchors use the rendered advance. |
 | [`svg.h`](../../kernel/drivers/video/svg.h) / `.cpp` | Static SVG parser for icons + the device theme spec. |
 | [`wallpaper.h`](../../kernel/drivers/video/wallpaper.h) / `.cpp` | Desktop wallpaper renderer. |
 | [`theme.h`](../../kernel/drivers/video/theme.h) / `.cpp` | Theme engine — colour palettes, chrome look, cursor colours. |
@@ -204,6 +205,12 @@ Two rasterisers ship side by side:
 The TTF rasteriser is single-threaded — only the compositor calls it.
 That keeps the cache lock-free.
 
+Small chrome text shares one em-square baseline and one supersample grid
+across the whole run.  Sub-half-pixel round-letter overshoot is snapped to
+that baseline, preventing 11/13 px labels such as `BIG.TXT` and `CLOCK` from
+acquiring alternating cap or baseline rows.  Full TrueType bytecode hinting
+and subpixel LCD antialiasing are still outside the current rasteriser.
+
 ## Drag and Drop
 
 `dnd.h` supports per-window drop-target registration:
@@ -244,8 +251,8 @@ context. Userland apps reach it through the Win32 syscall surface
 - **No multi-monitor.** Single scanout.
 - **No window animation framework.** Window moves are direct, not
   tweened.
-- **TTF rasteriser is bitmap-quality.** No subpixel-AA yet. Visible
-  on high-DPI scanouts.
+- **TTF rasteriser is grayscale-AA only.** Baseline grid fitting is present,
+  but there is no TrueType bytecode interpreter or subpixel LCD AA yet.
 - **Drag-and-drop within-process only.** Cross-process drag via
   clipboard payloads is on the Roadmap.
 

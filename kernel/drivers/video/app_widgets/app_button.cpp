@@ -67,7 +67,7 @@ void AppButton::PaintSelf(Compose& /*c*/) const
 
     if (label != nullptr && label[0] != '\0')
     {
-        const u32 lw = ChromeTextMeasure(ChromeTextRole::Body, label);
+        const u32 lw = ChromeTextMeasure(ChromeTextRole::Body, label, weight);
         const u32 lh = ChromeTextRoleHeight(ChromeTextRole::Body);
         const u32 tx = align_left ? bounds.x + pad_left : bounds.x + (bounds.w > lw ? (bounds.w - lw) / 2 : 0);
         const u32 ty = bounds.y + (bounds.h > lh ? (bounds.h - lh) / 2 : 0);

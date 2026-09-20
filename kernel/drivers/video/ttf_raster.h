@@ -33,10 +33,10 @@
  *   - 4×4 supersample (16 levels of coverage). Higher quality at
  *     the same per-glyph cost would need a real edge-coverage
  *     analytic AA path.
- *   - No hinting (`fpgm` / `prep` / `glyf` instructions). Modern
- *     fonts ship unhinted variants suitable for high-DPI rendering;
- *     bitmap font caching gives us per-size pre-rastered glyphs at
- *     no quality loss for chrome sizes.
+ *   - No TrueType bytecode hinting (`fpgm` / `prep` / `glyf`
+ *     instructions). The rasterizer does apply a minimal baseline
+ *     grid-fit for sub-half-pixel round-letter overshoot so small
+ *     chrome labels do not acquire visibly staggered cap/baseline rows.
  *
  * Memory model: the rasterizer allocates nothing. Caller provides
  * `dst_rgba8` (pixel coverage bitmap, one u8 per pixel), and two
@@ -53,26 +53,26 @@ namespace duetos::drivers::video
 
 /// Output of `TtfRenderGlyph`. The pixel buffer is row-major, one
 /// u8 per pixel (alpha coverage 0..255), pitch = `width` (tightly
-/// packed). Pixel (0, 0) corresponds to the pen position at
-/// `(pen_x + lsb, pen_y - ascent)` — the same convention every
-/// stb-style rasterizer uses.
+/// packed). `ascent` is the bitmap row containing the shared text
+/// baseline (including the one-row AA guard); drawing the bitmap at
+/// `pen_y - ascent` therefore preserves one baseline and one sampling
+/// grid for every glyph in a line.
 struct TtfRenderedGlyph
 {
     u8* pixels;
     u32 width;
     u32 height;
-    i32 ascent;  // pixel height above the baseline
+    i32 ascent;  // bitmap baseline row / draw offset (includes AA guard)
     i32 descent; // pixel depth below the baseline (positive number)
     u32 advance; // pen advance in pixels (post-scale `hmtx.advance_width`)
 };
 
 /// Render `codepoint` from `font` at `pixel_height` pixels tall (the
 /// design-unit em-square scales to this many pixels). The
-/// rasterizer writes `pixel_height * advance_pixel_width` bytes
-/// into `dst_rgba8`; the caller is expected to size the buffer for
-/// the largest expected glyph (e.g. 32 * 32 = 1024 bytes per
-/// 32-pixel chrome glyph). On overflow, returns false and writes
-/// nothing.
+/// rasterizer writes a tightly packed `out.width * out.height` bitmap
+/// into `dst_rgba8`; the caller is expected to size the buffer for the
+/// largest expected glyph plus its AA guards and descender. On overflow,
+/// returns false and writes nothing.
 ///
 /// `points_scratch` / `endpoints_scratch` are the same TTF parser
 /// scratch buffers `TtfDecodeGlyph` consumes — caller-owned, not
