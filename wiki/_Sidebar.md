@@ -125,6 +125,7 @@
 - [Debugging](tooling/Debugging.md)
 - [Debugger](tooling/Debugger.md)
 - [QEMU Smoke Tests](tooling/QEMU-Smoke.md)
+- [Removable-Media Boot Image](tooling/Removable-Media-Boot.md)
 - [Running on VMs](tooling/Running-on-VMs.md)
 - [In-House Windows VMM](tooling/Windows-VMM.md)
 - [VMM Debugging in Visual Studio](tooling/VMM-Debugging.md)
