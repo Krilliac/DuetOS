@@ -1141,8 +1141,7 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
         brought_up = wireless_shell;
     }
     else if (n.vendor_id == kVendorRealtek && nic_ids::Realtek8125BringUpEligible(n.device_id, n.subsystem_vendor_id,
-                                                                                     n.subsystem_device_id,
-                                                                                     n.revision_id))
+                                                                                  n.subsystem_device_id, n.revision_id))
     {
         brought_up = Rtl8125BringUp(n, iface_index);
     }
@@ -1295,9 +1294,8 @@ bool NicRecordIsWireless(const NicInfo& nic)
         // metadata records BAR2 for future split backends, but its safe-probe
         // gate is closed, so no speculative register read occurs.
         nic.mmio_bar = d.vendor_id == kVendorRealtek ? nic_ids::RealtekWirelessPreferredMmioBar(d.device_id) : 0;
-        if (d.vendor_id == kVendorRealtek &&
-            nic_ids::Realtek8125BringUpEligible(d.device_id, d.subsystem_vendor_id, d.subsystem_device_id,
-                                                d.revision_id))
+        if (d.vendor_id == kVendorRealtek && nic_ids::Realtek8125BringUpEligible(d.device_id, d.subsystem_vendor_id,
+                                                                                 d.subsystem_device_id, d.revision_id))
             nic.mmio_bar = 0;
         const bool requires_mapped_mmio =
             (d.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(d.device_id)) ||
