@@ -794,3 +794,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add verified stage-first FAT32 replacement with recovery-file semantics
 - **Claimed**: 2026-09-20T17:13:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-session-safe-save-docs
+- **Session**: `DESKTOP-950K3EI-1814`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `wiki/filesystem/FAT32.md`
+- **Description**: Document verified stage-first replacement and SESSION.TMP recovery semantics
+- **Claimed**: 2026-09-20T17:35:30Z
+- **Status**: IN PROGRESS
