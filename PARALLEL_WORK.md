@@ -859,10 +859,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T19:42:34Z
 - **Status**: COMPLETED @ 2026-09-20T20:38:05Z
 
-### [ACTIVE] codex-duetos-win32-close-lifecycle
+### [DONE] codex-duetos-win32-close-lifecycle
 - **Session**: `DESKTOP-950K3EI-257`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/core/boot_tasks.cpp,userland/libs/user32/user32.c,userland/libs/user32_32/user32_32.c,userland/libs/user32_32/user32_32_internal.h,userland/apps/pe32_window/pe32_window.c`
 - **Description**: Route Alt+F4 through WM_CLOSE and implement default Win32 destroy lifecycle
 - **Claimed**: 2026-09-20T20:38:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T21:13:47Z
