@@ -107,7 +107,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `input` | 4 | `kernel/drivers/input/` |
 | `iommu` | 5 | `kernel/drivers/iommu/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
-| `net` | 21 | `kernel/drivers/net/` |
+| `net` | 22 | `kernel/drivers/net/` |
 | `npu` | 1 | `kernel/drivers/npu/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |

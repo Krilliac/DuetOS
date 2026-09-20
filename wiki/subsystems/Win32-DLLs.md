@@ -226,7 +226,7 @@ named export is real. Page-level limits:
 | `shlwapi` | 44 | `userland/libs/shlwapi/` |
 | `sxslib` | 2 | `userland/libs/sxslib/` |
 | `ucrtbase` | 136 | `userland/libs/ucrtbase/` |
-| `user32_32` | 163 | `userland/libs/user32_32/` |
+| `user32_32` | 164 | `userland/libs/user32_32/` |
 | `user32` | 225 | `userland/libs/user32/` |
 | `userenv` | 27 | `userland/libs/userenv/` |
 | `uxtheme` | 41 | `userland/libs/uxtheme/` |

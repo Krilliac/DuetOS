@@ -1334,12 +1334,12 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 22 | `SYS_FILE_CLOSE` | `rdi` = handle | 0 on success or no-op (closing an already-closed / never-opened handle is a d... |
 | 23 | `SYS_FILE_SEEK` | `rdi` = handle; `rsi` = signed offset; `rdx` = whence (0 = SET | the new cursor position (relative to file start) on success, or u64(-1) on fa... |
 | 24 | `SYS_FILE_FSTAT` | `rdi` = handle; `rsi` = user pointer to a u64 output slot that receives the file ... | 0 on success, u64(-1) on bad handle / bad user pointer |
-| 25 | `SYS_MUTEX_CREATE` | `rdi` = bInitialOwner (0 or 1) | a Win32 pseudo-handle (Process::kWin32MutexBase + slot_idx, i |
+| 25 | `SYS_MUTEX_CREATE` | `rdi` = bInitialOwner (0 or 1) | a positive opaque handle whose low tag identifies the mutex slot and whose hi... |
 | 26 | `SYS_MUTEX_WAIT` | `rdi` = mutex handle; `rsi` = timeout in ms (0xFFFFFFFF = INFINITE) | WAIT_OBJECT_0 immediately |
 | 27 | `SYS_MUTEX_RELEASE` | `rdi` = mutex handle | 0 on success, u64(-1) on bad handle or non-owner release (ERROR_NOT_OWNER) |
 | 28 | `SYS_VMAP` | `rdi` = byte size (rounded up to next page) | the base VA of the allocation on success, or 0 on failure (arena exhausted / ... |
 | 29 | `SYS_VUNMAP` | `rdi` = VA; `rsi` = size | 0 on success, u64(-1) on failure |
-| 30 | `SYS_EVENT_CREATE` | `rdi` = bManualReset (0 or 1); `rsi` = bInitialState (0 or 1) | Process::kWin32EventBase + slot (= 0x300 |
+| 30 | `SYS_EVENT_CREATE` | `rdi` = bManualReset (0 or 1); `rsi` = bInitialState (0 or 1) | its positive generation-tagged opaque handle on success, u64(-1) on table exh... |
 | 31 | `SYS_EVENT_SET` | `rdi` = event handle | 0 on success, u64(-1) on bad handle |
 | 32 | `SYS_EVENT_RESET` | `rdi` = event handle | 0 on success, u64(-1) on bad handle |
 | 33 | `SYS_EVENT_WAIT` | `rdi` = event handle; `rsi` = timeout_ms | WAIT_OBJECT_0 (0) on success, WAIT_TIMEOUT (0x102) on timeout, or u64(-1) on ... |
@@ -1360,9 +1360,9 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 48 | `SYS_WAIT_MULTI` | `rdi` = count; `rsi` = user pointer to handle array; `rdx` = bWaitAll; `r10` = timeout_ms | WAIT_OBJECT_0+i / WAIT_TIMEOUT / WAIT_FAILED |
 | 49 | `SYS_SYSTEM_INFO` | `rdi` = user pointer to Win32 SYSTEM_INFO (48 bytes) | — |
 | 50 | `SYS_DEBUG_PRINTW` | `rdi` = user pointer to NUL-terminated UTF-16LE string | — |
-| 51 | `SYS_SEM_CREATE` | `rdi` = initial count; `rsi` = max count | Win32SemaphoreHandle (0x500 |
+| 51 | `SYS_SEM_CREATE` | `rdi` = initial count; `rsi` = max count | a positive generation-tagged opaque handle whose low tag is 0x501 |
 | 52 | `SYS_SEM_RELEASE` | `rdi` = handle; `rsi` = release count | PREVIOUS count on success |
-| 53 | `SYS_SEM_WAIT` | `rdi` = handle; `rsi` = timeout_ms | 0 (WAIT_OBJECT_0) |
+| 53 | `SYS_SEM_WAIT` | `rdi` = the full opaque handle; `rsi` = timeout_ms | 0 (WAIT_OBJECT_0) |
 | 54 | `SYS_THREAD_WAIT` | `rdi` = thread handle (0x400; `rsi` = timeout_ms | — |
 | 55 | `SYS_THREAD_EXIT_CODE` | `rdi` = thread handle (0x400 | the recorded exit code (u32) as u64, or 0x103 (STILL_ACTIVE) if the thread is... |
 | 56 | `SYS_NT_INVOKE` | `rdi` = NT syscall number (e | the translated NTSTATUS in rax, or STATUS_NOT_IMPLEMENTED (0xC0000002) for an... |
@@ -1456,7 +1456,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 144 | `SYS_FILE_RENAME` | — | — |
 | 145 | `SYS_PROCESS_TERMINATE` | `rdi` = ProcessHandle (NtCurrentProcess = -1 → self-task-exit; `rsi` = exit status (passed through to SchedExit on the self path); `rdx` = user buffer; `r10` = buffer cap; `r8` = user u32* return_length | — |
 | 146 | `SYS_THREAD_TERMINATE` | — | — |
-| 147 | `SYS_PROCESS_QUERY_INFO` | `rdi` = Process handle (`-1` = self); `rsi` = information class; `rdx` = user output buffer; `r10` = buffer capacity; `r8` = optional user `u32*` ReturnLength | NTSTATUS. Class 0 writes the 48-byte x64 `PROCESS_BASIC_INFORMATION`; its first field is `STILL_ACTIVE` (`0x103`) until lifecycle `Exited`, then the exact durable Win32 exit code. |
+| 147 | `SYS_PROCESS_QUERY_INFO` | — | — |
 | 148 | `SYS_VM_ALLOCATE` | `rdi` = ProcessHandle (-1 = self); `rsi` = base_addr (0 = pick any aligned); `rdx` = size in bytes (rounded up to a page); `r10` = AllocationType (MEM_COMMIT | MEM_RESERVE; `r8` = protect flags (PAGE_*; `r9` = user u64* base out (set on success) | — |
 | 149 | `SYS_VM_FREE` | — | — |
 | 150 | `SYS_VM_PROTECT` | — | — |
@@ -1472,12 +1472,12 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 160 | `SYS_IOCP_SET` | — | — |
 | 161 | `SYS_IOCP_REMOVE` | — | — |
 | 162 | `SYS_IOCP_CLOSE` | — | — |
-| 163 | `SYS_JOB_CREATE` | no arguments; caller must hold `kCapSpawnThread` | Opaque positive Job handle (low tag `0xC00` through `0xC07`, non-zero generation above bit 11), or `-1` on failure. |
-| 164 | `SYS_JOB_ASSIGN` | `rdi` = Job handle; `rsi` = Process handle (`-1` = self) | `0` for assignment/already-member; `-1` for a stale/foreign Job, invalid or non-live Process, membership conflict, capacity, or terminated Job. |
-| 165 | `SYS_JOB_IS_IN` | `rdi` = Job handle (`0` = any containing Job); `rsi` = Process handle (`0`/`-1` = self); `rdx` = user `u32*` result | `0` after writing `0` or `1`; `-1` for an invalid handle/output pointer. |
-| 166 | `SYS_JOB_TERMINATE` | `rdi` = Job handle; `rsi` = Win32 `DWORD` exit code | `0` after publishing cooperative process-wide Job kill requests; `-1` for a stale/foreign Job or invalid termination transaction. |
-| 167 | `SYS_JOB_QUERY` | `rdi` = Job handle (`0` = Job containing caller); `rsi` = class (`1`, `3`, or `8`); `rdx` = user buffer; `r10` = buffer capacity | Bytes written on success, `-1` on failure. Class 3 accepts an 8-byte header-only/partial buffer and reports the full assigned count plus the number of complete PIDs returned. |
-| 168 | `SYS_JOB_CLOSE` | `rdi` = generation-valid Job handle | `0` after dropping the owner's handle reference; `-1` for stale/foreign/invalid handles. Membership persists until exact Process exit even after the last reference closes. |
+| 163 | `SYS_JOB_CREATE` | — | — |
+| 164 | `SYS_JOB_ASSIGN` | — | — |
+| 165 | `SYS_JOB_IS_IN` | — | — |
+| 166 | `SYS_JOB_TERMINATE` | — | — |
+| 167 | `SYS_JOB_QUERY` | — | — |
+| 168 | `SYS_JOB_CLOSE` | — | — |
 | 169 | `SYS_TOKEN_ADJUST` | `rdi` = u32 disable_all       (0 / 1) rsi = const u8* user_new   ...; `rdx` = u32 user_new_byte_len (0 if disable_all == 1) r10 = u8* u...; `r8` = u32 user_prev_byte_cap  Returns: 0  on full success (ever... | — |
 | 170 | `SYS_WIN_GET_MOUSE_DELTA` | `rdi` = user pointer to a 16-byte DIMOUSESTATE-shaped buffer { i3... | — |
 | 171 | `SYS_STDIN_READ` | `rdi` = user pointer to a destination byte buffer; `rsi` = capacity in bytes (must be > 0 | "as much as is ready," not "fill the buffer") |
@@ -1518,10 +1518,23 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 209 | `SYS_WAKE_BY_ADDRESS` | `rdi` = user VA; `rsi` = 0 for WakeByAddressSingle (best effort) | — |
 | 211 | `SYS_VK_CALL` | — | is the per-op return value |
 | 212 | `SYS_RANDOM_BYTES` | `rdi` = user buffer VA; `rsi` = length | the number of bytes written (== length on success, a short count if the copy ... |
-| 213 | `SYS_IOCP_POST` | `rdi` = u64 IOCP handle (kWin32IocpBase range; `rsi` = u64 dwNumberOfBytesTransferred rdx = u64 dwCompletionKey ... | — |
+| 213 | `SYS_IOCP_POST` | `rdi` = u64 IOCP handle (positive opaque token; `rsi` = u64 dwNumberOfBytesTransferred rdx = u64 dwCompletionKey ... | — |
 | 214 | `SYS_GDI_SET_DIBITS` | `rdi` = HBITMAP (owner-checked; `rsi` = user pointer to the DIB pixel array rdx = width in pixels...; `r8` = bits per pixel (16 / 24 / 32 only) r9  = size in bytes of... | — |
 | 215 | `SYS_GDI_GET_DIBITS` | — | — |
-| 229 | `SYS_GDI_SET_ROP2` | `rdi` = HDC; `rsi` = `R2_*` mode (1..16) | the PREVIOUS mode (Win32 `SetROP2` semantics), 0 for an out-of-range mode; ec... |
-| 230 | `SYS_GAMEPAD_STATE` | `rdi` = slot index (0..3); `rsi` = user pointer to a `GamepadStateWire`; `rdx` = wire size, which must equal 44 exactly | 0 on success, u64(-1) on bad slot / wrong size / copy fault. A disconnected s... |
-| 231 | `SYS_STDIN_PEEK` | `rdi` = user destination buffer, or 0 for the count-only form; `rsi` = capacity in bytes (0 = count-only) | total bytes currently buffered (0 when empty), u64(-1) on a bad user pointer;... |
+| 216 | `SYS_FIBER_CONVERT` | `rdi` = fiber_data (arbitrary user pointer stored at TEB+0x20) | — |
+| 217 | `SYS_FIBER_CREATE` | `rdi` = start_address (user VA of the fiber entry function); `rsi` = fiber_data (arbitrary user pointer); `rdx` = stack_size (0 = default 64 KiB | — |
+| 218 | `SYS_FIBER_SWITCH` | `rdi` = target fiber address (as returned by CONVERT or CREATE) | via iretq — execution resumes in the target fiber's context |
+| 219 | `SYS_FIBER_DELETE` | `rdi` = fiber address | 0 on success, u64(-1) on bad address |
+| 220 | `SYS_FLS_ALLOC` | `rdi` = cleanup callback VA (0 = no callback) | the slot index (0 |
+| 221 | `SYS_FLS_FREE` | `rdi` = slot index | 0 on success, u64(-1) on bad index / unallocated |
+| 222 | `SYS_FLS_GET` | `rdi` = slot index | the stored u64 value, or 0 for an unset / stale / invalid index |
+| 223 | `SYS_FLS_SET` | `rdi` = slot index; `rsi` = value | 0 on success, u64(-1) on bad index |
+| 224 | `SYS_GDI_CREATE_CURSOR_RGBA` | `rdi` = const u32* rgba_pixels (user pointer; `rsi` = u64 packed (width | height << 16) rdx = u64 packed (x_hot... | — |
+| 225 | `SYS_GDI_CREATE_FONT` | `rdi` = pointer to user-land struct: { u64 height | — |
+| 226 | `SYS_GDI_GET_TEXT_METRICS` | `rdi` = HDC rsi = pointer to user-land TEXTMETRICA (57 bytes) rax... | — |
+| 227 | `SYS_SERVICE_ENDPOINT_OP` | `rdi` = pointer to duet_service_endpoint_request_v1 followed by a... | — |
+| 228 | `SYS_SERVICE_CONTROL` | `rdi` = pointer to fixed duet_service_control_request_v1 rsi = ex... | — |
+| 229 | `SYS_GDI_SET_ROP2` | `rdi` = HDC; `rsi` = R2_* mode (1 | — |
+| 230 | `SYS_GAMEPAD_STATE` | `rdi` = slot index (0; `rsi` = user pointer to a GamepadStateWire (44 bytes; `rdx` = wire-struct size | ERROR_DEVICE_NOT_CONNECTED |
+| 231 | `SYS_STDIN_PEEK` | `rdi` = user pointer to a destination byte buffer; `rsi` = capacity in bytes (0 = count-only) | the same bytes |
 <!-- /AUTO:syscall_args -->
