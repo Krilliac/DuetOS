@@ -635,13 +635,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T11:37:18Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] codex-duetos-static-network
+### [DONE] codex-duetos-static-network
 - **Session**: `Codex-DuetOS-Campaign-20260920`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/net/stack.cpp,kernel/net/stack.h,kernel/net/static_ipv4_config.h,kernel/net/ipv4_parse.h,kernel/core/boot_bringup.cpp,kernel/shell/shell_network.cpp`
 - **Description**: Add generic boot-configured static IPv4 state for isolated bare-metal control
 - **Claimed**: 2026-09-20T12:26:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:41:35Z
 
 ### [ACTIVE] codex-duetos-static-network-consumers
 - **Session**: `Codex-DuetOS-Campaign-20260920`
