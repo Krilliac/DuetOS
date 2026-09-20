@@ -778,3 +778,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make the CPU usage short-window self-test deterministic under slow or contended VMs
 - **Claimed**: 2026-09-20T16:43:44Z
 - **Status**: COMPLETED @ 2026-09-20T17:07:42Z
+
+### [ACTIVE] codex-duetos-session-safe-save
+- **Session**: `DESKTOP-950K3EI-898`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/core/session_restore.cpp,kernel/core/session_restore.h`
+- **Description**: Preserve the last good session config when staging or replacement fails
+- **Claimed**: 2026-09-20T17:12:58Z
+- **Status**: IN PROGRESS
