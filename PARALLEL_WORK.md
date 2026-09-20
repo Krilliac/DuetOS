@@ -715,13 +715,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T14:21:38Z
 - **Status**: COMPLETED @ 2026-09-20T14:42:18Z
 
-### [ACTIVE] codex-duetos-storage-safety
+### [DONE] codex-duetos-storage-safety
 - **Session**: `DESKTOP-950K3EI-902`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/fs/installer.cpp,kernel/fs/mount.cpp,kernel/fs/fat32_write.cpp,kernel/fs/fat32_selftest.cpp,wiki/filesystem/FAT32.md,wiki/filesystem/Mount-Registry.md`
 - **Description**: Fix FAT32 mount identity and fail-closed write arithmetic before metadata mutation
 - **Claimed**: 2026-09-20T15:15:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T15:55:16Z
 
 ### [ACTIVE] codex-duetos-storage-bounds-header
 - **Session**: `DESKTOP-950K3EI-1373`
