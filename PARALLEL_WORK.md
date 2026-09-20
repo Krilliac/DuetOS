@@ -706,3 +706,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Preserve curated syscall ABI cells while adding newly generated rows
 - **Claimed**: 2026-09-20T14:07:17Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-ole32-warning
+- **Session**: `DESKTOP-950K3EI-1123`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `userland/libs/ole32/ole32.c`
+- **Description**: Remove dead duplicate CLSID constants surfaced by the clean Node-test build
+- **Claimed**: 2026-09-20T14:21:38Z
+- **Status**: IN PROGRESS
