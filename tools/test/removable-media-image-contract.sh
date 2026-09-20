@@ -43,6 +43,16 @@ readonly EXISTING="${TMP_DIR}/existing.img"
 touch "${EXISTING}"
 expect_refusal "existing-output" "output already exists" --output "${EXISTING}"
 
+readonly EXISTING_DIR="${TMP_DIR}/existing-directory"
+mkdir "${EXISTING_DIR}"
+expect_refusal "existing-directory-force" "refusing non-regular output" \
+    --output "${EXISTING_DIR}" --force
+
+readonly EXISTING_LINK="${TMP_DIR}/existing-link.img"
+ln -s "${EXISTING}" "${EXISTING_LINK}"
+expect_refusal "existing-symlink-force" "refusing non-regular output" \
+    --output "${EXISTING_LINK}" --force
+
 if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
     readonly IMAGE="${TMP_DIR}/Duet OS removable.img"
     readonly EXTRACTED_KERNEL="${TMP_DIR}/extracted-kernel.elf"

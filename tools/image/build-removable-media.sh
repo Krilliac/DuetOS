@@ -67,6 +67,10 @@ if [[ -b "${OUTPUT}" ]]; then
     echo "error: refusing block-device output: ${OUTPUT}" >&2
     exit 2
 fi
+if [[ -L "${OUTPUT}" || ( -e "${OUTPUT}" && ! -f "${OUTPUT}" ) ]]; then
+    echo "error: refusing non-regular output: ${OUTPUT}" >&2
+    exit 2
+fi
 if [[ -e "${OUTPUT}" && "${FORCE}" != 1 ]]; then
     echo "error: output already exists (use --force for a regular file): ${OUTPUT}" >&2
     exit 2
