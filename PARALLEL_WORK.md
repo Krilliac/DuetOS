@@ -891,10 +891,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T23:00:16Z
 - **Status**: COMPLETED @ 2026-09-20T23:29:23Z
 
-### [ACTIVE] codex-duetos-ap-gsbase-early
+### [DONE] codex-duetos-ap-gsbase-early
 - **Session**: `DESKTOP-950K3EI-1159`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/arch/x86_64/smp.cpp`
 - **Description**: Install AP GSBASE before CPUHP lock bookkeeping can call CurrentCpu
 - **Claimed**: 2026-09-20T23:29:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T23:58:56Z
