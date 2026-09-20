@@ -13,6 +13,7 @@ inline constexpr u8 kRevision = 0x05;
 inline constexpr u32 kRingSlots = 256;
 inline constexpr u32 kBufferBytes = 16 * 1024 - 1;
 inline constexpr u32 kMinimumFrameBytes = 60;
+inline constexpr u32 kMaximumFrameBytes = 1518;
 inline constexpr u32 kEthernetFcsBytes = 4;
 
 // Values are from Linux drivers/net/ethernet/realtek/r8169_main.c. The
@@ -37,10 +38,21 @@ constexpr bool DescriptorAddressValid(u64 address, u64 aperture_bytes)
            address <= 0xFFFFFFFFu - aperture_bytes;
 }
 
+constexpr bool RingBaseValid(u64 address, u64 ring_bytes)
+{
+    return DescriptorAddressValid(address, ring_bytes) && (address & 0xFFu) == 0;
+}
+
+constexpr u16 PrepareTxLength(u64 length)
+{
+    if (length == 0 || length > kMaximumFrameBytes)
+        return 0;
+    return static_cast<u16>(length < kMinimumFrameBytes ? kMinimumFrameBytes : length);
+}
+
 constexpr u32 EncodeTx(u64 address, u16 length, bool first, bool last, bool ring_end)
 {
-    (void)address;
-    if (length == 0 || length > kBufferBytes)
+    if (!DescriptorAddressValid(address, length) || length == 0 || length > kMaximumFrameBytes)
         return 0;
     return static_cast<u32>(length) | (first ? kDescFirst : 0u) | (last ? kDescLast : 0u) |
            (ring_end ? kDescRingEnd : 0u);
@@ -62,9 +74,8 @@ enum class RxDisposition : u8
 
 constexpr u16 RxPayloadLength(u16 wire_length)
 {
-    return wire_length >= kMinimumFrameBytes + kEthernetFcsBytes
-               ? static_cast<u16>(wire_length - kEthernetFcsBytes)
-               : 0;
+    return wire_length >= kMinimumFrameBytes + kEthernetFcsBytes ? static_cast<u16>(wire_length - kEthernetFcsBytes)
+                                                                 : 0;
 }
 
 constexpr RxDisposition ValidateRx(u32 options, u16 length, u32 buffer_bytes)
@@ -72,8 +83,7 @@ constexpr RxDisposition ValidateRx(u32 options, u16 length, u32 buffer_bytes)
     if ((options & kDescOwn) != 0)
         return RxDisposition::NotReady;
     if ((options & (kRxCrcError | kRxRunt | kRxFrameError)) != 0 || (options & kDescFirst) == 0 ||
-        (options & kDescLast) == 0 || length < kMinimumFrameBytes || length > buffer_bytes ||
-        length > kBufferBytes)
+        (options & kDescLast) == 0 || length < kMinimumFrameBytes || length > buffer_bytes || length > kBufferBytes)
         return RxDisposition::Drop;
     return RxDisposition::Deliver;
 }
@@ -108,17 +118,6 @@ constexpr bool TxReclaimAfterCpuSync(TxCursor& cursor, bool cpu_synced, bool des
     return cpu_synced && TxReclaim(cursor, descriptor_done);
 }
 
-struct AllocationPlan
-{
-    u32 live_allocations = 0;
-};
-
-constexpr bool AllocationRollback(AllocationPlan& plan, bool ring_ok, bool tx_ok, bool rx_ok, bool buffer_ok)
-{
-    plan.live_allocations = 0;
-    return ring_ok && tx_ok && rx_ok && buffer_ok;
-}
-
 enum class TeardownAction : u8
 {
     CloseOperations,
@@ -132,6 +131,11 @@ struct TeardownState
 {
     u8 completed = 0;
 };
+
+constexpr bool TeardownProof(bool gate_closed, bool worker_joined, bool unbound, bool stopped, bool bus_master_off)
+{
+    return gate_closed && worker_joined && unbound && stopped && bus_master_off;
+}
 
 constexpr bool TeardownStep(TeardownState& state, TeardownAction action)
 {
