@@ -651,13 +651,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T12:45:44Z
 - **Status**: COMPLETED @ 2026-09-20T14:41:41Z
 
-### [ACTIVE] codex-duetos-static-network-abi
+### [DONE] codex-duetos-static-network-abi
 - **Session**: `Codex-DuetOS-Campaign-20260920`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/syscall/syscall.h,userland/libs/iphlpapi/iphlpapi.c`
 - **Description**: Expose active static or DHCP IPv4 configuration through the existing network-info ABI
 - **Claimed**: 2026-09-20T12:46:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-20T14:41:46Z
 
 ### [ACTIVE] codex-duetos-static-network-surfaces
 - **Session**: `Codex-DuetOS-Campaign-20260920`
