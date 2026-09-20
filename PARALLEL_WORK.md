@@ -802,3 +802,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Document verified stage-first replacement and SESSION.TMP recovery semantics
 - **Claimed**: 2026-09-20T17:35:30Z
 - **Status**: COMPLETED @ 2026-09-20T17:51:57Z
+
+### [ACTIVE] codex-duetos-exclusive-stdin-focus
+- **Session**: `DESKTOP-950K3EI-433`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/core/boot_tasks.cpp,kernel/proc/process.cpp,kernel/proc/process.h`
+- **Description**: Route cooked keyboard input to exactly one live foreground consumer
+- **Claimed**: 2026-09-20T17:53:56Z
+- **Status**: IN PROGRESS
