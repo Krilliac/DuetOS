@@ -698,3 +698,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Refresh generated wiki inventories after the integrated networking slice
 - **Claimed**: 2026-09-20T13:58:55Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-syscall-doc-sync
+- **Session**: `DESKTOP-950K3EI-1055`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `docs/sync-wiki.sh,tools/build/gen-syscall-doc.py`
+- **Description**: Preserve curated syscall ABI cells while adding newly generated rows
+- **Claimed**: 2026-09-20T14:07:17Z
+- **Status**: IN PROGRESS
