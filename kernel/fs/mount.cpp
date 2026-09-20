@@ -1,6 +1,7 @@
 #include "fs/mount.h"
 
 #include "core/panic.h"
+#include "drivers/storage/block.h"
 #include "fs/duetfs.h"
 #include "fs/exfat.h"
 #include "fs/ext4.h"
@@ -89,9 +90,12 @@ MountId VfsMount(const char* mount_point, FsType fs_type, u32 block_handle)
     {
         return kInvalidMountId;
     }
-    // ramfs and ramvol are in-tree synth backends — block_handle
-    // must be 0 for them; every other backend must have a real
-    // block handle.
+    // The stored key is backend-specific. ramfs/ramvol use the literal 0;
+    // FAT32 uses its volume-registry index (where index 0 is valid); exFAT
+    // encodes volume index + 1; DuetFS reserves UINT32_MAX for its memory-backed
+    // boot volume; the remaining disk backends use opaque block handles (where
+    // handle 0 is also valid). Never use truthiness to validate an opaque
+    // handle or registry index.
     if (fs_type == FsType::Ramfs || fs_type == FsType::RamVol)
     {
         if (block_handle != 0)
@@ -99,12 +103,10 @@ MountId VfsMount(const char* mount_point, FsType fs_type, u32 block_handle)
             return kInvalidMountId;
         }
     }
-    else
+    else if ((fs_type != FsType::DuetFs && block_handle == drivers::storage::kBlockHandleInvalid) ||
+             (fs_type == FsType::Exfat && block_handle == 0))
     {
-        if (block_handle == 0)
-        {
-            return kInvalidMountId;
-        }
+        return kInvalidMountId;
     }
     // Reject duplicate mount points. Caller must VfsUmount first if
     // they want to swap the backing for an existing path.
@@ -771,10 +773,30 @@ void VfsMountSelfTest()
     {
         core::Panic("fs/mount", "self-test: ramfs+block_handle accepted");
     }
-    // Reject non-ramfs without a block handle.
-    if (VfsMount("/mnt/selftest-bad2", FsType::Fat32, 0) != kInvalidMountId)
+    // FAT32's backend key is a volume index, so the first volume (index 0)
+    // must be mountable. This is also the key used by the /disk/0 auto-mount.
+    const MountId zero = VfsMount("/mnt/selftest-zero", FsType::Fat32, 0);
+    if (zero == kInvalidMountId)
     {
-        core::Panic("fs/mount", "self-test: non-ramfs zero block_handle accepted");
+        core::Panic("fs/mount", "self-test: FAT32 volume index 0 rejected");
+    }
+    if (!VfsUmount(zero))
+    {
+        core::Panic("fs/mount", "self-test: FAT32 volume index 0 unmount failed");
+    }
+    // The all-ones sentinel is invalid for both registry indices and opaque
+    // block handles.
+    if (VfsMount("/mnt/selftest-bad2", FsType::Fat32, drivers::storage::kBlockHandleInvalid) != kInvalidMountId)
+    {
+        core::Panic("fs/mount", "self-test: invalid backend handle accepted");
+    }
+    // DuetFS deliberately reserves the same all-ones value for its in-memory
+    // boot volume. Pin that backend-specific exception before DuetFsBoot uses
+    // it for /duetfs.
+    const MountId duetfs_boot = VfsMount("/mnt/selftest-duetfs", FsType::DuetFs, drivers::storage::kBlockHandleInvalid);
+    if (duetfs_boot == kInvalidMountId || !VfsUmount(duetfs_boot))
+    {
+        core::Panic("fs/mount", "self-test: DuetFS boot sentinel rejected");
     }
     // Reject malformed mount points.
     if (VfsMount("not-absolute", FsType::Fat32, 1) != kInvalidMountId)

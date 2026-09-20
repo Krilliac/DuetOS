@@ -11,6 +11,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/storage/block.h"
+#include "fs/fat32_write_bounds.h"
 #include "log/klog.h"
 
 namespace duetos::fs::fat32
@@ -760,7 +761,34 @@ void Fat32OwnershipSelfTest()
         SerialWrite("[fs/fat32] format-self-test FAILED: formatted volume not recognised as DuetOS-owned\n");
         return;
     }
-    SerialWrite("[fs/fat32] format-self-test OK (Fat32Format -> Fat32Probe round-trip + owned)\n");
+
+    // Oversized append must fail before allocating a first cluster or patching
+    // the directory entry. Keep this on the RAM-backed format fixture so it
+    // runs under emulators even when the slower physical-disk CRUD tier skips.
+    const u8 empty_byte = 0;
+    if (Fat32CreateInRoot(fmt_v, "EMPTY.BIN", &empty_byte, 0) != 0)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: create EMPTY.BIN\n");
+        return;
+    }
+    if (Fat32AppendInRoot(fmt_v, "EMPTY.BIN", &empty_byte, internal::kFat32MaxFileSize + 1) != -1)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: oversized append accepted\n");
+        return;
+    }
+    DirEntry empty_after;
+    if (!Fat32LookupPath(fmt_v, "/EMPTY.BIN", &empty_after) || empty_after.size_bytes != 0 ||
+        empty_after.first_cluster >= 2)
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: oversized append mutated EMPTY.BIN\n");
+        return;
+    }
+    if (!Fat32DeleteInRoot(fmt_v, "EMPTY.BIN"))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: delete EMPTY.BIN\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] format-self-test OK (probe + owned + oversized append side-effect-free)\n");
 
     // Retract the fixture from the registry now that the owned-adoption
     // assertions have passed. Critical: this self-test runs on EVERY

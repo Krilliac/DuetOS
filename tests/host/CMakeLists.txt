@@ -24,6 +24,16 @@
 #   ctest --test-dir build/host-tests --output-on-failure
 
 cmake_minimum_required(VERSION 3.25)
+
+# MSVC /Zi emits a shared PDB during compiler probes and ordinary Debug
+# builds. sccache cannot cache that external artifact reliably; /Z7 keeps the
+# debug information in each object and makes clean/repeated host-test builds
+# deterministic on Windows.
+if(POLICY CMP0141)
+    cmake_policy(SET CMP0141 NEW)
+endif()
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+
 project(duetos-host-tests C CXX)
 
 set(CMAKE_C_STANDARD 11)
@@ -996,6 +1006,7 @@ endif()
 
 add_host_test(wild_address)
 add_host_test(disk_path)
+add_host_test(fat32_write_bounds)
 add_host_test(nospec)
 add_host_test(saturating)
 add_host_test(vfs_resolve)

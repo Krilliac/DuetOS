@@ -22,6 +22,7 @@
 #include "diag/log_names.h"
 #include "drivers/storage/block.h"
 #include "fs/fat32_internal.h"
+#include "fs/fat32_write_bounds.h"
 #include "fs/fat32_write_internal.h"
 #include "util/compiler.h"
 
@@ -696,6 +697,15 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (e->attributes & kAttrDirectory)
         return -1; // append-to-directory is nonsensical
 
+    // FAT32's directory entry has a 32-bit byte size. Validate the complete
+    // request before allocating or linking a first cluster: an oversized
+    // append must be a side-effect-free failure, including for empty files.
+    const u32 old_size = e->size_bytes;
+    u64 new_size_u64 = 0;
+    if (!internal::CheckedWriteEnd(old_size, len, internal::kFat32MaxFileSize, &new_size_u64))
+        return -1;
+    const u32 new_size = static_cast<u32>(new_size_u64);
+
     const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
     if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
         return -1;
@@ -747,12 +757,6 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         KLOG_DEBUG_V("fs/fat32", "append: allocated first cluster for zero-size file", first);
     }
 
-    const u32 old_size = e->size_bytes;
-    const u64 new_size_u64 = u64(old_size) + len;
-    if (new_size_u64 > 0xFFFFFFFFull)
-        return -1; // FAT32 size field is 32-bit
-    const u32 new_size = static_cast<u32>(new_size_u64);
-
     // Walk the existing chain to the tail cluster so we know
     // where to append and whether the tail has slack bytes. Bound the
     // hop count like every read-path chain walk (fat32_read.cpp): a
@@ -760,13 +764,19 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     // this write path forever — the read paths were capped, this one
     // had been missed.
     u32 tail = e->first_cluster;
+    bool found_tail = false;
     for (u32 step = 0; step < 65536; ++step)
     {
         const u32 next = ReadFatEntry(*v, tail);
         if (next < 2 || next >= 0x0FFFFFF8u)
+        {
+            found_tail = true;
             break;
+        }
         tail = next;
     }
+    if (!found_tail)
+        return -1; // corrupt or over-limit chain; never mutate an arbitrary node
     // Byte offset within the tail cluster where the NEXT byte of
     // file content would land. If the file ends exactly on a
     // cluster boundary, tail_off == 0 and we must allocate a new
@@ -998,7 +1008,8 @@ i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
         return -1;
     if (len == 0)
         return 0;
-    if (offset > e->size_bytes || offset + len > u64(e->size_bytes))
+    u64 write_end = 0;
+    if (!internal::CheckedWriteEnd(offset, len, e->size_bytes, &write_end))
         return -1; // write would extend the file; not supported in v0
     if (e->first_cluster < 2)
         return -1;
@@ -1104,9 +1115,10 @@ i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, c
     if (offset > old_size)
         return -1;
 
-    const u64 new_size_u64 = (offset + len > old_size) ? (offset + len) : old_size;
-    if (new_size_u64 > 0xFFFFFFFFull)
+    u64 write_end = 0;
+    if (!internal::CheckedWriteEnd(offset, len, internal::kFat32MaxFileSize, &write_end))
         return -1;
+    const u64 new_size_u64 = (write_end > old_size) ? write_end : old_size;
     const u32 new_size = static_cast<u32>(new_size_u64);
 
     // Walk the chain to the cluster containing `offset`. Track the

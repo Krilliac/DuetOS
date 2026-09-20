@@ -110,9 +110,11 @@ already run. See [Capabilities](../security/Capabilities.md).
 
 ## Known Limits / GAPs
 
-- **FAT32 mid-file growth is unwritten.** In-place writes,
-  append-only growth, file create/delete/rename are live; a write
-  that would extend the cluster chain is rejected with `-1`. See
+- **FAT32 growth is bounded, not sparse.** In-place writes, offset
+  writes with cluster-chain growth, append, and file
+  create/delete/rename are live. A write with `offset > current_size`,
+  a range beyond the 32-bit FAT file-size ceiling, or overflowing
+  `offset + len` rejects with `-1` before metadata mutation. See
   [FAT32](FAT32.md).
 - **ext4 and NTFS are read-only.** Write paths for either are
   separate multi-slice efforts.

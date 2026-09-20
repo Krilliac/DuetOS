@@ -26,6 +26,7 @@ extern "C"
 }
 
 #include <cstddef>
+#include <cstring>
 
 using duetos::subsystems::win32::GamepadStateWire;
 
@@ -109,7 +110,7 @@ int main()
     kwire.cap_right_motor = 0x80;
 
     DuetGamepadWire uwire;
-    __builtin_memcpy(&uwire, &kwire, sizeof(uwire));
+    std::memcpy(&uwire, &kwire, sizeof(uwire));
 
     EXPECT_EQ(uwire.connected, 1u);
     EXPECT_EQ(uwire.connected_mask, 0x5u);
@@ -153,7 +154,7 @@ int main()
     // and sets connected = 0, which is how the DLL knows to answer
     // ERROR_DEVICE_NOT_CONNECTED instead of reporting a dead stick.
     DuetGamepadWire empty;
-    __builtin_memset(&empty, 0, sizeof(empty));
+    std::memset(&empty, 0, sizeof(empty));
     EXPECT_EQ(duet_xinput_wire_to_state(&empty, &state), DUET_XINPUT_ERROR_DEVICE_NOT_CONNECTED);
     EXPECT_EQ(duet_xinput_wire_to_capabilities(&empty, &caps), DUET_XINPUT_ERROR_DEVICE_NOT_CONNECTED);
 

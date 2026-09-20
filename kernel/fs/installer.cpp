@@ -40,6 +40,14 @@ namespace
 namespace storage = drivers::storage;
 namespace gpt = fs::gpt;
 
+// MountEntry::block_handle is a backend key, not uniformly a raw block
+// handle. FAT32 lookup consumes the volume-registry index returned by
+// Fat32Probe; DuetFS consumes the partition block handle directly.
+constexpr u32 InstallerMountKey(FsType fs_type, u32 block_handle, u32 fat32_volume_idx)
+{
+    return fs_type == FsType::Fat32 ? fat32_volume_idx : block_handle;
+}
+
 // EFI System Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 constexpr u8 kEspTypeGuid[gpt::kGuidBytes] = {
     0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
@@ -426,9 +434,9 @@ Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
         core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP probe after format failed");
         return Status::EspFormatFailed;
     }
+    u32 sys_vol_idx = storage::kBlockHandleInvalid;
     if (!use_duetfs_system)
     {
-        u32 sys_vol_idx = 0;
         if (!fat32::Fat32Probe(sys_handle, &sys_vol_idx))
         {
             core::Log(core::LogLevel::Error, "fs/installer", "Install: system probe after format failed");
@@ -489,14 +497,15 @@ Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
         return Status::EspGrubCfgWriteFailed;
     }
 
-    const MountId esp_mount = VfsMount("/esp", FsType::Fat32, esp_handle);
+    const MountId esp_mount =
+        VfsMount("/esp", FsType::Fat32, InstallerMountKey(FsType::Fat32, esp_handle, esp_vol_idx));
     if (esp_mount == kInvalidMountId)
     {
         core::Log(core::LogLevel::Error, "fs/installer", "Install: VfsMount(/esp) failed");
         return Status::EspMountFailed;
     }
     const FsType sys_fs_type = use_duetfs_system ? FsType::DuetFs : FsType::Fat32;
-    const MountId sys_mount = VfsMount("/system", sys_fs_type, sys_handle);
+    const MountId sys_mount = VfsMount("/system", sys_fs_type, InstallerMountKey(sys_fs_type, sys_handle, sys_vol_idx));
     if (sys_mount == kInvalidMountId)
     {
         core::Log(core::LogLevel::Error, "fs/installer", "Install: VfsMount(/system) failed");
@@ -584,6 +593,11 @@ bool LayoutOk(const Report& r)
 
 void InstallerSelfTest()
 {
+    // Backend identity is deliberately not uniform: FAT32 mounts by the
+    // post-probe volume index, while DuetFS mounts by the raw block handle.
+    AssertOrPanic(InstallerMountKey(FsType::Fat32, 7, 2) == 2, "selftest: FAT32 mount key must use volume index");
+    AssertOrPanic(InstallerMountKey(FsType::DuetFs, 7, 2) == 7, "selftest: DuetFS mount key must use block handle");
+
     // Just-too-small: kMinInstallSectors - 1 must refuse.
     {
         Report r{};

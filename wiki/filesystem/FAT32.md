@@ -4,16 +4,15 @@
 >
 > **Execution context:** Kernel — process context
 >
-> **Maturity:** Read + bounded write (no cluster-chain growth); LFN checksum validation live
+> **Maturity:** Read + bounded write (including cluster-chain growth); LFN checksum validation live
 
 ## Overview
 
 `kernel/fs/fat32*.cpp` reads **and writes** FAT32 partitions for
 interoperability with Windows-formatted media. Read paths are live;
-write paths are live for in-place writes, append-only growth, and
-file create / delete / rename. The one bounded write that is **not**
-supported is a mid-file write that would grow a file's cluster chain
-(see [Known Limits](#known-limits--gaps)).
+write paths are live for in-place writes, offset writes with bounded
+cluster-chain growth, append, and file create / delete / rename. Sparse
+writes are deliberately rejected; callers must grow the file explicitly.
 
 ## Threading & Locking Model
 
@@ -61,14 +60,15 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
 
 ## Known Limits / GAPs
 
-- **In-place + append + create + delete + rename write paths
+- **In-place + offset-write + append + create + delete + rename write paths
   shipped** — `Fat32WriteInPlace`, `Fat32AppendAtPath`,
-  `Fat32CreateAtPath`, `Fat32DeleteAtPath`, `Fat32RenameAtPath`,
-  exercised by Notes / Files / Screenshot / session restore.
-  **Mid-file writes that grow a cluster chain are not yet
-  supported** — writing into a region that would extend the
-  file beyond its existing cluster count rejects with `-1`.
-  Append-then-write is the workaround for grow-heavy workloads.
+  `Fat32WriteAtPath`, `Fat32CreateAtPath`, `Fat32DeleteAtPath`,
+  `Fat32RenameAtPath`, exercised by Notes / Files / Screenshot /
+  session restore. `Fat32WriteAtPath` may extend the cluster chain but
+  rejects sparse writes (`offset > current size`). Every write computes
+  its end with subtraction-first checked arithmetic and rejects anything
+  beyond FAT32's 32-bit file-size ceiling before allocating or patching
+  metadata.
 - **No FAT16 / FAT12 fallback.** FAT32 only.
 - **exFAT lives in [`kernel/fs/exfat.{h,cpp}`](../../kernel/fs/exfat.h)**
   as a sibling backend — probe + root-directory walk are wired
@@ -78,9 +78,6 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
   file-route layer — the operation has no atomic primitive within
   one volume's FAT, so cross-volume rename would require copy +
   delete with rollback. Same volume rename is fully supported.
-
-See [Roadmap](../reference/Roadmap.md) for the cluster-chain
-growth work.
 
 ## Durability and TRIM
 

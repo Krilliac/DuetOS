@@ -12,7 +12,7 @@
 
 [`kernel/fs/mount.{h,cpp}`](../../kernel/fs/mount.h) tracks the
 binding between a mount point in the kernel's path namespace and a
-backing block device + filesystem type. `VfsResolve` consults the
+backend-specific lookup key + filesystem type. `VfsResolve` consults the
 registry on every lookup, dispatches the longest-prefix match to
 the backend's per-`FsType` vtable, and falls back to the ramfs
 root for paths that don't match any mount.
@@ -36,7 +36,7 @@ kMaxMounts = 16    fixed-size flat array, linear scan add / lookup
 struct MountEntry {
     char     mount_point[64];   canonical absolute path
     FsType   fs_type;           Ramfs | Fat32 | Ext4 | Ntfs | DuetFs | RamVol | Exfat
-    u32      block_handle;      0 for ramfs / synth volumes
+    u32      block_handle;      backend key; meaning depends on fs_type
     u32      mount_seq;         monotonic id, ever-incrementing
     bool     in_use;
 };
@@ -52,6 +52,14 @@ event ever recorded — re-using a freed slot will not collide with
 a stale `MountId` from a previous mount. Consumers that cache a
 `MountId` across unmount/mount cycles read `mount_seq` to detect
 the swap.
+
+Despite its historical field name, `block_handle` is not uniformly a raw
+block-layer handle. FAT32 stores its volume-registry index (including valid
+index `0`), exFAT stores `volume_index + 1`, ext4/NTFS store an opaque block
+handle (where handle `0` is valid), and ramfs/ramvol use literal `0`. DuetFS
+normally stores an opaque block handle but deliberately reserves all-ones for
+its memory-backed boot volume. `VfsMount` validates these backend-specific
+rules instead of treating either zero or all-ones as universally absent.
 
 ## API
 
@@ -142,10 +150,11 @@ is negligible but premature without a real concurrent caller.
 `VfsMountSelfTest` runs from `kernel_main` alongside the other
 boot self-tests:
 
-1. Register a synthetic ramfs mount at a unique path.
+1. Register a synthetic FAT32 mount at a unique path.
 2. Look it up by path; assert the returned entry matches.
-3. Verify `VfsMountResolve` matches a deeper subpath correctly.
-4. Unmount; assert the lookup misses.
+3. Verify FAT32 volume index `0` can be mounted and unmounted.
+4. Verify `VfsMountResolve` matches a deeper subpath correctly.
+5. Unmount; assert the lookup misses.
 
 A regression in path comparison or table bookkeeping panics the
 kernel at boot.

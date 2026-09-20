@@ -82,7 +82,7 @@ tree already follows the contract everywhere except one latent gap
 | **exFAT adoption** | Inert-by-default | `ExfatVolumeIsDuetOsOwned` (`kDuetOsVolumeSerial`) — landed 2026-06-06; foreign exFAT not registered |
 | **Crash-dump persist** | Inert-by-default | `GptFindCrashDumpRegion` + `GptCrashDumpRegionSane` bounds (excludes primary + backup GPT) |
 | **NTFS / ext4** | Read-only tier | No write API compiled in; selftests write only RAM disks |
-| **FAT32 / exFAT write** | Bounded tier | In-place / append / create / delete / rename; no cluster-chain growth past envelope |
+| **FAT32 / exFAT write** | Bounded tier | In-place / append / create / delete / rename; FAT32 offset writes may grow a chain only within the 32-bit file-size envelope and reject sparse or overflowing ranges before mutation |
 | **TRIM (`fstrim`)** | Owned-only | Routes through `Fat32Volume(idx)` → only owned volumes; discards free clusters within the partition |
 | **CPU MSRs** | No physical-state writes | No Vcore/`0x150`, no RAPL `PKG_POWER_LIMIT`, no thermal-throttle/PROCHOT disable. SYSCALL/EFER/CET writes panic-on-fault by design |
 | **RAPL telemetry** | Read-only (landed 2026-06-06) | `arch/x86_64/rapl.cpp` reads energy/power/TDP MSRs only; never writes a limit. Vendor + hypervisor gated like thermal. See [Power-Management](../drivers/Power-Management.md) |
