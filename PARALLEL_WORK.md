@@ -810,3 +810,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Route cooked keyboard input to exactly one live foreground consumer
 - **Claimed**: 2026-09-20T17:53:56Z
 - **Status**: COMPLETED @ 2026-09-20T18:28:28Z
+
+### [ACTIVE] codex-duetos-createprocess-cmdline
+- **Session**: `DESKTOP-950K3EI-281`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `userland/libs/kernel32/kernel32_fs.c`
+- **Description**: Parse quoted and unquoted CreateProcess command lines into bounded executable paths
+- **Claimed**: 2026-09-20T18:29:57Z
+- **Status**: IN PROGRESS
