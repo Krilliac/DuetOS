@@ -13,6 +13,7 @@ inline constexpr u8 kRevision = 0x05;
 inline constexpr u32 kRingSlots = 256;
 inline constexpr u32 kBufferBytes = 16 * 1024 - 1;
 inline constexpr u32 kMinimumFrameBytes = 60;
+inline constexpr u32 kEthernetFcsBytes = 4;
 
 // Values are from Linux drivers/net/ethernet/realtek/r8169_main.c. The
 // v0 path uses only the generic descriptor bits shared by RTL8125.
@@ -45,10 +46,11 @@ constexpr u32 EncodeTx(u64 address, u16 length, bool first, bool last, bool ring
            (ring_end ? kDescRingEnd : 0u);
 }
 
-constexpr u32 EncodeRx(u64 address, bool ring_end)
+constexpr u32 EncodeRx(u64 address, u16 buffer_bytes, bool ring_end)
 {
-    (void)address;
-    return kDescOwn | (ring_end ? kDescRingEnd : 0u);
+    if (!DescriptorAddressValid(address, buffer_bytes) || buffer_bytes == 0 || buffer_bytes > kBufferBytes)
+        return 0;
+    return kDescOwn | (ring_end ? kDescRingEnd : 0u) | buffer_bytes;
 }
 
 enum class RxDisposition : u8
@@ -57,6 +59,13 @@ enum class RxDisposition : u8
     Drop,
     Deliver,
 };
+
+constexpr u16 RxPayloadLength(u16 wire_length)
+{
+    return wire_length >= kMinimumFrameBytes + kEthernetFcsBytes
+               ? static_cast<u16>(wire_length - kEthernetFcsBytes)
+               : 0;
+}
 
 constexpr RxDisposition ValidateRx(u32 options, u16 length, u32 buffer_bytes)
 {
@@ -92,6 +101,22 @@ constexpr bool TxReclaim(TxCursor& cursor, bool descriptor_done)
     cursor.clean = (cursor.clean + 1) % kRingSlots;
     --cursor.in_flight;
     return true;
+}
+
+constexpr bool TxReclaimAfterCpuSync(TxCursor& cursor, bool cpu_synced, bool descriptor_done)
+{
+    return cpu_synced && TxReclaim(cursor, descriptor_done);
+}
+
+struct AllocationPlan
+{
+    u32 live_allocations = 0;
+};
+
+constexpr bool AllocationRollback(AllocationPlan& plan, bool ring_ok, bool tx_ok, bool rx_ok, bool buffer_ok)
+{
+    plan.live_allocations = 0;
+    return ring_ok && tx_ok && rx_ok && buffer_ok;
 }
 
 enum class TeardownAction : u8
