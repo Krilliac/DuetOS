@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2016 # Literal Markdown backticks belong in printf/grep patterns.
 
 # DuetOS Wiki Synchronization Script
 # Scans the codebase and updates wiki pages with accurate, current information.
@@ -56,9 +57,18 @@ update_auto_section() {
 
     local tmpfile
     tmpfile=$(mktemp)
+    local bodyfile
+    bodyfile=$(mktemp)
+    printf '%s\n' "$content" > "$bodyfile"
 
-    awk -v start="$start_marker" -v end="$end_marker" -v body="$content" '
-        $0 ~ start { print; print body; skip=1; next }
+    awk -v start="$start_marker" -v end="$end_marker" -v bodyfile="$bodyfile" '
+        $0 ~ start {
+            print
+            while ((getline body_line < bodyfile) > 0) print body_line
+            close(bodyfile)
+            skip=1
+            next
+        }
         $0 ~ end   { skip=0 }
         !skip       { print }
     ' "$file" > "$tmpfile"
@@ -69,7 +79,7 @@ update_auto_section() {
         log_info "  Updated [$section] in $(basename "$file")"
     fi
 
-    rm -f "$tmpfile"
+    rm -f "$tmpfile" "$bodyfile"
     return 0
 }
 
@@ -229,7 +239,7 @@ sync_syscall_page() {
     # ------------------------------------------------------------------
     if grep -qF "<!-- AUTO:syscall_args -->" "$page"; then
         local args_body
-        args_body=$(python3 "${PROJECT_ROOT}/tools/build/gen-syscall-doc.py" 2>/dev/null || true)
+        args_body=$(python3 "${PROJECT_ROOT}/tools/build/gen-syscall-doc.py" --existing "$page" 2>/dev/null || true)
         if [ -n "$args_body" ]; then
             update_auto_section "$page" "syscall_args" "$args_body"
         fi
@@ -374,7 +384,7 @@ sync_home_page() {
 check_stale_references() {
     log_info "Checking for stale references in wiki..."
 
-    find "$WIKI_DIR" -name '*.md' | while IFS= read -r wfile; do
+    while IFS= read -r wfile; do
         # Linux-source-tree references (drivers/net/..., drivers/usb/..., etc.)
         # in Linux-Networking-Port-Opportunities.md are deliberately external.
         # Win32-Thunks-Compat-Note.md exists specifically to document a rename
@@ -386,8 +396,7 @@ check_stale_references() {
                 continue
                 ;;
         esac
-        grep -oE '`(kernel|userland|boot|subsystems|tools|tests)/[^`[:space:]]+\.(h|hpp|c|cpp|rs|S|md|sh|py)`' "$wfile" 2>/dev/null \
-            | tr -d '`' | sort -u | while read -r ref_path; do
+        while read -r ref_path; do
                 # Skip refs that are glob/template strings rather than
                 # literal paths. The wiki uses these to mean "every file
                 # matching the pattern" — the linter would only catch
@@ -410,8 +419,9 @@ check_stale_references() {
                 fi
                 log_warning "  $(basename "$wfile"): references missing path \`$ref_path\`"
                 WARNINGS=$((WARNINGS + 1))
-            done
-    done
+        done < <(grep -oE '`(kernel|userland|boot|subsystems|tools|tests)/[^`[:space:]]+\.(h|hpp|c|cpp|rs|S|md|sh|py)`' \
+            "$wfile" 2>/dev/null | tr -d '`' | sort -u)
+    done < <(find "$WIKI_DIR" -name '*.md')
 }
 
 # ============================================================================
@@ -421,14 +431,14 @@ sync_sidebar() {
     local sidebar="$WIKI_DIR/_Sidebar.md"
     [ -f "$sidebar" ] || return 0
 
-    find "$WIKI_DIR" -name '*.md' ! -name '_*.md' | while IFS= read -r wfile; do
+    while IFS= read -r wfile; do
         local page_name
         page_name=$(basename "$wfile" .md)
         if ! grep -qF "$page_name" "$sidebar" 2>/dev/null; then
             log_warning "  Wiki page '$page_name' is not listed in _Sidebar.md"
             WARNINGS=$((WARNINGS + 1))
         fi
-    done
+    done < <(find "$WIKI_DIR" -name '*.md' ! -name '_*.md')
 }
 
 # ============================================================================
@@ -471,14 +481,14 @@ main() {
             local source_wiki_dir="$WIKI_DIR"
             local scratch_wiki_dir="$tmpdir/wiki"
             mkdir -p "$scratch_wiki_dir"
-            trap "rm -rf -- '$tmpdir'" EXIT
+            trap 'rm -rf -- "$tmpdir"' EXIT
 
             # Check mode must never write into the worktree.  Copy the
             # Markdown corpus first, then redirect every sync helper to the
             # isolated tree.  This also avoids a fragile write-back restore
             # step when the repository is hosted by OneDrive.
             while IFS= read -r -d '' mdfile; do
-                local rel="${mdfile#$source_wiki_dir/}"
+                local rel="${mdfile#"$source_wiki_dir"/}"
                 mkdir -p "$scratch_wiki_dir/$(dirname "$rel")"
                 cp -- "$mdfile" "$scratch_wiki_dir/$rel"
             done < <(find "$source_wiki_dir" -name '*.md' -print0)
@@ -496,7 +506,7 @@ main() {
 
             local stale=0
             while IFS= read -r -d '' mdfile; do
-                local rel="${mdfile#$WIKI_DIR/}"
+                local rel="${mdfile#"$WIKI_DIR"/}"
                 if [ -f "$source_wiki_dir/$rel" ] &&
                    ! diff -q "$mdfile" "$source_wiki_dir/$rel" > /dev/null 2>&1; then
                     log_warning "  $rel is out of date"

@@ -15,7 +15,10 @@ maintainer convention follows is:
 This script greps that pair, extracts whatever the comment said
 about args + return, and emits a row per enum entry. Entries
 without a doc-comment get a placeholder so the table stays
-exhaustive.
+exhaustive. When ``--existing`` names the current wiki page,
+non-placeholder cells already present in its auto block are retained
+as curated overrides; this prevents a partial source comment from
+silently replacing a richer ABI contract with an em dash.
 
 T13-03 acceptance: "New syscall work can detect ABI number
 collisions from the table." The auto-emitted table cross-checks
@@ -33,6 +36,7 @@ ENUM_RE = re.compile(r'^\s*(SYS_[A-Z0-9_]+)\s*=\s*(\d+)\s*,', re.MULTILINE)
 NAMES_RE = re.compile(r'^\s*X\(\s*(SYS_[A-Z0-9_]+)\s*,\s*(\d+)\s*\)', re.MULTILINE)
 ARG_LINE_RE = re.compile(r'(rdi|rsi|rdx|r10|r8|r9)\s*=\s*([^.,;]+)', re.IGNORECASE)
 RETURN_LINE_RE = re.compile(r'returns?\s+([^.;]+)', re.IGNORECASE)
+EXISTING_ROW_RE = re.compile(r'^\|\s*(\d+)\s*\|\s*`(SYS_[A-Z0-9_]+)`\s*\|\s*(.*)\|\s*$')
 
 
 def read_text(path):
@@ -69,6 +73,26 @@ def parse_names_def(text):
     return out
 
 
+def parse_existing_table(text):
+    """Return curated non-placeholder cells from an existing auto block."""
+    start = text.find('<!-- AUTO:syscall_args -->')
+    end = text.find('<!-- /AUTO:syscall_args -->')
+    if start < 0 or end < start:
+        return {}
+
+    rows = {}
+    for line in text[start:end].splitlines():
+        match = EXISTING_ROW_RE.match(line)
+        if not match:
+            continue
+        cells = match.group(3).rstrip().rsplit(' | ', 1)
+        if len(cells) != 2:
+            continue
+        args, rv = (cell.strip() for cell in cells)
+        rows[(match.group(2), int(match.group(1)))] = (args, rv)
+    return rows
+
+
 def extract_args(doc_lines):
     """Pull `rdi = ..., rsi = ...` style chunks out of the doc."""
     blob = ' '.join(doc_lines)
@@ -101,7 +125,7 @@ def extract_return(doc_lines):
     return s
 
 
-def emit_table(enum_rows, names_map, warn_drift=True):
+def emit_table(enum_rows, names_map, existing=None, warn_drift=True):
     out = ['| # | Symbol | Args | Returns |',
            '|---|--------|------|---------|']
     for name, number, doc in enum_rows:
@@ -110,6 +134,12 @@ def emit_table(enum_rows, names_map, warn_drift=True):
                   file=sys.stderr)
         args = extract_args(doc)
         rv = extract_return(doc)
+        if existing:
+            old_args, old_rv = existing.get((name, number), ('—', '—'))
+            if old_args != '—':
+                args = old_args
+            if old_rv != '—':
+                rv = old_rv
         out.append(f'| {number} | `{name}` | {args} | {rv} |')
     return '\n'.join(out)
 
@@ -118,12 +148,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--syscall-h', default='kernel/syscall/syscall.h')
     ap.add_argument('--names-def', default='kernel/syscall/syscall_names.def')
+    ap.add_argument('--existing', help='wiki page whose non-placeholder auto cells are retained')
     ap.add_argument('--out', help='output markdown file; default = stdout')
     args = ap.parse_args()
 
     enum_rows = parse_enum(read_text(args.syscall_h))
     names_map = parse_names_def(read_text(args.names_def))
-    table = emit_table(enum_rows, names_map)
+    existing = parse_existing_table(read_text(args.existing)) if args.existing else None
+    table = emit_table(enum_rows, names_map, existing=existing)
 
     if args.out:
         with open(args.out, 'w', encoding='utf-8') as f:
