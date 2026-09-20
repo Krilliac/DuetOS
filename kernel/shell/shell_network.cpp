@@ -38,6 +38,7 @@
 #include "net/bluetooth/diag.h"
 #include "net/bluetooth/hid.h"
 #include "net/firewall.h"
+#include "net/ipv4_parse.h"
 #include "net/socket.h"
 #include "net/stack.h"
 #include "net/wifi.h"
@@ -62,38 +63,7 @@ using duetos::drivers::video::ConsoleWriteln;
 // Parse dotted-quad `a.b.c.d`. Returns true on exact 4-octet match.
 bool ParseIpv4(const char* s, duetos::net::Ipv4Address* out)
 {
-    u32 parts[4] = {};
-    u32 idx = 0;
-    u32 cur = 0;
-    bool had_digit = false;
-    for (u32 i = 0;; ++i)
-    {
-        const char c = s[i];
-        if (c == '\0' || c == '.')
-        {
-            if (!had_digit)
-                return false;
-            if (idx >= 4)
-                return false;
-            parts[idx++] = cur;
-            cur = 0;
-            had_digit = false;
-            if (c == '\0')
-                break;
-            continue;
-        }
-        if (c < '0' || c > '9')
-            return false;
-        cur = cur * 10 + u32(c - '0');
-        if (cur > 255)
-            return false;
-        had_digit = true;
-    }
-    if (idx != 4)
-        return false;
-    for (u32 i = 0; i < 4; ++i)
-        out->octets[i] = u8(parts[i]);
-    return true;
+    return duetos::net::ParseIpv4Exact(s, out);
 }
 
 // Print "a.b.c.d" — used by every networking command that wants to
@@ -145,8 +115,15 @@ void CmdPing(u32 argc, char** argv)
     static u16 next_id = 0x0100;
     const u16 id = next_id++;
     const u16 seq = 1;
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    if (!duetos::net::Ipv4ConfigForTargetRead(dst, &iface_index, &config))
+    {
+        ConsoleWriteln("PING: no configured interface can route the target");
+        return;
+    }
     duetos::net::NetPingArm(id, seq);
-    if (!duetos::net::NetIcmpSendEcho(/*iface_index=*/0, dst, id, seq))
+    if (!duetos::net::NetIcmpSendEcho(iface_index, dst, id, seq))
     {
         ConsoleWriteln("PING: send failed (ARP cache miss? try reaching a peer first)");
         return;
@@ -290,7 +267,14 @@ void CmdNtp(u32 argc, char** argv)
         ConsoleWriteln("NTP: malformed server IP");
         return;
     }
-    if (!duetos::net::NetNtpQuery(/*iface_index=*/0, server))
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    if (!duetos::net::Ipv4ConfigForTargetRead(server, &iface_index, &config))
+    {
+        ConsoleWriteln("NTP: no configured interface can route the request");
+        return;
+    }
+    if (!duetos::net::NetNtpQuery(iface_index, server))
     {
         ConsoleWriteln("NTP: send failed (ARP miss for server + gateway)");
         return;
@@ -339,13 +323,30 @@ void CmdNslookup(u32 argc, char** argv)
         ConsoleWriteln("NSLOOKUP: usage: nslookup <name> [resolver_ip]");
         return;
     }
-    duetos::net::Ipv4Address resolver{{10, 0, 2, 3}}; // QEMU SLIRP default
-    if (argc >= 3 && !ParseIpv4(argv[2], &resolver))
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    duetos::net::Ipv4Address resolver{};
+    if (argc >= 3)
     {
-        ConsoleWriteln("NSLOOKUP: malformed resolver IP");
+        if (!ParseIpv4(argv[2], &resolver))
+        {
+            ConsoleWriteln("NSLOOKUP: malformed resolver IP");
+            return;
+        }
+        if (!duetos::net::Ipv4ConfigForTargetRead(resolver, &iface_index, &config))
+        {
+            ConsoleWriteln("NSLOOKUP: no configured interface can route the resolver");
+            return;
+        }
+    }
+    else if (!duetos::net::ActiveIpv4ConfigRead(&iface_index, &config, duetos::net::Ipv4ConfigRequirement::Dns))
+    {
+        ConsoleWriteln("NSLOOKUP: no configured interface/resolver");
         return;
     }
-    if (!duetos::net::NetDnsQueryA(/*iface_index=*/0, resolver, argv[1]))
+    if (argc < 3)
+        resolver = config.dns;
+    if (!duetos::net::NetDnsQueryA(iface_index, resolver, argv[1]))
     {
         ConsoleWriteln("NSLOOKUP: send failed (ARP miss, name too long, or no iface)");
         return;
@@ -446,23 +447,28 @@ void CmdIfconfig()
             WriteMac(nic.mac);
             ConsoleWriteln("");
         }
+        const auto ipv4 = duetos::net::InterfaceIpv4ConfigRead(static_cast<duetos::u32>(i));
         if (bound)
         {
-            const auto ip = duetos::net::InterfaceIp(static_cast<duetos::u32>(i));
             ConsoleWrite("       inet    ");
-            WriteIpv4(ip);
-            if (Ipv4IsZero(ip))
+            WriteIpv4(ipv4.address);
+            if (Ipv4IsZero(ipv4.address))
                 ConsoleWriteln(" (waiting for DHCP)");
             else
-                ConsoleWriteln("");
+            {
+                if (ipv4.prefix_length != 0)
+                {
+                    ConsoleWrite("/");
+                    WriteU64Dec(ipv4.prefix_length);
+                }
+                ConsoleWriteln(ipv4.source == duetos::net::Ipv4ConfigSource::Static ? " (static)" : "");
+            }
         }
         else
         {
             ConsoleWriteln("       inet    (not bound to stack — driver hasn't called bind yet)");
         }
-        // Lease detail (DHCP is single-iface in v0; only print on the
-        // interface that owns the lease).
-        const auto lease = duetos::net::DhcpLeaseRead();
+        const auto lease = duetos::net::DhcpLeaseRead(static_cast<duetos::u32>(i));
         if (bound && lease.valid)
         {
             ConsoleWrite("       gateway ");
@@ -476,6 +482,21 @@ void CmdIfconfig()
             ConsoleWrite("  lease=");
             WriteU64Dec(lease.lease_secs);
             ConsoleWriteln("s");
+        }
+        else if (bound && ipv4.source == duetos::net::Ipv4ConfigSource::Static)
+        {
+            if (!Ipv4IsZero(ipv4.gateway))
+            {
+                ConsoleWrite("       gateway ");
+                WriteIpv4(ipv4.gateway);
+                ConsoleWriteln("");
+            }
+            if (!Ipv4IsZero(ipv4.dns))
+            {
+                ConsoleWrite("       dns     ");
+                WriteIpv4(ipv4.dns);
+                ConsoleWriteln("");
+            }
         }
     }
     ConsoleWrite("ARP cache: ");
@@ -538,16 +559,36 @@ void CmdIpv4()
     ConsoleWriteChar('\n');
 }
 
+bool FindDhcpInterface(u32* out_iface_index)
+{
+    if (out_iface_index == nullptr)
+        return false;
+    const u64 count = duetos::net::InterfaceCount();
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!duetos::net::InterfaceIsBound(i))
+            continue;
+        if (duetos::net::InterfaceIpv4ConfigRead(i).source == duetos::net::Ipv4ConfigSource::Static)
+            continue;
+        *out_iface_index = i;
+        return true;
+    }
+    *out_iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    return false;
+}
+
 void CmdDhcp(u32 argc, char** argv)
 {
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    const bool has_dynamic_iface = FindDhcpInterface(&iface_index);
     if (argc >= 2 && (StrEq(argv[1], "renew") || StrEq(argv[1], "request") || StrEq(argv[1], "start")))
     {
-        if (!duetos::net::InterfaceIsBound(0))
+        if (!has_dynamic_iface)
         {
-            ConsoleWriteln("DHCP: iface 0 not bound (no NIC driver online?)");
+            ConsoleWriteln("DHCP: no bound dynamic interface (static interfaces are unchanged)");
             return;
         }
-        if (!duetos::net::DhcpStart(0))
+        if (!duetos::net::DhcpStart(iface_index))
         {
             ConsoleWriteln("DHCP: start failed (transaction already in flight?)");
             return;
@@ -556,14 +597,26 @@ void CmdDhcp(u32 argc, char** argv)
         for (u32 i = 0; i < 200; ++i)
         {
             duetos::sched::SchedSleepTicks(1);
-            const auto poll = duetos::net::DhcpLeaseRead();
+            const auto poll = duetos::net::DhcpLeaseRead(iface_index);
             if (poll.valid)
                 break;
         }
     }
-    const auto lease = duetos::net::DhcpLeaseRead();
+    const auto lease = has_dynamic_iface ? duetos::net::DhcpLeaseRead(iface_index) : duetos::net::DhcpLease{};
     if (!lease.valid)
     {
+        u32 active_iface = duetos::net::kInvalidNetInterfaceIndex;
+        duetos::net::Ipv4InterfaceConfig active{};
+        if (duetos::net::ActiveIpv4ConfigRead(&active_iface, &active) &&
+            active.source == duetos::net::Ipv4ConfigSource::Static)
+        {
+            ConsoleWrite("DHCP: bypassed; net");
+            WriteU64Dec(active_iface);
+            ConsoleWrite(" is static at ");
+            WriteIpv4(active.address);
+            ConsoleWriteln("");
+            return;
+        }
         ConsoleWriteln("DHCP: no lease (server didn't respond, or transaction in flight)");
         ConsoleWriteln("      try: `dhcp renew`");
         return;
@@ -588,24 +641,46 @@ void CmdDhcp(u32 argc, char** argv)
 void CmdRoute(u32 argc, char** argv)
 {
     (void)argv;
-    const auto lease = duetos::net::DhcpLeaseRead();
-    if (!lease.valid)
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    if (!duetos::net::ActiveIpv4ConfigRead(&iface_index, &config))
     {
-        ConsoleWriteln("ROUTE: no default route (DHCP not bound — try `dhcp renew`)");
+        ConsoleWriteln("ROUTE: no interface has an active IPv4 configuration");
         return;
     }
-    ConsoleWrite("default via ");
-    WriteIpv4(lease.router);
-    ConsoleWrite(" dev net0  src ");
-    WriteIpv4(lease.ip);
+    ConsoleWrite("connected");
+    if (config.prefix_length != 0)
+    {
+        ConsoleWrite(" /");
+        WriteU64Dec(config.prefix_length);
+    }
+    else
+    {
+        ConsoleWrite(" (prefix unknown)");
+    }
+    ConsoleWrite(" dev net");
+    WriteU64Dec(iface_index);
+    ConsoleWrite("  src ");
+    WriteIpv4(config.address);
     ConsoleWriteln("");
-    ConsoleWrite("DNS via ");
-    WriteIpv4(lease.dns);
-    ConsoleWriteln("");
-    if (argc < 2)
+    if (!Ipv4IsZero(config.gateway))
+    {
+        ConsoleWrite("default via ");
+        WriteIpv4(config.gateway);
+        ConsoleWrite(" dev net");
+        WriteU64Dec(iface_index);
+        ConsoleWriteln("");
+    }
+    if (!Ipv4IsZero(config.dns))
+    {
+        ConsoleWrite("DNS via ");
+        WriteIpv4(config.dns);
+        ConsoleWriteln("");
+    }
+    if (argc < 2 || Ipv4IsZero(config.gateway))
         return;
     duetos::net::ArpEntry arp{};
-    const bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+    const bool arp_found = duetos::net::ArpLookup(iface_index, config.gateway, &arp);
     ConsoleWrite("gateway L2: ");
     if (!arp_found)
     {
@@ -1182,29 +1257,33 @@ void CmdNet(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "up"))
     {
-        if (!duetos::net::InterfaceIsBound(0))
+        u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+        duetos::net::Ipv4InterfaceConfig config{};
+        if (duetos::net::ActiveIpv4ConfigRead(&iface_index, &config))
         {
-            ConsoleWriteln("NET UP: iface 0 not bound (no NIC driver?)");
-            return;
-        }
-        auto lease = duetos::net::DhcpLeaseRead();
-        if (lease.valid)
-        {
-            ConsoleWrite("NET UP: already bound  ip=");
-            WriteIpv4(lease.ip);
+            ConsoleWrite("NET UP: already configured net");
+            WriteU64Dec(iface_index);
+            ConsoleWrite(" ip=");
+            WriteIpv4(config.address);
             ConsoleWriteln("");
             return;
         }
-        if (!duetos::net::DhcpStart(0))
+        if (!FindDhcpInterface(&iface_index))
+        {
+            ConsoleWriteln("NET UP: no bound dynamic interface");
+            return;
+        }
+        if (!duetos::net::DhcpStart(iface_index))
         {
             ConsoleWriteln("NET UP: DHCP start failed");
             return;
         }
         ConsoleWriteln("NET UP: DHCP DISCOVER sent ...");
+        duetos::net::DhcpLease lease{};
         for (u32 i = 0; i < 300; ++i)
         {
             duetos::sched::SchedSleepTicks(1);
-            lease = duetos::net::DhcpLeaseRead();
+            lease = duetos::net::DhcpLeaseRead(iface_index);
             if (lease.valid)
                 break;
         }
@@ -1224,18 +1303,29 @@ void CmdNet(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "status"))
     {
-        const auto lease = duetos::net::DhcpLeaseRead();
-        const bool bound = duetos::net::InterfaceIsBound(0);
-        ConsoleWrite("NET: iface0=");
-        ConsoleWrite(bound ? "UP" : "DOWN");
-        ConsoleWrite("  dhcp=");
-        ConsoleWrite(lease.valid ? "BOUND" : "PENDING");
-        if (lease.valid)
+        u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+        duetos::net::Ipv4InterfaceConfig config{};
+        if (!duetos::net::ActiveIpv4ConfigRead(&iface_index, &config))
         {
-            ConsoleWrite("  ip=");
-            WriteIpv4(lease.ip);
+            ConsoleWrite("NET: no active IPv4 configuration  bound-prefix=");
+            WriteU64Dec(duetos::net::InterfaceCount());
+            ConsoleWriteln("");
+            return;
+        }
+        const char* source = config.source == duetos::net::Ipv4ConfigSource::Static   ? "STATIC"
+                             : config.source == duetos::net::Ipv4ConfigSource::Dhcp   ? "DHCP"
+                             : config.source == duetos::net::Ipv4ConfigSource::Driver ? "DRIVER"
+                                                                                      : "NONE";
+        ConsoleWrite("NET: net");
+        WriteU64Dec(iface_index);
+        ConsoleWrite("=UP  source=");
+        ConsoleWrite(source);
+        ConsoleWrite("  ip=");
+        WriteIpv4(config.address);
+        if (!Ipv4IsZero(config.gateway))
+        {
             ConsoleWrite("  gw=");
-            WriteIpv4(lease.router);
+            WriteIpv4(config.gateway);
         }
         ConsoleWrite("  arp=");
         WriteU64Dec(duetos::net::ArpEntryCount());
@@ -1244,38 +1334,48 @@ void CmdNet(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "test"))
     {
-        ConsoleWrite("NET TEST: dhcp ... ");
-        auto lease = duetos::net::DhcpLeaseRead();
-        if (!lease.valid)
+        ConsoleWrite("NET TEST: address ... ");
+        u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+        duetos::net::Ipv4InterfaceConfig config{};
+        if (!duetos::net::ActiveIpv4ConfigRead(&iface_index, &config, duetos::net::Ipv4ConfigRequirement::Gateway))
         {
-            duetos::net::DhcpStart(0);
+            if (!FindDhcpInterface(&iface_index) || !duetos::net::DhcpStart(iface_index))
+            {
+                ConsoleWriteln("FAIL (no configured or dynamic interface)");
+                return;
+            }
             for (u32 i = 0; i < 300; ++i)
             {
                 duetos::sched::SchedSleepTicks(1);
-                lease = duetos::net::DhcpLeaseRead();
-                if (lease.valid)
+                if (duetos::net::ActiveIpv4ConfigRead(&iface_index, &config,
+                                                      duetos::net::Ipv4ConfigRequirement::Gateway))
                     break;
             }
         }
-        if (!lease.valid)
+        if (config.source == duetos::net::Ipv4ConfigSource::None)
         {
-            ConsoleWriteln("FAIL (no lease)");
+            ConsoleWriteln("FAIL (no address)");
             return;
         }
         ConsoleWrite("OK ip=");
-        WriteIpv4(lease.ip);
+        WriteIpv4(config.address);
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: gateway ARP ... ");
+        if (Ipv4IsZero(config.gateway))
+        {
+            ConsoleWriteln("FAIL (no gateway configured)");
+            return;
+        }
         duetos::net::ArpEntry arp{};
-        bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+        bool arp_found = duetos::net::ArpLookup(iface_index, config.gateway, &arp);
         if (!arp_found)
         {
-            duetos::net::NetIcmpSendEcho(0, lease.router, 0xBEEF, 1);
+            duetos::net::NetIcmpSendEcho(iface_index, config.gateway, 0xBEEF, 1);
             for (u32 i = 0; i < 100; ++i)
             {
                 duetos::sched::SchedSleepTicks(1);
-                arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+                arp_found = duetos::net::ArpLookup(iface_index, config.gateway, &arp);
                 if (arp_found)
                     break;
             }
@@ -1291,7 +1391,7 @@ void CmdNet(u32 argc, char** argv)
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: dns ... ");
-        if (!duetos::net::NetDnsQueryA(0, lease.dns, "example.com"))
+        if (Ipv4IsZero(config.dns) || !duetos::net::NetDnsQueryA(iface_index, config.dns, "example.com"))
         {
             ConsoleWriteln("FAIL (send rejected)");
             return;
@@ -1315,7 +1415,7 @@ void CmdNet(u32 argc, char** argv)
 
         ConsoleWrite("NET TEST: ping gateway ... ");
         duetos::net::NetPingArm(0xCAFE, 1);
-        if (!duetos::net::NetIcmpSendEcho(0, lease.router, 0xCAFE, 1))
+        if (!duetos::net::NetIcmpSendEcho(iface_index, config.gateway, 0xCAFE, 1))
         {
             ConsoleWriteln("FAIL (send rejected)");
             return;

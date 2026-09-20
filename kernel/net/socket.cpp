@@ -296,7 +296,7 @@ void PublishSocketLocked(Socket& s, u16 domain, u16 type, SocketDgram* rx)
     s.pins = 0;
     s.family = domain;
     s.type = type;
-    s.iface_index = 0;
+    s.iface_index = kInvalidNetInterfaceIndex;
     s.owner_pid = 0; // stamped by SocketSetOwner from the syscall handler
     s.bound = false;
     s.connected = false;
@@ -324,6 +324,23 @@ void PublishSocketLocked(Socket& s, u16 domain, u16 type, SocketDgram* rx)
     // keeping the liveness bit last also makes accidental lockless probes
     // fail closed instead of observing a partially initialized socket.
     s.in_use = true;
+}
+
+bool InterfaceForLocalAddress(Ipv4Address address, u32* out_iface_index)
+{
+    if (out_iface_index == nullptr || IpZero(address))
+        return false;
+    const u64 count = InterfaceCount();
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!InterfaceIsBound(i))
+            continue;
+        if (!IpEqual(InterfaceIpv4ConfigRead(i).address, address))
+            continue;
+        *out_iface_index = i;
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -555,6 +572,9 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
 {
     if (idx >= kSocketPoolCap)
         return false;
+    u32 local_iface_index = kInvalidNetInterfaceIndex;
+    if (!IpZero(local_ip))
+        (void)InterfaceForLocalAddress(local_ip, &local_iface_index);
     SocketOperationPin pin(idx);
     if (!pin)
         return false;
@@ -587,6 +607,7 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
         s.local_port = local_port;
     }
     s.local_ip = local_ip;
+    s.iface_index = local_iface_index;
     s.bound = true;
     ++g_stats.binds;
     return true;
@@ -617,8 +638,20 @@ bool SocketListen(u32 idx, u32 backlog)
     const u32 cap = (backlog > tcp::kListenBacklogMax) ? tcp::kListenBacklogMax : backlog;
     const u16 port = s.local_port;
     const Ipv4Address ip = s.local_ip;
+    u32 iface_index = s.iface_index;
     sync::SpinLockRelease(g_sock_lock, flags);
-    const tcp::TcbId tcb = tcp::Listen(/*iface_index=*/0, ip, port, cap);
+    if (iface_index == kInvalidNetInterfaceIndex)
+    {
+        Ipv4InterfaceConfig config{};
+        if (!InterfaceForLocalAddress(ip, &iface_index) &&
+            !ActiveIpv4ConfigRead(&iface_index, &config, Ipv4ConfigRequirement::AddressOnly))
+        {
+            if (ip.octets[0] != 127)
+                return false;
+            iface_index = 0;
+        }
+    }
+    const tcp::TcbId tcb = tcp::Listen(iface_index, ip, port, cap);
     if (tcb == tcp::kInvalidTcbId)
         return false;
     flags = sync::SpinLockAcquire(g_sock_lock);
@@ -632,6 +665,7 @@ bool SocketListen(u32 idx, u32 backlog)
         return false;
     }
     s.tcb = tcb;
+    s.iface_index = iface_index;
     s.listening = true;
     sync::SpinLockRelease(g_sock_lock, flags);
     return true;
@@ -757,8 +791,15 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
     }
 
     // On-wire SOCK_STREAM via tcp::Connect.
+    u32 iface_index = s.iface_index;
     sync::SpinLockRelease(g_sock_lock, flags);
-    const tcp::TcbId tcb = tcp::Connect(/*iface_index=*/0, peer_ip, peer_port, /*local_port=*/0);
+    if (iface_index == kInvalidNetInterfaceIndex)
+    {
+        Ipv4InterfaceConfig config{};
+        if (!Ipv4ConfigForTargetRead(peer_ip, &iface_index, &config))
+            return false;
+    }
+    const tcp::TcbId tcb = tcp::Connect(iface_index, peer_ip, peer_port, /*local_port=*/0);
     if (tcb == tcp::kInvalidTcbId)
         return false;
     // Wait up to 10 s for the handshake to complete.
@@ -775,6 +816,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
     s.tcb = tcb;
     s.peer_ip = peer_ip;
     s.peer_port = peer_port;
+    s.iface_index = iface_index;
     s.connected = true;
     Ipv4Address le_ip;
     u16 le_port;
@@ -984,6 +1026,22 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         s.bound = true;
         state = SnapshotSocketLocked(s);
     }
+    if (state.iface_index == kInvalidNetInterfaceIndex)
+    {
+        Ipv4InterfaceConfig config{};
+        u32 iface_index = kInvalidNetInterfaceIndex;
+        if (!Ipv4ConfigForTargetRead(dst, &iface_index, &config))
+            return -100;
+        {
+            sync::SpinLockGuard guard(g_sock_lock);
+            Socket& s = pin.mutable_socket();
+            if (!s.in_use || s.closing || s.type != kSocketTypeDgram)
+                return -88;
+            if (s.iface_index == kInvalidNetInterfaceIndex)
+                s.iface_index = iface_index;
+            state = SnapshotSocketLocked(s);
+        }
+    }
     NetInterfaceSnapshot interface{};
     if (!NetStackAcquireInterface(state.iface_index, &interface))
         return -100;
@@ -993,13 +1051,20 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         return -99;
     const Ipv4Address src = IpZero(state.local_ip) ? interface.ip : state.local_ip;
     MacAddress dst_mac{};
-    ArpEntry arp{};
-    if (ArpLookup(interface.binding.iface_index, dst, &arp))
-        dst_mac = arp.mac;
+    const Ipv4InterfaceConfig route_config = InterfaceIpv4ConfigRead(interface.binding.iface_index);
+    if (route_config.source == Ipv4ConfigSource::Static)
+    {
+        if (!NetResolveIpv4Destination(interface.binding, dst, &dst_mac))
+            return -101;
+    }
     else
     {
-        for (u8& b : dst_mac.octets)
-            b = 0xFF;
+        ArpEntry arp{};
+        if (ArpLookup(interface.binding.iface_index, dst, &arp))
+            dst_mac = arp.mac;
+        else
+            for (u8& b : dst_mac.octets)
+                b = 0xFF;
     }
     if (!NetUdpSend(interface.binding.iface_index, dst_mac, dst, port, src, state.local_port, data, len))
         return -101;

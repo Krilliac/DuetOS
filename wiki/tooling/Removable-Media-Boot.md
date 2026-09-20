@@ -76,6 +76,23 @@ tools/image/build-removable-media.sh \
 An existing regular output is refused unless `--force` is supplied.  `--force`
 never relaxes the physical-device rejection.
 
+For a machine on a direct Ethernet link, add an auditable static network
+configuration to the generated GRUB command line:
+
+```bash
+tools/image/build-removable-media.sh \
+  --kernel build/x86_64-debug/kernel/duetos-kernel.elf \
+  --output build/x86_64-debug/duetos-node.img \
+  --static-ip 10.77.0.2/30 --static-iface 0 \
+  --gateway 10.77.0.1
+```
+
+`--static-iface` defaults to 0; `--gateway` and `--dns` are optional and
+require `--static-ip`. The builder rejects malformed/unusable addresses,
+out-of-range interfaces, and off-subnet gateways before invoking construction
+tools. These switches contain routing data only—credentials and DRSH passwords
+must never be placed in the boot command line.
+
 ## Verify without physical media
 
 The contract test checks target refusal, paths containing spaces, GPT/ESP
@@ -95,8 +112,13 @@ DUETOS_PRESET=x86_64-debug \
 ```
 
 It requires `metrics bringup-complete`, rejects panic/triple-fault markers,
-and runs the standard boot-log analyzer.  A successful QEMU exit without the
-completion marker is still a failure.
+and runs the standard boot-log analyzer. It also boots a deterministic
+TEST-NET-1 static policy (`192.0.2.2/30`, gateway `192.0.2.1`) and requires the
+kernel's static-policy activation marker, continuously covering builder/kernel
+command-line parity. Override `DUETOS_STATIC_IP`, `DUETOS_STATIC_IFACE`,
+`DUETOS_GATEWAY`, or `DUETOS_DNS` for another fixture; set
+`DUETOS_STATIC_IP=` explicitly to exercise the empty/DHCP path. A successful
+QEMU exit without the completion marker is still a failure.
 
 ## Secure Boot limitation
 

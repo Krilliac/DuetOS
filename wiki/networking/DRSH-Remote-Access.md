@@ -58,6 +58,25 @@ Stop the listener with `drshd stop`; rotate the password with
 `drshd passwd <newpass>` only after the listener and its active workers have
 drained.
 
+## Bare-metal direct link
+
+An isolated point-to-point Ethernet link does not normally have a DHCP server.
+Boot the selected wired interface with an explicit address, for example:
+
+```text
+net.static=10.77.0.2/30 net.static-iface=0 net.gateway=10.77.0.1
+```
+
+Choose `net.static-iface` from the DuetOS NIC inventory; the example uses 0
+because the current Node RTL8125 is on PCI bus 1 ahead of its bus-2 Wi-Fi
+adapter, but another machine may enumerate differently. The
+normal DRSH service remains off after the interface binds: set the password
+locally, then start `drshd ... --external`. A test-only
+`DUETOS_DRSH_AUTOSTART=ON` image may be used on a physically isolated cable,
+but its known test password is not a production credential and the image must
+not be exposed to another network. Never put a DRSH password or other secret on
+the kernel command line; the boot path logs that command line for diagnostics.
+
 ## Live DRSH agent campaign
 
 The host-side agent campaign is a separate test surface from

@@ -292,14 +292,16 @@ void ClickRefresh()
     {
         (void)duetos::net::InterfaceCountersRead(i);
     }
-    (void)duetos::net::DhcpLeaseRead();
+    u32 active_iface = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig active_config{};
+    (void)duetos::net::ActiveIpv4ConfigRead(&active_iface, &active_config);
     duetos::net::WifiScanResult scan_unused[duetos::net::kWifiMaxScanResults];
     u32 scan_count_unused = 0;
     (void)duetos::net::WifiScan(0, scan_unused, duetos::net::kWifiMaxScanResults, &scan_count_unused);
     duetos::drivers::video::NotifyShow("netstatus: refreshed");
 }
 
-// Paint the raw netstatus content (interfaces / routing / DHCP /
+// Paint the raw netstatus content (interfaces / routing / IPv4 source /
 // Wi-Fi scan) inside the band DrawFn carves out between the
 // (toolbar + header) at the top and the AppLabel footer at the
 // bottom.
@@ -394,16 +396,17 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
         y += kRowH;
     }
 
-    // Routing / DNS — pulled from the most recent DHCP lease. v0
-    // is single-lease (the stack tracks one transaction at a time)
-    // so a single GATEWAY / DNS line is enough; once multiple
-    // leases coexist the app grows a per-iface section.
+    // Routing / DNS — sourced from the active static, DHCP, or driver
+    // configuration. The source stays explicit so static links never render as
+    // a fabricated DHCP lease.
     y += kRowH;
     if (y + kRowH >= cy + ch)
     {
         return;
     }
-    const auto lease = duetos::net::DhcpLeaseRead();
+    u32 route_iface = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig route_config{};
+    const bool route_valid = duetos::net::ActiveIpv4ConfigRead(&route_iface, &route_config);
     FramebufferDrawString(cx + kMargin, y, "ROUTING / DNS", kHeaderFg, kBg);
     y += kRowH + 4;
 
@@ -443,15 +446,15 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
         }
     };
 
-    if (!lease.valid)
+    if (!route_valid)
     {
-        FramebufferDrawString(cx + kMargin, y, "  (no DHCP lease - gateway / DNS unknown)", kFgDim, kBg);
+        FramebufferDrawString(cx + kMargin, y, "  (no active IPv4 configuration)", kFgDim, kBg);
         return;
     }
 
     o = 0;
     append_str("GATEWAY  : ");
-    append_ip(lease.router);
+    append_ip(route_config.gateway);
     line[o] = '\0';
     FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
     y += kRowH;
@@ -462,7 +465,7 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
 
     o = 0;
     append_str("DNS      : ");
-    append_ip(lease.dns);
+    append_ip(route_config.dns);
     line[o] = '\0';
     FramebufferDrawString(cx + kMargin, y, line, kBound, kBg);
     y += kRowH;
@@ -472,28 +475,31 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
     }
 
     o = 0;
-    append_str("DHCP SVR : ");
-    append_ip(lease.server);
-    append_str("   LEASE: ");
+    if (route_config.source == duetos::net::Ipv4ConfigSource::Dhcp)
     {
+        const auto lease = duetos::net::DhcpLeaseRead(route_iface);
+        append_str("DHCP SVR : ");
+        append_ip(lease.server);
+        append_str("   LEASE: ");
         u64 v = lease.lease_secs;
         char buf[16];
         u32 b = 0;
         if (v == 0)
-        {
             buf[b++] = '0';
-        }
         while (v != 0 && b < sizeof(buf))
         {
             buf[b++] = static_cast<char>('0' + (v % 10));
             v /= 10;
         }
         while (b != 0 && o + 1 < sizeof(line))
-        {
             line[o++] = buf[--b];
-        }
+        append_str("s");
     }
-    append_str("s");
+    else
+    {
+        append_str(route_config.source == duetos::net::Ipv4ConfigSource::Static ? "SOURCE   : STATIC"
+                                                                                : "SOURCE   : DRIVER");
+    }
     line[o] = '\0';
     FramebufferDrawString(cx + kMargin, y, line, kFgDim, kBg);
 

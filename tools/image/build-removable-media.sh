@@ -12,7 +12,9 @@ usage()
     cat >&2 <<'USAGE'
 usage: tools/image/build-removable-media.sh \
        --kernel <duetos-kernel.elf> --output <regular-file.img> \
-       [--size-mib 128] [--boot-mode interactive|smoke] [--force]
+       [--size-mib 128] [--boot-mode interactive|smoke] \
+       [--static-ip <a.b.c.d/prefix>] [--static-iface 0..3] \
+       [--gateway <a.b.c.d>] [--dns <a.b.c.d>] [--force]
 USAGE
     exit 2
 }
@@ -21,7 +23,45 @@ KERNEL=""
 OUTPUT=""
 SIZE_MIB=128
 BOOT_MODE="interactive"
+STATIC_IP=""
+STATIC_IFACE=0
+STATIC_IFACE_SET=0
+GATEWAY=""
+DNS=""
 FORCE=0
+
+ipv4_to_u32()
+{
+    local text="$1"
+    [[ "${text}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+    local octet value=0
+    for octet in "${a}" "${b}" "${c}" "${d}"; do
+        [[ "${octet}" =~ ^[0-9]{1,3}$ ]] || return 1
+        local numeric=$((10#${octet}))
+        (( numeric <= 255 )) || return 1
+        value=$(((value << 8) | numeric))
+    done
+    printf '%u\n' "${value}"
+}
+
+ipv4_is_usable_unicast()
+{
+    local value="$1"
+    local first=$(((value >> 24) & 255))
+    (( first != 0 && first != 127 && first < 224 ))
+}
+
+ipv4_is_usable_host()
+{
+    local value="$1"
+    local prefix="$2"
+    ipv4_is_usable_unicast "${value}" || return 1
+    (( prefix >= 31 )) && return 0
+    local host_mask=$(((1 << (32 - prefix)) - 1))
+    local host=$((value & host_mask))
+    (( host != 0 && host != host_mask ))
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +83,27 @@ while [[ $# -gt 0 ]]; do
     --boot-mode)
         [[ $# -ge 2 ]] || usage
         BOOT_MODE="$2"
+        shift 2
+        ;;
+    --static-ip)
+        [[ $# -ge 2 ]] || usage
+        STATIC_IP="$2"
+        shift 2
+        ;;
+    --static-iface)
+        [[ $# -ge 2 ]] || usage
+        STATIC_IFACE="$2"
+        STATIC_IFACE_SET=1
+        shift 2
+        ;;
+    --gateway)
+        [[ $# -ge 2 ]] || usage
+        GATEWAY="$2"
+        shift 2
+        ;;
+    --dns)
+        [[ $# -ge 2 ]] || usage
+        DNS="$2"
         shift 2
         ;;
     --force)
@@ -87,6 +148,68 @@ if [[ -e "${OUTPUT}" && "${FORCE}" != 1 ]]; then
     exit 2
 fi
 
+if [[ -z "${STATIC_IP}" ]]; then
+    if [[ -n "${GATEWAY}" ]]; then
+        echo "error: --gateway requires --static-ip" >&2
+        exit 2
+    fi
+    if [[ -n "${DNS}" ]]; then
+        echo "error: --dns requires --static-ip" >&2
+        exit 2
+    fi
+    if [[ "${STATIC_IFACE_SET}" == 1 ]]; then
+        echo "error: --static-iface requires --static-ip" >&2
+        exit 2
+    fi
+else
+    if [[ "${STATIC_IP}" != */* || "${STATIC_IP#*/}" == */* ]]; then
+        echo "error: invalid --static-ip (expected a.b.c.d/prefix)" >&2
+        exit 2
+    fi
+    STATIC_ADDRESS="${STATIC_IP%/*}"
+    STATIC_PREFIX="${STATIC_IP#*/}"
+    if [[ ! "${STATIC_PREFIX}" =~ ^[0-9]+$ ]] || (( 10#${STATIC_PREFIX} < 1 || 10#${STATIC_PREFIX} > 32 )); then
+        echo "error: invalid --static-ip prefix (expected 1 through 32)" >&2
+        exit 2
+    fi
+    STATIC_PREFIX=$((10#${STATIC_PREFIX}))
+    if ! STATIC_IP_VALUE="$(ipv4_to_u32 "${STATIC_ADDRESS}")" ||
+       ! ipv4_is_usable_host "${STATIC_IP_VALUE}" "${STATIC_PREFIX}"; then
+        echo "error: invalid --static-ip address" >&2
+        exit 2
+    fi
+    if [[ ! "${STATIC_IFACE}" =~ ^[0-3]$ ]]; then
+        echo "error: --static-iface must be an integer from 0 through 3" >&2
+        exit 2
+    fi
+    if [[ -n "${GATEWAY}" ]]; then
+        if ! GATEWAY_VALUE="$(ipv4_to_u32 "${GATEWAY}")" ||
+           ! ipv4_is_usable_host "${GATEWAY_VALUE}" "${STATIC_PREFIX}"; then
+            echo "error: invalid --gateway address" >&2
+            exit 2
+        fi
+        if (( GATEWAY_VALUE == STATIC_IP_VALUE )); then
+            echo "error: --gateway must differ from --static-ip" >&2
+            exit 2
+        fi
+        if (( STATIC_PREFIX == 32 )); then
+            echo "error: --gateway is not supported with a /32 static address" >&2
+            exit 2
+        fi
+        NETWORK_MASK=$(((0xFFFFFFFF << (32 - STATIC_PREFIX)) & 0xFFFFFFFF))
+        if (( (GATEWAY_VALUE & NETWORK_MASK) != (STATIC_IP_VALUE & NETWORK_MASK) )); then
+            echo "error: --gateway must be on the configured subnet" >&2
+            exit 2
+        fi
+    fi
+    if [[ -n "${DNS}" ]]; then
+        if ! DNS_VALUE="$(ipv4_to_u32 "${DNS}")" || ! ipv4_is_usable_unicast "${DNS_VALUE}"; then
+            echo "error: invalid --dns address" >&2
+            exit 2
+        fi
+    fi
+fi
+
 if [[ ! "${SIZE_MIB}" =~ ^[0-9]+$ ]] || (( SIZE_MIB < 64 || SIZE_MIB > 4096 )); then
     echo "error: --size-mib must be an integer from 64 through 4096" >&2
     exit 2
@@ -123,6 +246,11 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 KERNEL_ARGS="boot=desktop autologin=1"
 if [[ "${BOOT_MODE}" == "smoke" ]]; then
     KERNEL_ARGS+=" smoke=bringup"
+fi
+if [[ -n "${STATIC_IP}" ]]; then
+    KERNEL_ARGS+=" net.static=${STATIC_IP} net.static-iface=${STATIC_IFACE}"
+    [[ -z "${GATEWAY}" ]] || KERNEL_ARGS+=" net.gateway=${GATEWAY}"
+    [[ -z "${DNS}" ]] || KERNEL_ARGS+=" net.dns=${DNS}"
 fi
 
 cat >"${GRUB_CFG}" <<GRUB

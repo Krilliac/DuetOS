@@ -2238,7 +2238,7 @@ void BootBringupDevices(bool force_net_smoke)
     // enumeration is passive; VirtioInit and NetInit below are the first
     // activation points.
     SerialWrite("[boot] Bringing up network stack before NIC activation.\n");
-    duetos::net::NetStackInit();
+    duetos::net::NetStackInit(duetos::core::FindBootCmdline(0));
 
     SerialWrite("[boot] Probing VirtIO PCI devices.\n");
     duetos::drivers::virtio::VirtioInit();

@@ -54,6 +54,16 @@ expect_refusal "existing-symlink-force" "refusing non-regular output" \
     --output "${EXISTING_LINK}" --force
 expect_refusal "invalid-boot-mode" "--boot-mode must be interactive or smoke" \
     --output "${TMP_DIR}/invalid-mode.img" --boot-mode unsafe
+expect_refusal "invalid-static-ip" "invalid --static-ip" \
+    --output "${TMP_DIR}/invalid-static-ip.img" --static-ip 10.77.0.999/30
+expect_refusal "invalid-static-ip-suffix" "invalid --static-ip" \
+    --output "${TMP_DIR}/invalid-static-ip-suffix.img" --static-ip 10.77.0.2./30
+expect_refusal "gateway-without-static" "--gateway requires --static-ip" \
+    --output "${TMP_DIR}/gateway-without-static.img" --gateway 10.77.0.1
+expect_refusal "invalid-static-iface" "--static-iface must be an integer from 0 through 3" \
+    --output "${TMP_DIR}/invalid-static-iface.img" --static-ip 10.77.0.2/30 --static-iface 4
+expect_refusal "off-subnet-gateway" "--gateway must be on the configured subnet" \
+    --output "${TMP_DIR}/off-subnet-gateway.img" --static-ip 10.77.0.2/30 --gateway 10.77.1.1
 
 if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
     readonly IMAGE="${TMP_DIR}/Duet OS removable.img"
@@ -61,7 +71,8 @@ if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
     readonly EXTRACTED_EFI="${TMP_DIR}/BOOTX64.EFI"
     readonly EXTRACTED_GRUB_CFG="${TMP_DIR}/grub.cfg"
 
-    "${BUILDER}" --kernel "${DUETOS_KERNEL_ELF}" --output "${IMAGE}" --size-mib 128
+    "${BUILDER}" --kernel "${DUETOS_KERNEL_ELF}" --output "${IMAGE}" --size-mib 128 \
+        --static-ip 10.77.0.2/30 --static-iface 1 --gateway 10.77.0.1 --dns 1.1.1.1
 
     parted -sm "${IMAGE}" unit B print >"${TMP_DIR}/parted.txt"
     if ! grep -Eq ':fat32:.*boot, esp;' "${TMP_DIR}/parted.txt"; then
@@ -78,7 +89,7 @@ if [[ -n "${DUETOS_KERNEL_ELF:-}" ]]; then
         echo "FAIL: staged kernel differs from the input ELF" >&2
         exit 1
     }
-    grep -Fq 'multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1' "${EXTRACTED_GRUB_CFG}" || {
+    grep -Fq 'multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1 net.static=10.77.0.2/30 net.static-iface=1 net.gateway=10.77.0.1 net.dns=1.1.1.1' "${EXTRACTED_GRUB_CFG}" || {
         echo "FAIL: interactive kernel command line missing" >&2
         cat "${EXTRACTED_GRUB_CFG}" >&2
         exit 1

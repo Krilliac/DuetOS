@@ -1761,6 +1761,22 @@ is stored on `Process::manifest` and consulted by Win32 thunks.
 `kernel/loader/manifest.h` defines `ManifestInfo`; `manifest.cpp`
 implements both the PE resource extraction and the XML scan.
 
+### 2026-09-20 — removable bare-metal control path reaches the network boundary
+
+DuetOS gained an exact-identity RTL8125 v0 driver for the current Node target,
+retry-safe PCI/DMA teardown, a regular-file-only removable-media builder, and
+stack-owned static IPv4 boot configuration. A direct `/30` link can now be
+described as audited boot policy (`net.static`, `net.static-iface`, optional
+gateway/DNS) rather than hard-coded in the NIC driver. DHCP, static, and
+driver-supplied state stay distinguishable through the kernel UI and fixed
+network-info ABI, and DRSH can use the configured interface once an operator
+explicitly enables its external listener.
+
+The remaining physical gate is firmware trust: the generated GRUB EFI binary
+is unsigned, while the Node has Secure Boot enabled. No internal disk was
+partitioned and no reboot is safe until an operator deliberately permits the
+unsigned test loader or a reviewed signing chain lands.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

@@ -202,10 +202,13 @@ inline constexpr u8 kTcpFlagAck = 0x10;
 // Stack entry point + status
 // -------------------------------------------------------------------
 
-/// Bring up the network stack and its protocol state. Walks the NIC table for
-/// diagnostics; each hardware driver publishes its L2 binding asynchronously
-/// once that device's TX/RX path is ready.
-void NetStackInit();
+inline constexpr u32 kMaxNetInterfaces = 4;
+
+/// Bring up the network stack and its protocol state. Parses optional static
+/// IPv4 policy from `cmdline`, then walks the NIC table for diagnostics; each
+/// hardware driver publishes its L2 binding asynchronously once that device's
+/// TX/RX path is ready.
+void NetStackInit(const char* cmdline = nullptr);
 
 /// Size of the enumerable interface prefix: zero when no interface is bound,
 /// otherwise one past the highest live slot. Driver-assigned indices may be
@@ -217,11 +220,49 @@ u64 InterfaceCount();
 /// (probe-only NICs whose vendor driver isn't done yet).
 bool InterfaceIsBound(u32 iface_index);
 
-/// Bound IPv4 address for `iface_index`. Returns 0.0.0.0 if not
-/// bound or if DHCP hasn't completed yet (the iface is bound with
-/// 0.0.0.0 at NIC bring-up so DHCP DISCOVER goes out with the
-/// correct src=0.0.0.0).
+/// Bound IPv4 address for `iface_index`. Returns 0.0.0.0 if unbound or when a
+/// dynamic interface has not completed DHCP. A selected static interface is
+/// published with its configured address during bind.
 Ipv4Address InterfaceIp(u32 iface_index);
+
+enum class Ipv4ConfigSource : u8
+{
+    None = 0,
+    Driver,
+    Dhcp,
+    Static,
+};
+
+struct Ipv4InterfaceConfig
+{
+    Ipv4ConfigSource source = Ipv4ConfigSource::None;
+    Ipv4Address address{};
+    u8 prefix_length = 0;
+    Ipv4Address gateway{};
+    Ipv4Address dns{};
+};
+
+enum class Ipv4ConfigRequirement : u8
+{
+    AddressOnly = 0,
+    Gateway,
+    Dns,
+};
+
+/// Atomic snapshot of the active IPv4 configuration for one bound interface.
+/// Static configuration is distinct from DHCP so status surfaces never report
+/// a fabricated lease. Unbound or out-of-range interfaces return source=None.
+Ipv4InterfaceConfig InterfaceIpv4ConfigRead(u32 iface_index);
+
+/// Lowest-index bound interface with a nonzero active IPv4 source. Returns
+/// false and clears both outputs when no interface is configured.
+bool ActiveIpv4ConfigRead(u32* out_iface_index, Ipv4InterfaceConfig* out_config,
+                          Ipv4ConfigRequirement requirement = Ipv4ConfigRequirement::AddressOnly);
+
+/// Select the lowest-index configured interface with a usable route to
+/// `target`: an exact known-prefix on-link route wins, then a configured
+/// gateway, then a legacy source whose prefix is unavailable.
+bool Ipv4ConfigForTargetRead(Ipv4Address target, u32* out_iface_index, Ipv4InterfaceConfig* out_config);
 
 /// Bound MAC for `iface_index`. Returns all-zero MAC if unbound.
 MacAddress InterfaceMac(u32 iface_index);
@@ -454,6 +495,11 @@ void NetStackReleaseInterface(NetInterfaceBinding binding);
 /// rebind and can never invoke the replacement driver's callback.
 bool NetStackTransmit(NetInterfaceBinding binding, const void* frame, u64 len);
 
+/// Resolve the correct L2 next hop for `target` through one exact interface
+/// generation. Static prefixes choose direct ARP or the configured gateway;
+/// DHCP/legacy bindings retain their existing direct-then-gateway behavior.
+bool NetResolveIpv4Destination(NetInterfaceBinding binding, Ipv4Address target, MacAddress* out_mac);
+
 /// Close admission for an exact binding, wait at most `drain_timeout_ticks`
 /// for already-admitted TX/RX operations, retire every TCP TCB owned by that
 /// exact generation, then clear interface state and retire that generation's
@@ -486,12 +532,10 @@ struct IcmpStats
 /// Coherent IRQ-safe copy of the ICMP counters.
 IcmpStats IcmpStatsRead();
 
-/// Send one ICMP echo request to `dst_ip` via `iface_index`. Uses
-/// the ARP cache to resolve the peer's MAC — fails if the cache
-/// doesn't have an entry (caller should arrange learning first;
-/// every IPv4 RX auto-inserts, so pinging something we've already
-/// received a packet from always succeeds). `id` + `seq` are
-/// echoed back by the peer so the sender can match the reply.
+/// Send one ICMP echo request to `dst_ip` via `iface_index`. Resolves
+/// the correct L2 next hop, including a configured static gateway for
+/// off-subnet targets. `id` + `seq` are echoed back by the peer so the
+/// sender can match the reply.
 /// Payload is 32 bytes of 0xA5 for easy visual identification.
 bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq);
 
@@ -687,6 +731,7 @@ struct DhcpLease
 {
     bool valid;
     Ipv4Address ip;
+    u8 prefix_length; ///< RFC 2132 option 1; zero when omitted or malformed.
     Ipv4Address router;
     Ipv4Address dns;
     Ipv4Address server;
@@ -697,7 +742,8 @@ struct DhcpLease
 /// state advances inside the stack's UDP receive callbacks as
 /// OFFER / ACK arrive. Safe to call after `NetStackBindInterface`
 /// has run with a placeholder IP (typically 0.0.0.0). Returns
-/// false on already-in-progress or missing binding.
+/// false on already-in-progress or missing binding. Returns true without
+/// creating DHCP state when the interface is statically configured.
 bool DhcpStart(u32 iface_index);
 
 /// Active lease across all interfaces: the first valid lease scanning

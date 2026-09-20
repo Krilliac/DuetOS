@@ -16,8 +16,9 @@ two ABI front-ends:
 - **Win32 sockets**: `userland/libs/ws2_32/` translates the Winsock
   API to `SYS_SOCK_*`
 
-Three netifs feed the stack today (e1000, USB CDC-ECM, USB RNDIS).
-See [Networking Drivers](../drivers/Networking-Drivers.md).
+The live driver adapters include e1000, PCnet, VirtIO-net, the exact audited
+RTL8125 target, USB CDC-ECM, and USB RNDIS. See
+[Networking Drivers](../drivers/Networking-Drivers.md).
 
 ## Layered Composition
 
@@ -68,8 +69,42 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
   through the same CA hooks as loss (once per window of data) and
   the next data segment announces CWR. IPv4 only; AccECN
   (RFC 9768) deliberately omitted.
-- **DHCP client** — gets an IP from the local network
+- **IPv4 configuration** — per-interface DHCP plus strict boot-configured
+  static address, prefix, gateway, and DNS state
 - **DNS resolver** — `getaddrinfo`-equivalent
+
+## Static IPv4 boot configuration
+
+The stack parses static configuration once, before any NIC driver may publish
+an interface. The default target is interface 0; select another enumerated
+slot explicitly when the wired adapter is not first:
+
+```text
+net.static=10.77.0.2/30 net.static-iface=1 net.gateway=10.77.0.1 net.dns=1.1.1.1
+```
+
+`net.static` is required. `net.static-iface`, `net.gateway`, and `net.dns` are
+optional; the interface defaults to 0. The parser rejects duplicate keys,
+malformed or non-unicast addresses, unusable network/broadcast host values,
+prefixes outside 1–32, and gateways outside the configured subnet. Invalid
+configuration is reported on the boot log and falls back to ordinary DHCP.
+
+The configured address is substituted only when the selected driver binds
+with `0.0.0.0`; an explicit nonzero driver address is never overwritten.
+`DhcpStart` becomes a successful no-op for a statically configured interface,
+so drivers may keep their normal bring-up flow without emitting a DISCOVER or
+creating UDP port-68 state. `InterfaceIpv4ConfigRead` reports whether the live
+source is `None`, `Driver`, `Dhcp`, or `Static`; static state is never presented
+as a fabricated DHCP lease. Off-subnet static UDP, TCP, and ICMP traffic resolves
+the configured gateway, while same-subnet traffic ARPs the destination directly.
+
+Consumers select interfaces by capability rather than assuming slot 0:
+resolver callers require a nonzero DNS address, public NTP callers require a
+gateway, and sockets choose a known-prefix on-link route before a gateway or a
+legacy unknown-prefix fallback. This matters when an inventory-only Wi-Fi NIC
+or a driver-supplied address occupies a lower slot than the static wired link.
+The forced live network smoke uses the same active-route selector, so a valid
+static boot is tested directly instead of being misreported as a DHCP failure.
 
 ## Native Socket ABI (`SYS_SOCKET_OP`)
 
@@ -92,7 +127,7 @@ translates Winsock onto the same op table. Defined in
 | 10 | `kSockOpGetSock` | Read local `sockaddr` |
 | 11 | `kSockOpGetPeer` | Read peer `sockaddr` |
 | 12 | `kSockOpResolveA` | Blocking A-record lookup |
-| 13 | `kSockOpGetLease` | Snapshot the current DHCP lease |
+| 13 | `kSockOpGetLease` | Snapshot the active IPv4 configuration and source (legacy op name) |
 | 14 | `kSockOpPollEvents` | Non-blocking readiness probe (FD_READ / FD_WRITE / FD_ACCEPT / FD_CLOSE), backs the Winsock event surface (`net::SocketPollEvents`) |
 
 ## HTTP Client
@@ -154,7 +189,8 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
 ## Threading & Locking Model
 
 - **Boot publication boundary:** scheduler bring-up and passive PCI enumeration
-  complete before `NetStackInit`. That call initializes every protocol table,
+  complete before `NetStackInit`. That call parses the cached network boot
+  configuration, initializes every protocol table,
   starts the TCP timer task, and finishes its built-in interface self-tests
   synchronously before `VirtioInit` or `drivers::net::NetInit` may publish an
   interface, start an RX worker, or begin DHCP. It cannot move ahead of the
@@ -188,6 +224,10 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   monotonic transaction token, then revalidate both before committing a
   result. Interface teardown purges the exact ARP generation and clears
   matching protocol transactions before allowing a replacement binding.
+- Wildcard TCP/UDP sockets retain the selected interface index after their
+  first route decision. Explicitly bound source addresses are matched to the
+  owning interface before publication; static UDP sends resolve the real next
+  hop and never broadcast an off-subnet IP datagram.
 - The legacy two-argument `ArpLookup` returns an internal pointer and is
   therefore restricted to externally serialized compatibility callers.
   Concurrent code uses the three-argument copy-out overload.
@@ -331,9 +371,12 @@ throughput display.
 
 ## Troubleshooting
 
-- **No DHCP lease** — check `ifconfig` for a link-up netif, then `dhcp`
-  to re-kick the client; `kSockOpGetLease` (op 13) snapshots the current
-  lease for a programmatic check.
+- **No IPv4 address** — check `ifconfig` for a link-up netif. For DHCP, run
+  `dhcp` to re-kick the client. For static boots, verify the selected
+  `net.static-iface` matches the driver's published slot and inspect the boot
+  log for an invalid-config warning. `kSockOpGetLease` (op 13) returns the
+  active DHCP, static, or driver-provided IPv4 state and records the source in
+  byte 31 of its fixed 40-byte result.
 - **DNS resolves but TCP connect hangs** — confirm a route exists
   (`route`) and that no firewall Deny rule is shadowing the egress;
   `firewall log` lists recent denials with the matched rule index.

@@ -168,10 +168,11 @@ bool ParseUrl(const char* url, ParsedUrl* out)
 // Resolve `host` via the kernel DNS path. Times out after 2s.
 bool ResolveHost(const char* host, duetos::net::Ipv4Address* out_ip)
 {
-    // QEMU SLIRP default resolver — matches what `nslookup`
-    // uses with no second argument.
-    duetos::net::Ipv4Address resolver{{10, 0, 2, 3}};
-    if (!duetos::net::NetDnsQueryA(/*iface_index=*/0, resolver, host))
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    if (!duetos::net::ActiveIpv4ConfigRead(&iface_index, &config, duetos::net::Ipv4ConfigRequirement::Dns))
+        return false;
+    if (!duetos::net::NetDnsQueryA(iface_index, config.dns, host))
         return false;
     for (u32 i = 0; i < 200; ++i)
     {

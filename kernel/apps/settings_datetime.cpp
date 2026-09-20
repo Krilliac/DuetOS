@@ -404,7 +404,10 @@ bool Key(char c)
             g_ntp_status[19] = '.';
             g_ntp_status[20] = '\0';
             duetos::drivers::video::NotifyShow("NTP: querying...");
-            const bool sent = duetos::net::NetNtpQuery(/*iface_index=*/0, srv);
+            u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+            duetos::net::Ipv4InterfaceConfig config{};
+            const bool has_route = duetos::net::Ipv4ConfigForTargetRead(srv, &iface_index, &config);
+            const bool sent = has_route && duetos::net::NetNtpQuery(iface_index, srv);
             if (!sent)
             {
                 // ARP miss / iface not bound — record but don't crash.

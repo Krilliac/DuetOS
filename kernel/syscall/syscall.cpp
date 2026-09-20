@@ -2682,13 +2682,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 rv = (host_copy.status == mm::UserStringCopyStatus::NoTerminator) ? -36 : -14;
                 break;
             }
-            const auto lease = ::duetos::net::DhcpLeaseRead();
-            if (!lease.valid)
+            u32 iface_index = ::duetos::net::kInvalidNetInterfaceIndex;
+            ::duetos::net::Ipv4InterfaceConfig config{};
+            if (!::duetos::net::ActiveIpv4ConfigRead(&iface_index, &config, ::duetos::net::Ipv4ConfigRequirement::Dns))
             {
                 rv = -100;
                 break;
             }
-            if (!::duetos::net::NetDnsQueryA(/*iface_index=*/0, lease.dns, host))
+            if (!::duetos::net::NetDnsQueryA(iface_index, config.dns, host))
             {
                 rv = -22;
                 break;
@@ -2731,7 +2732,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 u32 lease_seconds;
                 u8 mac[6];
                 u8 iface_index;
-                u8 reserved0;
+                u8 config_source;
                 u8 reserved1[8];
             };
             static_assert(sizeof(SocketLeaseInfo) == 40, "SocketLeaseInfo must be 40 bytes");
@@ -2742,23 +2743,32 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 break;
             }
             SocketLeaseInfo info{};
-            const auto lease = ::duetos::net::DhcpLeaseRead();
-            info.valid = lease.valid ? 1u : 0u;
             const auto pack_be = [](const ::duetos::net::Ipv4Address& a) -> u32 {
                 return (u32(a.octets[0])) | (u32(a.octets[1]) << 8) | (u32(a.octets[2]) << 16) |
                        (u32(a.octets[3]) << 24);
             };
-            info.ip_be = pack_be(lease.ip);
-            info.gateway_be = pack_be(lease.router);
-            info.dns_be = pack_be(lease.dns);
-            info.lease_seconds = lease.lease_secs;
-            // No netmask in DhcpLease; default to /24 when valid so
-            // iphlpapi consumers don't see a 0.0.0.0 mask.
-            info.netmask_be = lease.valid ? 0x00FFFFFFu : 0u; // 255.255.255.0 in network byte order
-            info.iface_index = 0;
-            const auto mac = ::duetos::net::InterfaceMac(0);
-            for (u32 i = 0; i < 6; ++i)
-                info.mac[i] = mac.octets[i];
+            u32 iface_index = ::duetos::net::kInvalidNetInterfaceIndex;
+            ::duetos::net::Ipv4InterfaceConfig config{};
+            if (::duetos::net::ActiveIpv4ConfigRead(&iface_index, &config))
+            {
+                info.valid = 1;
+                info.ip_be = pack_be(config.address);
+                info.gateway_be = pack_be(config.gateway);
+                info.dns_be = pack_be(config.dns);
+                info.iface_index = static_cast<u8>(iface_index);
+                info.config_source = static_cast<u8>(config.source);
+                const u8 prefix_length = config.prefix_length;
+                const u32 mask_value = prefix_length == 0 ? 0 : 0xFFFFFFFFu << (32 - prefix_length);
+                const ::duetos::net::Ipv4Address mask{{static_cast<u8>(mask_value >> 24),
+                                                       static_cast<u8>(mask_value >> 16),
+                                                       static_cast<u8>(mask_value >> 8), static_cast<u8>(mask_value)}};
+                info.netmask_be = pack_be(mask);
+                if (config.source == ::duetos::net::Ipv4ConfigSource::Dhcp)
+                    info.lease_seconds = ::duetos::net::DhcpLeaseRead(iface_index).lease_secs;
+                const auto mac = ::duetos::net::InterfaceMac(iface_index);
+                for (u32 i = 0; i < 6; ++i)
+                    info.mac[i] = mac.octets[i];
+            }
             if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &info, sizeof(info)))
             {
                 rv = -14;

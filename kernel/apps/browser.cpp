@@ -1438,10 +1438,11 @@ bool ResolveHost(const char* host, net::Ipv4Address* out)
 {
     if (TryParseDottedQuad(host, out))
         return true;
-    const auto lease = net::DhcpLeaseRead();
-    if (!lease.valid)
+    u32 iface_index = net::kInvalidNetInterfaceIndex;
+    net::Ipv4InterfaceConfig config{};
+    if (!net::ActiveIpv4ConfigRead(&iface_index, &config, net::Ipv4ConfigRequirement::Dns))
         return false;
-    if (!net::NetDnsQueryA(0, lease.dns, host))
+    if (!net::NetDnsQueryA(iface_index, config.dns, host))
         return false;
     // Poll 5 seconds.
     for (u32 i = 0; i < 500; ++i)

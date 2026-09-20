@@ -13,6 +13,10 @@ readonly BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 readonly KERNEL_ELF="${DUETOS_KERNEL_ELF:-${BUILD_DIR}/kernel/duetos-kernel.elf}"
 readonly TIMEOUT_SECS="${DUETOS_TIMEOUT:-180}"
 readonly BUILDER="${REPO_ROOT}/tools/image/build-removable-media.sh"
+readonly STATIC_IP="${DUETOS_STATIC_IP-192.0.2.2/30}"
+readonly STATIC_IFACE="${DUETOS_STATIC_IFACE:-0}"
+readonly STATIC_GATEWAY="${DUETOS_GATEWAY-192.0.2.1}"
+readonly STATIC_DNS="${DUETOS_DNS:-}"
 
 for tool in qemu-system-x86_64 timeout; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -48,7 +52,13 @@ readonly IMAGE="${TMP_DIR}/duetos-removable.img"
 readonly SERIAL_LOG="${TMP_DIR}/serial.log"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
-"${BUILDER}" --kernel "${KERNEL_ELF}" --output "${IMAGE}" --size-mib 128 --boot-mode smoke
+BUILDER_ARGS=(--kernel "${KERNEL_ELF}" --output "${IMAGE}" --size-mib 128 --boot-mode smoke)
+if [[ -n "${STATIC_IP}" ]]; then
+    BUILDER_ARGS+=(--static-ip "${STATIC_IP}" --static-iface "${STATIC_IFACE}")
+    [[ -z "${STATIC_GATEWAY}" ]] || BUILDER_ARGS+=(--gateway "${STATIC_GATEWAY}")
+    [[ -z "${STATIC_DNS}" ]] || BUILDER_ARGS+=(--dns "${STATIC_DNS}")
+fi
+"${BUILDER}" "${BUILDER_ARGS[@]}"
 
 echo "[removable-smoke] booting regular-file image under OVMF"
 set +e
@@ -74,6 +84,11 @@ if ! grep -q 'metrics bringup-complete' "${SERIAL_LOG}"; then
 fi
 if grep -Eq 'PANIC|triple fault|KASSERT failed' "${SERIAL_LOG}"; then
     echo "[removable-smoke] FAIL: fatal marker present (qemu exit=${QEMU_EXIT})" >&2
+    tail -80 "${SERIAL_LOG}" >&2 || true
+    exit 1
+fi
+if [[ -n "${STATIC_IP}" ]] && ! grep -q '\[net-stack\] static iface=' "${SERIAL_LOG}"; then
+    echo "[removable-smoke] FAIL: static IPv4 boot policy was not activated" >&2
     tail -80 "${SERIAL_LOG}" >&2 || true
     exit 1
 fi

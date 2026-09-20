@@ -524,6 +524,9 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     if (!interface_guard)
         return kInvalidTcbId;
     const NetInterfaceSnapshot& interface = interface_guard.snapshot();
+    MacAddress peer_mac{};
+    if (!NetResolveIpv4Destination(interface.binding, dst_ip, &peer_mac))
+        return kInvalidTcbId;
     auto flags = sync::SpinLockAcquire(g_tcb_lock);
     if (local_port == 0)
     {
@@ -571,6 +574,7 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     t.local_ip = local_ip;
     t.local_mac = interface.mac;
     t.peer_ip = dst_ip;
+    t.peer_mac = peer_mac;
     t.local_port = local_port;
     t.peer_port = dst_port;
     t.refs = 1;

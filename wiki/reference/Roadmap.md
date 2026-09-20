@@ -1266,9 +1266,10 @@ boot, and concurrent socket validation remain outstanding for this slice.
 **Still open:** make interrupt nesting distinguish hardware IRQ frames
 from syscall/exception frames and rate-limit the defer diagnostic. Do
 not weaken the nested-IRQ scheduling guard. Separately, the TCB table
-(`kernel/net/tcp*.cpp`, 18 remaining `arch::Cli` sites), the ARP
-cache, and the DHCP lease are still on the UP-only scheme; the socket
-pool is the worked example to copy.
+(`kernel/net/tcp*.cpp`, 18 remaining `arch::Cli` sites) and the ARP
+cache are still on the UP-only scheme; the socket pool is the worked
+example to copy. DHCP state is already per-interface and protected by
+its own IRQ-save lock.
 
 ### Other Win32 thunk defects found 2026-07-26 (not yet fixed)
 
@@ -1375,13 +1376,13 @@ rather than inherit the launch path's extension guess. See
   see **VirtIO per-class polish** below). (PCI + USB + VirtIO
   read-only device tables landed.)
 
-### Network Status — real RF scan + multi-iface lease
+### Network Status — real RF scan
 
 - **Residual:** a real wireless backend (per the Wireless row)
   so the SSID list reflects an actual RF scan rather than the
-  empty placeholder; multi-iface DHCP lease tracking (single
-  lease today). (Iface table, rx/tx counters, firewall-drop
-  column, routing/DNS section, Wi-Fi-scan section UI landed.)
+  empty placeholder. (Per-interface DHCP state, static/DHCP source
+  reporting, iface table, rx/tx counters, firewall-drop column,
+  routing/DNS section, and Wi-Fi-scan section UI landed.)
 
 ### Terminal emulator (windowed userland shell)
 
@@ -1848,8 +1849,9 @@ done, it is merely written.
 32. **Precision touchpad HID** — gestures, palm rejection.
 33. **UVC camera.**
 34. **Multi-monitor + hotplug**, per-head modeset.
-35. **SD/MMC**, **Thunderbolt/USB4**, **more NICs** (2.5G Realtek, Intel
-    I225), **fingerprint / sensors**.
+35. **SD/MMC**, **Thunderbolt/USB4**, **more NICs** (broader Realtek 2.5G
+    variants beyond the exact RTL8125 target, Intel I225), **fingerprint /
+    sensors**.
 36. **Real GPU engine-busy sampling.** AMD `mmGRBM_STATUS` bit 31 is already
     mapped but read ONCE at probe — a single read of a level-triggered bit
     is not a duty cycle; it needs a periodic sampler. Intel: RC6 residency

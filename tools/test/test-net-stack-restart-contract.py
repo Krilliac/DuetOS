@@ -108,6 +108,7 @@ class NetStackRestartContractTests(unittest.TestCase):
         cls.tcp = read("kernel/net/tcp.cpp")
         cls.tcp_segment = read("kernel/net/tcp_segment.cpp")
         cls.tcp_timer = read("kernel/net/tcp_timer.cpp")
+        cls.net_smoke = read("kernel/net/net_smoke.cpp")
         cls.socket_header = read("kernel/net/socket.h")
         cls.socket = read("kernel/net/socket.cpp")
 
@@ -212,6 +213,15 @@ class NetStackRestartContractTests(unittest.TestCase):
             ordered(body, "StackInterfacePinGuard", "interface.binding", "t.interface_binding = interface.binding")
             self.assertIn("t.local_mac = interface.mac", body)
 
+        connect = function_body(self.tcp, "Connect")
+        ordered(
+            connect,
+            "NetResolveIpv4Destination(interface.binding, dst_ip, &peer_mac)",
+            "SpinLockAcquire(g_tcb_lock)",
+            "t.peer_mac = peer_mac",
+            "SendSegment(t",
+        )
+
         lookup = function_body(self.tcp, "LookupExact")
         listener = function_body(self.tcp, "LookupListener")
         bucket_hash = function_body(self.tcp, "BucketHash")
@@ -256,7 +266,13 @@ class NetStackRestartContractTests(unittest.TestCase):
             "NetUdpSend(interface.binding.iface_index",
         )
         self.assertNotIn("NicCount", send)
-        self.assertNotIn("InterfaceIp", send)
+        self.assertNotIn("InterfaceIp(", send)
+        self.assertIn("Ipv4ConfigForTargetRead", send)
+        self.assertIn("NetResolveIpv4Destination", send)
+
+        connect = function_body(self.socket, "SocketConnect")
+        self.assertIn("Ipv4ConfigForTargetRead", connect)
+        self.assertNotIn("tcp::Connect(/*iface_index=*/0", connect)
 
     def test_stream_socket_lazily_reconciles_retired_tcb_without_lock_inversion(self) -> None:
         reconcile = function_body(self.socket, "ReconcileRetiredStreamTcb")
@@ -283,6 +299,16 @@ class NetStackRestartContractTests(unittest.TestCase):
             "SocketPollEvents",
         ):
             self.assertIn("ReconcileRetiredStreamTcb", function_body(self.socket, name), name)
+
+    def test_forced_net_smoke_accepts_static_or_dhcp_routes(self) -> None:
+        wait = function_body(self.net_smoke, "WaitForIpv4Route")
+        self.assertIn("ActiveIpv4ConfigRead", wait)
+        self.assertIn("Ipv4ConfigRequirement::Gateway", wait)
+        self.assertNotIn("DhcpLeaseRead", wait)
+
+        entry = function_body(self.net_smoke, "NetSmokeEntry")
+        self.assertIn("WaitForIpv4Route", entry)
+        self.assertNotIn("WaitForDhcp", entry)
 
 
 if __name__ == "__main__":

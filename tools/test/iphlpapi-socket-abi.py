@@ -61,8 +61,28 @@ def main() -> int:
         "const u64 cap = frame->rdx;" in syscall_cpp,
         "kernel kSockOpGetLease no longer reads capacity from rdx",
     )
+    require(
+        "ActiveIpv4ConfigRead" in syscall_cpp and "config_source" in syscall_cpp,
+        "kernel network-info ABI must expose active DHCP/static source state",
+    )
+    require(
+        "config_source" in syscall_h and "config_source" in iphlpapi,
+        "kernel and iphlpapi disagree on the byte-31 configuration source",
+    )
+    require(
+        "lease->config_source == 2" in iphlpapi,
+        "GetAdaptersInfo must set DhcpEnabled only for config_source=Dhcp",
+    )
+    require(
+        "DuetOS Ethernet (e1000)" not in iphlpapi and '"DuetOS Ethernet"' in iphlpapi,
+        "GetAdaptersInfo must not identify every physical NIC as e1000",
+    )
+    require(
+        "0x00FFFFFFu" not in syscall_cpp,
+        "network-info ABI must derive the netmask from the configured prefix",
+    )
 
-    print("[iphlpapi-socket-abi] PASS (GetLease rsi=out, rdx=capacity)")
+    print("[iphlpapi-socket-abi] PASS (GetLease rsi=out, rdx=capacity, source-aware)")
     return 0
 
 

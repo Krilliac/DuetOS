@@ -35,6 +35,7 @@
 #include "net/stack.h"
 #include "net/firewall.h"
 #include "net/socket.h"
+#include "net/static_ipv4_config.h"
 #include "net/tcp.h"
 #include "net/wifi.h"
 #include "parsers_rust.h"
@@ -62,6 +63,8 @@ namespace
 {
 
 u64 g_interface_count = 0;
+StaticIpv4Config g_static_ipv4_config{};
+bool g_static_ipv4_enabled = false;
 
 // ARP cache storage. Hash-bucketed lookup — entries are threaded
 // through `g_arp_hash_heads` chains keyed on (iface_index, ip).
@@ -226,7 +229,7 @@ constinit u64 g_ping_binding_generation = 0;
 // Keyed by iface_index; cap matches kMaxNics so every discovered
 // NIC has a slot. Zero-valued `tx` marks an unbound slot —
 // InjectRx will log but not respond.
-constexpr u32 kMaxInterfaces = 4;
+constexpr u32 kMaxInterfaces = kMaxNetInterfaces;
 struct Interface
 {
     interface_lifetime::OperationGate operations;
@@ -235,6 +238,10 @@ struct Interface
     bool retiring;
     MacAddress mac;
     Ipv4Address ip;
+    Ipv4ConfigSource ipv4_source;
+    u8 prefix_length;
+    Ipv4Address gateway;
+    Ipv4Address dns;
     NetTxFn legacy_tx;
     NetTxContextFn context_tx;
     void* driver_context;
@@ -256,6 +263,10 @@ struct InterfaceOperation
     u64 generation;
     MacAddress mac;
     Ipv4Address ip;
+    Ipv4ConfigSource ipv4_source;
+    u8 prefix_length;
+    Ipv4Address gateway;
+    Ipv4Address dns;
     NetTxFn legacy_tx;
     NetTxContextFn context_tx;
     void* driver_context;
@@ -285,6 +296,10 @@ bool InterfaceOperationAcquire(u32 iface_index, u64 expected_generation, Interfa
     out.generation = generation;
     out.mac = ifc.mac;
     out.ip = ifc.ip;
+    out.ipv4_source = ifc.ipv4_source;
+    out.prefix_length = ifc.prefix_length;
+    out.gateway = ifc.gateway;
+    out.dns = ifc.dns;
     out.legacy_tx = ifc.legacy_tx;
     out.context_tx = ifc.context_tx;
     out.driver_context = ifc.driver_context;
@@ -810,6 +825,22 @@ bool ArpResolveWithWait(NetInterfaceBinding binding, Ipv4Address ip, u64 per_try
 bool ResolveL2Destination(const InterfaceOperation& operation, Ipv4Address target_ip, MacAddress& out_mac)
 {
     const NetInterfaceBinding binding{operation.iface_index, operation.generation};
+    if (operation.ipv4_source == Ipv4ConfigSource::Static)
+    {
+        Ipv4Address next_hop = target_ip;
+        if (!Ipv4AddressSameSubnet(operation.ip, target_ip, operation.prefix_length))
+        {
+            if (Ipv4AddressIsZero(operation.gateway))
+                return false;
+            next_hop = operation.gateway;
+        }
+        ArpEntry entry{};
+        if (!ArpResolveWithWait(binding, next_hop, /*per_try_timeout_ticks=*/10, /*max_tries=*/3, entry))
+            return false;
+        out_mac = entry.mac;
+        return true;
+    }
+
     const DhcpLease lease = DhcpLeaseRead(operation.iface_index);
     const Ipv4Address fallback_gw =
         lease.valid ? lease.router : Ipv4Address{{target_ip.octets[0], target_ip.octets[1], target_ip.octets[2], 2}};
@@ -830,6 +861,18 @@ bool ResolveL2Destination(const InterfaceOperation& operation, Ipv4Address targe
 
 } // namespace
 
+bool NetResolveIpv4Destination(NetInterfaceBinding binding, Ipv4Address target, MacAddress* out_mac)
+{
+    if (!NetInterfaceBindingIsValid(binding) || out_mac == nullptr)
+        return false;
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(binding.iface_index, binding.generation, operation))
+        return false;
+    const bool resolved = ResolveL2Destination(operation, target, *out_mac);
+    InterfaceOperationRelease(operation);
+    return resolved;
+}
+
 // Forward decls for UDP + DHCP + TCP helpers defined further down
 // in the duetos::net namespace. Must sit OUTSIDE the anonymous
 // namespace above or they'd name different functions than the
@@ -840,12 +883,36 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
 // state machine that used to be here is gone. Keep the forward
 // reference to the public hook for the Ipv4HandleIncoming caller.
 
-void NetStackInit()
+void NetStackInit(const char* cmdline)
 {
     KLOG_TRACE_SCOPE("net/stack", "NetStackInit");
     static constinit bool s_done = false;
     KASSERT(!s_done, "net/stack", "NetStackInit called twice");
     s_done = true;
+
+    const StaticIpv4ParseResult static_config = ParseStaticIpv4Config(cmdline);
+    g_static_ipv4_config = {};
+    g_static_ipv4_enabled = static_config.status == StaticIpv4ParseStatus::Valid;
+    if (g_static_ipv4_enabled)
+    {
+        g_static_ipv4_config = static_config.config;
+        arch::SerialWrite("[net-stack] static iface=");
+        arch::SerialWriteHex(g_static_ipv4_config.iface_index);
+        arch::SerialWrite(" ip=");
+        for (u32 i = 0; i < 4; ++i)
+        {
+            if (i != 0)
+                arch::SerialWrite(".");
+            arch::SerialWriteHex(g_static_ipv4_config.address.octets[i]);
+        }
+        arch::SerialWrite(" prefix=");
+        arch::SerialWriteHex(g_static_ipv4_config.prefix_length);
+        arch::SerialWrite("\n");
+    }
+    else if (static_config.status == StaticIpv4ParseStatus::Invalid)
+    {
+        core::Log(core::LogLevel::Warn, "net/stack", "invalid static IPv4 boot configuration; using DHCP");
+    }
 
     // Mark every ARP hash bucket empty. Zero-init would make every
     // bucket "point at entry 0" which is the wrong invariant — a
@@ -1207,6 +1274,83 @@ Ipv4Address InterfaceIp(u32 iface_index)
     const Ipv4Address ip = operation.ip;
     InterfaceOperationRelease(operation);
     return ip;
+}
+
+Ipv4InterfaceConfig InterfaceIpv4ConfigRead(u32 iface_index)
+{
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
+        return {};
+    const Ipv4InterfaceConfig config{.source = operation.ipv4_source,
+                                     .address = operation.ip,
+                                     .prefix_length = operation.prefix_length,
+                                     .gateway = operation.gateway,
+                                     .dns = operation.dns};
+    InterfaceOperationRelease(operation);
+    return config;
+}
+
+bool ActiveIpv4ConfigRead(u32* out_iface_index, Ipv4InterfaceConfig* out_config, Ipv4ConfigRequirement requirement)
+{
+    if (out_iface_index == nullptr || out_config == nullptr)
+        return false;
+    *out_iface_index = kInvalidNetInterfaceIndex;
+    *out_config = {};
+    const u64 count = InterfaceCount();
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!InterfaceIsBound(i))
+            continue;
+        const Ipv4InterfaceConfig candidate = InterfaceIpv4ConfigRead(i);
+        if (candidate.source == Ipv4ConfigSource::None || Ipv4AddressIsZero(candidate.address))
+            continue;
+        if (requirement == Ipv4ConfigRequirement::Gateway && Ipv4AddressIsZero(candidate.gateway))
+            continue;
+        if (requirement == Ipv4ConfigRequirement::Dns)
+        {
+            if (Ipv4AddressIsZero(candidate.dns))
+                continue;
+            const bool dns_on_link = candidate.prefix_length != 0 &&
+                                     Ipv4AddressSameSubnet(candidate.address, candidate.dns, candidate.prefix_length);
+            if (candidate.prefix_length != 0 && !dns_on_link && Ipv4AddressIsZero(candidate.gateway))
+                continue;
+        }
+        *out_iface_index = i;
+        *out_config = candidate;
+        return true;
+    }
+    return false;
+}
+
+bool Ipv4ConfigForTargetRead(Ipv4Address target, u32* out_iface_index, Ipv4InterfaceConfig* out_config)
+{
+    if (out_iface_index == nullptr || out_config == nullptr)
+        return false;
+    *out_iface_index = kInvalidNetInterfaceIndex;
+    *out_config = {};
+    const u64 count = InterfaceCount();
+    for (u32 pass = 0; pass < 3; ++pass)
+    {
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (!InterfaceIsBound(i))
+                continue;
+            const Ipv4InterfaceConfig candidate = InterfaceIpv4ConfigRead(i);
+            if (candidate.source == Ipv4ConfigSource::None || Ipv4AddressIsZero(candidate.address))
+                continue;
+            const bool on_link = candidate.prefix_length != 0 &&
+                                 Ipv4AddressSameSubnet(candidate.address, target, candidate.prefix_length);
+            const bool has_gateway = !Ipv4AddressIsZero(candidate.gateway);
+            const bool unknown_prefix = candidate.prefix_length == 0;
+            if ((pass == 0 && !on_link) || (pass == 1 && (!has_gateway || on_link)) ||
+                (pass == 2 && (!unknown_prefix || on_link || has_gateway)))
+                continue;
+            *out_iface_index = i;
+            *out_config = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 MacAddress InterfaceMac(u32 iface_index)
@@ -2278,6 +2422,11 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
         lease.valid = true;
         lease.ip = yiaddr;
         lease.server = server_id;
+        if (DhcpFindOption(opts, opts_len, kDhcpOptSubnetMask, &v, &vl) && vl == 4)
+        {
+            const Ipv4Address mask{{v[0], v[1], v[2], v[3]}};
+            (void)Ipv4PrefixLengthFromMask(mask, &lease.prefix_length);
+        }
         if (DhcpFindOption(opts, opts_len, kDhcpOptRouter, &v, &vl) && vl >= 4)
             for (u64 i = 0; i < 4; ++i)
                 lease.router.octets[i] = v[i];
@@ -2305,9 +2454,15 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
         const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
         Interface& ifc = g_interfaces[iface_index];
         const bool rebound = ifc.bound && InterfaceGenerationRead(iface_index) == snapshot.binding_generation &&
-                             interface_lifetime::IsOpen(ifc.operations);
+                             interface_lifetime::IsOpen(ifc.operations) && ifc.ipv4_source != Ipv4ConfigSource::Static;
         if (rebound)
+        {
             ifc.ip = yiaddr;
+            ifc.ipv4_source = Ipv4ConfigSource::Dhcp;
+            ifc.prefix_length = lease.prefix_length;
+            ifc.gateway = lease.router;
+            ifc.dns = lease.dns;
+        }
         sync::SpinLockRelease(g_interface_lock, flags);
 
         state_flags = sync::SpinLockAcquire(g_dhcp_lock);
@@ -2357,6 +2512,8 @@ bool DhcpStart(u32 iface_index)
     if (!interface_guard)
         return false;
     const InterfaceOperation& operation = interface_guard.operation();
+    if (operation.ipv4_source == Ipv4ConfigSource::Static)
+        return true;
 
     const sync::IrqFlags flags = sync::SpinLockAcquire(g_dhcp_lock);
     DhcpState& state = g_dhcp[iface_index];
@@ -2458,8 +2615,8 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     if (!interface_guard)
         return false;
     const InterfaceOperation& operation = interface_guard.operation();
-    ArpEntry arp{};
-    if (!ArpLookup(iface_index, dst_ip, &arp) || arp.binding_generation != operation.generation)
+    MacAddress dst_mac{};
+    if (!ResolveL2Destination(operation, dst_ip, dst_mac))
         return false;
 
     // Build ethernet + IPv4 + ICMP echo request (14 + 20 + 8 + 32).
@@ -2467,7 +2624,7 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     u8 frame[14 + 20 + 8 + kPayloadBytes];
     // Ethernet.
     for (u64 i = 0; i < 6; ++i)
-        frame[i] = arp.mac.octets[i];
+        frame[i] = dst_mac.octets[i];
     for (u64 i = 0; i < 6; ++i)
         frame[6 + i] = operation.mac.octets[i];
     frame[12] = 0x08;
@@ -3219,6 +3376,21 @@ bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     if (iface_index >= kMaxInterfaces || (legacy_tx == nullptr) == (context_tx == nullptr))
         return false;
 
+    Ipv4Address effective_ip = ip;
+    Ipv4ConfigSource ipv4_source = Ipv4AddressIsZero(ip) ? Ipv4ConfigSource::None : Ipv4ConfigSource::Driver;
+    u8 prefix_length = 0;
+    Ipv4Address gateway{};
+    Ipv4Address dns{};
+    if (iface_index == g_static_ipv4_config.iface_index && ipv4_source == Ipv4ConfigSource::None &&
+        g_static_ipv4_enabled)
+    {
+        effective_ip = g_static_ipv4_config.address;
+        ipv4_source = Ipv4ConfigSource::Static;
+        prefix_length = g_static_ipv4_config.prefix_length;
+        gateway = g_static_ipv4_config.gateway;
+        dns = g_static_ipv4_config.dns;
+    }
+
     const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
     Interface& ifc = g_interfaces[iface_index];
     const u64 prior_generation = InterfaceGenerationRead(iface_index);
@@ -3230,7 +3402,11 @@ bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
 
     const u64 generation = prior_generation + 1;
     ifc.mac = mac;
-    ifc.ip = ip;
+    ifc.ip = effective_ip;
+    ifc.ipv4_source = ipv4_source;
+    ifc.prefix_length = prefix_length;
+    ifc.gateway = gateway;
+    ifc.dns = dns;
     ifc.legacy_tx = legacy_tx;
     ifc.context_tx = context_tx;
     ifc.driver_context = driver_context;
@@ -3241,6 +3417,12 @@ bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
         ifc.legacy_tx = nullptr;
         ifc.context_tx = nullptr;
         ifc.driver_context = nullptr;
+        ifc.mac = {};
+        ifc.ip = {};
+        ifc.ipv4_source = Ipv4ConfigSource::None;
+        ifc.prefix_length = 0;
+        ifc.gateway = {};
+        ifc.dns = {};
         sync::SpinLockRelease(g_interface_lock, flags);
         return false;
     }
@@ -3264,13 +3446,13 @@ bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     arch::SerialWrite("[net-stack] iface ");
     arch::SerialWriteHex(iface_index);
     arch::SerialWrite(" bound ip=");
-    arch::SerialWriteHex(ip.octets[0]);
+    arch::SerialWriteHex(effective_ip.octets[0]);
     arch::SerialWrite(".");
-    arch::SerialWriteHex(ip.octets[1]);
+    arch::SerialWriteHex(effective_ip.octets[1]);
     arch::SerialWrite(".");
-    arch::SerialWriteHex(ip.octets[2]);
+    arch::SerialWriteHex(effective_ip.octets[2]);
     arch::SerialWrite(".");
-    arch::SerialWriteHex(ip.octets[3]);
+    arch::SerialWriteHex(effective_ip.octets[3]);
     arch::SerialWrite("\n");
     return true;
 }
@@ -3391,6 +3573,10 @@ NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u6
     ifc.driver_context = nullptr;
     ifc.mac = {};
     ifc.ip = {};
+    ifc.ipv4_source = Ipv4ConfigSource::None;
+    ifc.prefix_length = 0;
+    ifc.gateway = {};
+    ifc.dns = {};
     ifc.counters = {};
 
     sync::SpinLockRelease(g_interface_lock, flags);

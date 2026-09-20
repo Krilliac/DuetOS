@@ -1,9 +1,9 @@
 /* iphlpapi.dll — IP helper API.
  *
  * GetAdaptersInfo emits a chain of two IP_ADAPTER_INFO records:
- *   1. Ethernet adapter (queried from the kernel's DHCP lease via
- *      kSockOpGetLease op = 13 over SYS_SOCKET_OP = 153). When no
- *      lease is bound the IP / mask / gateway fields show 0.0.0.0
+ *   1. Ethernet adapter (queried from the kernel's active IPv4 state via
+ *      kSockOpGetLease op = 13 over SYS_SOCKET_OP = 153). When no DHCP,
+ *      static, or driver-supplied address is active, IP / mask / gateway show 0.0.0.0
  *      but the record still appears so callers see a NIC entry.
  *   2. Loopback adapter (127.0.0.1 / 255.0.0.0).
  *
@@ -30,7 +30,7 @@ typedef struct
     unsigned int lease_seconds;
     unsigned char mac[6];
     unsigned char iface_index;
-    unsigned char reserved0;
+    unsigned char config_source;
     unsigned char reserved1[8];
 } IPHLP_LEASE;
 
@@ -133,7 +133,7 @@ static void iphlp_fill_loopback(unsigned char* b)
 static void iphlp_fill_ethernet(unsigned char* b, const IPHLP_LEASE* lease)
 {
     static const char kName[] = "eth0";
-    static const char kDesc[] = "DuetOS Ethernet (e1000)";
+    static const char kDesc[] = "DuetOS Ethernet";
     for (int i = 0; kName[i]; ++i)
         b[12 + i] = (unsigned char)kName[i];
     for (int i = 0; kDesc[i]; ++i)
@@ -142,8 +142,8 @@ static void iphlp_fill_ethernet(unsigned char* b, const IPHLP_LEASE* lease)
     for (int i = 0; i < 6; ++i)
         b[408 + i] = lease->mac[i];
     b[416] = 0;
-    b[420] = 6;                             /* MIB_IF_TYPE_ETHERNET_CSMACD */
-    b[424] = (unsigned char)(lease->valid); /* DhcpEnabled */
+    b[420] = 6;                                          /* MIB_IF_TYPE_ETHERNET_CSMACD */
+    b[424] = (unsigned char)(lease->config_source == 2); /* DhcpEnabled */
     iphlp_format_ip(lease->ip_be, (char*)(b + 436 + 8));
     iphlp_format_ip(lease->netmask_be, (char*)(b + 436 + 8 + 16));
     iphlp_format_ip(lease->gateway_be, (char*)(b + 476 + 8));

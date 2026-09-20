@@ -3,13 +3,13 @@
 /*
  * DuetOS — boot-time live network smoke test.
  *
- * Spawns one kernel thread that, after DHCP completes, exercises the
- * full network stack against real peers:
+ * Spawns one kernel thread that, after a DHCP or static IPv4 route becomes
+ * active, exercises the full network stack against real peers:
  *
- *   1. ICMP echo to the DHCP-supplied gateway (10.0.2.2 under QEMU
+ *   1. ICMP echo to the configured gateway (10.0.2.2 under QEMU
  *      SLIRP — known-responsive).
- *   2. DNS A-record query for `www.google.com` to the DHCP-supplied
- *      resolver (or 10.0.2.3 by default under QEMU SLIRP).
+ *   2. DNS A-record query for `www.google.com` to the configured
+ *      resolver, when one is present.
  *   3. ICMP echo to 8.8.8.8 (Google DNS — only reachable when SLIRP
  *      `icmp_redirect` is on, or on real hardware).
  *   4. TCP connect + GET / on the DNS-resolved IP, port 80.
@@ -28,8 +28,8 @@ namespace duetos::net
 {
 
 /// Spawn the live network smoke-test task. Idempotent — the second
-/// call is a no-op. Safe to call before DHCP completes; the task
-/// internally waits up to 5 seconds for a lease.
+/// call is a no-op. Safe to call before IPv4 configuration completes; the task
+/// internally waits up to 5 seconds for a gateway-capable DHCP/static route.
 ///
 /// `force_on_emulator` overrides the IsEmulator gate. Used to opt
 /// in to the live www.google.com probe under QEMU SLIRP (which does

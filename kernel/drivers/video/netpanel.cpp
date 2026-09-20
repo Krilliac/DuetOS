@@ -147,6 +147,14 @@ bool Ipv4IsZero(duetos::net::Ipv4Address ip)
     return true;
 }
 
+duetos::net::Ipv4InterfaceConfig ActiveIpv4Config()
+{
+    u32 iface_index = duetos::net::kInvalidNetInterfaceIndex;
+    duetos::net::Ipv4InterfaceConfig config{};
+    (void)duetos::net::ActiveIpv4ConfigRead(&iface_index, &config);
+    return config;
+}
+
 struct NicPanelPresence
 {
     bool discovered;
@@ -237,9 +245,9 @@ void DrawPreview()
     }
     FramebufferDrawRect(g_ax, g_ay, kPreviewW, kPreviewH, g_border_rgb, 1);
 
-    const auto lease = duetos::net::DhcpLeaseRead();
+    const auto ipv4 = ActiveIpv4Config();
     const NicPanelPresence presence = ReadNicPanelPresence();
-    const bool online = presence.link_up && lease.valid;
+    const bool online = presence.link_up && ipv4.source != duetos::net::Ipv4ConfigSource::None;
 
     // Status pip.
     const u32 dot = 8;
@@ -262,7 +270,7 @@ void DrawPreview()
     if (online)
     {
         char ipbuf[20];
-        FormatIpv4(lease.ip, ipbuf, sizeof(ipbuf));
+        FormatIpv4(ipv4.address, ipbuf, sizeof(ipbuf));
         u32 off = 0;
         const char* lab = "IP ";
         while (lab[off] != '\0')
@@ -367,23 +375,32 @@ void DrawWiredSection(u32 ax, u32& y)
         y += kRowH;
 
         // ip / gateway / dns rows.
-        const auto lease = duetos::net::DhcpLeaseRead();
-        const auto ip = duetos::net::InterfaceIp(static_cast<u32>(i));
+        const auto ipv4 = duetos::net::InterfaceIpv4ConfigRead(static_cast<u32>(i));
         char ipbuf[20];
-        FormatIpv4(ip, ipbuf, sizeof(ipbuf));
-        if (Ipv4IsZero(ip))
+        FormatIpv4(ipv4.address, ipbuf, sizeof(ipbuf));
+        if (Ipv4IsZero(ipv4.address))
             DrawLabelValue(ax + kMargin + 16, y, "ip ", "(no lease yet)", g_body_rgb);
         else
             DrawLabelValue(ax + kMargin + 16, y, "ip ", ipbuf, g_body_rgb);
         y += kRowH;
 
-        if (lease.valid)
+        if (ipv4.source != duetos::net::Ipv4ConfigSource::None)
         {
-            FormatIpv4(lease.router, ipbuf, sizeof(ipbuf));
-            DrawLabelValue(ax + kMargin + 16, y, "gw ", ipbuf, g_body_rgb);
+            if (Ipv4IsZero(ipv4.gateway))
+                DrawLabelValue(ax + kMargin + 16, y, "gw ", "(none)", g_body_rgb);
+            else
+            {
+                FormatIpv4(ipv4.gateway, ipbuf, sizeof(ipbuf));
+                DrawLabelValue(ax + kMargin + 16, y, "gw ", ipbuf, g_body_rgb);
+            }
             y += kRowH;
-            FormatIpv4(lease.dns, ipbuf, sizeof(ipbuf));
-            DrawLabelValue(ax + kMargin + 16, y, "dns", ipbuf, g_body_rgb);
+            if (Ipv4IsZero(ipv4.dns))
+                DrawLabelValue(ax + kMargin + 16, y, "dns", "(none)", g_body_rgb);
+            else
+            {
+                FormatIpv4(ipv4.dns, ipbuf, sizeof(ipbuf));
+                DrawLabelValue(ax + kMargin + 16, y, "dns", ipbuf, g_body_rgb);
+            }
             y += kRowH;
         }
         else
@@ -426,9 +443,9 @@ void DrawFull()
     u32 y = g_ay + kMargin + 22 + 6;
 
     // Connection summary line.
-    const auto lease = duetos::net::DhcpLeaseRead();
+    const auto ipv4 = ActiveIpv4Config();
     const NicPanelPresence presence = ReadNicPanelPresence();
-    const bool online = presence.link_up && lease.valid;
+    const bool online = presence.link_up && ipv4.source != duetos::net::Ipv4ConfigSource::None;
     const u32 dot = 10;
     FramebufferFillRect(g_ax + kMargin, y + 2, dot, dot,
                         !presence.discovered || !presence.driver_online ? kDimRgb
@@ -444,7 +461,7 @@ void DrawFull()
     if (online)
     {
         char ipbuf[20];
-        FormatIpv4(lease.ip, ipbuf, sizeof(ipbuf));
+        FormatIpv4(ipv4.address, ipbuf, sizeof(ipbuf));
         DrawLabelValue(g_ax + kMargin + dot + 6, y, "IP ", ipbuf, g_body_rgb);
         y += kRowH;
     }
@@ -545,9 +562,16 @@ bool NetPanelRenewButtonContains(u32 x, u32 y)
 
 bool NetPanelDoRenew()
 {
-    if (!duetos::net::InterfaceIsBound(0))
-        return false;
-    return duetos::net::DhcpStart(0);
+    const u64 count = duetos::net::InterfaceCount();
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (!duetos::net::InterfaceIsBound(i))
+            continue;
+        if (duetos::net::InterfaceIpv4ConfigRead(i).source == duetos::net::Ipv4ConfigSource::Static)
+            continue;
+        return duetos::net::DhcpStart(i);
+    }
+    return false;
 }
 
 u32 NetPanelWidth()

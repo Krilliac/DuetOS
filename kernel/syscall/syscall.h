@@ -2596,23 +2596,24 @@ inline constexpr u64 kSockOpGetPeer = 11;
 // hostname (NUL-terminated, ≤256 bytes). rdx = user u32* out_be_ipv4.
 // Returns 0 on success (out_be_ipv4 written in network byte order),
 // negative errno on miss / timeout. Routes to NetDnsQueryA against
-// the DHCP-supplied resolver, with a built-in 3-second wait.
+// the active interface's DHCP- or static-supplied resolver, with a
+// built-in 3-second wait.
 inline constexpr u64 kSockOpResolveA = 12;
-// kSockOpGetLease: snapshot the current DHCP lease into the caller-
+// kSockOpGetLease: snapshot the current active IPv4 configuration into the caller-
 // supplied SocketLeaseInfo buffer. rsi = user SocketLeaseInfo* out.
 // rdx = user-supplied buffer size (must be >= sizeof(SocketLeaseInfo);
 // short buffers fail with -ERANGE = -34).
 //
 // SocketLeaseInfo layout (40 bytes):
-//   +0  u32 valid          1 if a lease has been bound; 0 = not yet
+//   +0  u32 valid          1 if DHCP/static/driver IPv4 is active; 0 = not yet
 //   +4  u32 ip_be          IPv4 in network byte order (0 if !valid)
-//   +8  u32 netmask_be     subnet mask, network byte order
+//   +8  u32 netmask_be     subnet mask, network byte order (0 if unavailable)
 //   +12 u32 gateway_be     default gateway, network byte order
 //   +16 u32 dns_be         primary DNS, network byte order
 //   +20 u32 lease_seconds  remaining lease seconds (0 = unknown / no decay)
 //   +24 u8  mac[6]         hardware MAC of the bound interface
 //   +30 u8  iface_index    NIC index in the kernel's iface table
-//   +31 u8  reserved
+//   +31 u8  config_source  0=None, 1=Driver, 2=Dhcp, 3=Static
 //   +32 u8  reserved[8]    zeroed by the kernel
 inline constexpr u64 kSockOpGetLease = 13;
 // kSockOpPollEvents: non-blocking readiness probe for the Winsock

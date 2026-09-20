@@ -18,13 +18,10 @@ namespace
 
 constinit bool g_started = false;
 
-// The smoke targets the wired NIC (stack iface 0). DHCP state is
-// per-interface, so we read iface 0's own lease and transmit ICMP/DNS
-// on iface 0 — keeping the lease and the send path on the same NIC.
-// (Reading a shared global lease used to pick up the wireless mock-
-// ISP's loopback lease on iface 3, then ping its gateway out iface 0,
-// which can never route.)
-constexpr u32 kSmokeIface = 0;
+bool IpZero(Ipv4Address ip)
+{
+    return ip.octets[0] == 0 && ip.octets[1] == 0 && ip.octets[2] == 0 && ip.octets[3] == 0;
+}
 
 void WriteIp(Ipv4Address ip)
 {
@@ -56,23 +53,22 @@ void WriteIp(Ipv4Address ip)
     }
 }
 
-bool WaitForDhcp(DhcpLease& out_lease)
+bool WaitForIpv4Route(u32& out_iface_index, Ipv4InterfaceConfig& out_config)
 {
     // 50 × 100 ms = 5 s.
     for (u32 i = 0; i < 50; ++i)
     {
-        out_lease = DhcpLeaseRead(kSmokeIface);
-        if (out_lease.valid)
+        if (ActiveIpv4ConfigRead(&out_iface_index, &out_config, Ipv4ConfigRequirement::Gateway))
             return true;
         duetos::sched::SchedSleepTicks(10);
     }
     return false;
 }
 
-bool DoIcmpEcho(Ipv4Address dst, u16 id, u32 timeout_ticks)
+bool DoIcmpEcho(u32 iface_index, Ipv4Address dst, u16 id, u32 timeout_ticks)
 {
     NetPingArm(id, /*seq=*/1);
-    if (!NetIcmpSendEcho(kSmokeIface, dst, id, /*seq=*/1))
+    if (!NetIcmpSendEcho(iface_index, dst, id, /*seq=*/1))
         return false;
     for (u32 i = 0; i < timeout_ticks; ++i)
     {
@@ -91,9 +87,10 @@ enum class DnsLookupResult : u8
     Timeout,      // Query sent OK but no reply within the budget.
 };
 
-DnsLookupResult DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u32 timeout_ticks)
+DnsLookupResult DoDnsLookup(u32 iface_index, Ipv4Address resolver, const char* name, Ipv4Address& out_ip,
+                            u32 timeout_ticks)
 {
-    if (!NetDnsQueryA(kSmokeIface, resolver, name))
+    if (!NetDnsQueryA(iface_index, resolver, name))
     {
         // Distinguishes "query never made it onto the wire" (ARP fail
         // or UDP send rejected — kernel-side issue worth investigating)
@@ -190,65 +187,85 @@ HttpGetResult DoHttpGet(Ipv4Address dst, const char* host_header, u32& out_statu
 void NetSmokeEntry(void*)
 {
     KLOG_TRACE_SCOPE("net/smoke", "Entry");
-    arch::SerialWrite("[net-smoke] starting — waiting up to 5s for DHCP...\n");
+    arch::SerialWrite("[net-smoke] starting — waiting up to 5s for an IPv4 route...\n");
 
-    DhcpLease lease = {};
-    if (!WaitForDhcp(lease))
+    u32 iface_index = kInvalidNetInterfaceIndex;
+    Ipv4InterfaceConfig config{};
+    if (!WaitForIpv4Route(iface_index, config))
     {
-        arch::SerialWrite("[net-smoke] FAIL: DHCP did not bind within 5s — aborting test\n");
+        arch::SerialWrite("[net-smoke] FAIL: no DHCP/static IPv4 route became active within 5s\n");
         return;
     }
-    arch::SerialWrite("[net-smoke] DHCP OK ip=");
-    WriteIp(lease.ip);
-    arch::SerialWrite(" router=");
-    WriteIp(lease.router);
+    arch::SerialWrite("[net-smoke] IPv4 OK iface=");
+    arch::SerialWriteHex(iface_index);
+    arch::SerialWrite(" source=");
+    switch (config.source)
+    {
+    case Ipv4ConfigSource::Static:
+        arch::SerialWrite("static");
+        break;
+    case Ipv4ConfigSource::Dhcp:
+        arch::SerialWrite("dhcp");
+        break;
+    case Ipv4ConfigSource::Driver:
+        arch::SerialWrite("driver");
+        break;
+    default:
+        arch::SerialWrite("none");
+        break;
+    }
+    arch::SerialWrite(" ip=");
+    WriteIp(config.address);
+    arch::SerialWrite(" gateway=");
+    WriteIp(config.gateway);
     arch::SerialWrite(" dns=");
-    WriteIp(lease.dns);
+    WriteIp(config.dns);
     arch::SerialWrite("\n");
 
     // Step 1: ping the gateway. SLIRP returns its own ICMP echo
     // reply for the gateway, so this should always succeed when
     // the link is up.
     arch::SerialWrite("[net-smoke] step 1: ping gateway ");
-    WriteIp(lease.router);
+    WriteIp(config.gateway);
     arch::SerialWrite("\n");
-    if (DoIcmpEcho(lease.router, /*id=*/0xCAFE, /*timeout_ticks=*/200))
+    if (DoIcmpEcho(iface_index, config.gateway, /*id=*/0xCAFE, /*timeout_ticks=*/200))
         arch::SerialWrite("[net-smoke] step 1: PASS — gateway replied to ICMP echo\n");
     else
         arch::SerialWrite("[net-smoke] step 1: FAIL — no reply within 2s\n");
 
-    // Step 2: DNS resolve www.google.com via the DHCP-supplied
-    // resolver. SLIRP forwards UDP/53 to the host's resolver,
+    // Step 2: DNS resolve www.google.com via the configured resolver.
+    // SLIRP forwards UDP/53 to the host's resolver,
     // which proxies to a real upstream. Hot path — typically
     // resolves in <100ms.
     Ipv4Address google_ip{};
     bool dns_ok = false;
-    arch::SerialWrite("[net-smoke] step 2: DNS A www.google.com via ");
-    WriteIp(lease.dns);
-    arch::SerialWrite("\n");
-    const DnsLookupResult dns_rc = DoDnsLookup(lease.dns, "www.google.com", google_ip, /*timeout_ticks=*/300);
-    switch (dns_rc)
+    if (IpZero(config.dns))
     {
-    case DnsLookupResult::Ok:
-        dns_ok = true;
-        arch::SerialWrite("[net-smoke] step 2: PASS — www.google.com -> ");
-        WriteIp(google_ip);
+        arch::SerialWrite("[net-smoke] step 2: skipped — no DNS resolver configured\n");
+    }
+    else
+    {
+        arch::SerialWrite("[net-smoke] step 2: DNS A www.google.com via ");
+        WriteIp(config.dns);
         arch::SerialWrite("\n");
-        break;
-    case DnsLookupResult::QueryDropped:
-        // Kernel-side bug: ARP for the resolver failed or UDP send was
-        // rejected. Always worth investigating — even SLIRP should allow
-        // an ARP+UDP-send pair to complete.
-        arch::SerialWrite("[net-smoke] step 2: FAIL — DNS query never sent (ARP/UDP rejected)\n");
-        break;
-    case DnsLookupResult::Timeout:
-        // Query went out, no reply within 3s. Most often this is a SLIRP
-        // forwarding gap (host's DNS resolver not reachable from the
-        // emulated subnet) rather than a kernel bug. Reported as "SKIP"
-        // (vs FAIL) so non-kernel network configs don't flag the boot.
-        arch::SerialWrite("[net-smoke] step 2: SKIP — DNS query sent, no reply in 3s "
-                          "(typical under SLIRP without host DNS forwarding)\n");
-        break;
+        const DnsLookupResult dns_rc =
+            DoDnsLookup(iface_index, config.dns, "www.google.com", google_ip, /*timeout_ticks=*/300);
+        switch (dns_rc)
+        {
+        case DnsLookupResult::Ok:
+            dns_ok = true;
+            arch::SerialWrite("[net-smoke] step 2: PASS — www.google.com -> ");
+            WriteIp(google_ip);
+            arch::SerialWrite("\n");
+            break;
+        case DnsLookupResult::QueryDropped:
+            arch::SerialWrite("[net-smoke] step 2: FAIL — DNS query never sent (ARP/UDP rejected)\n");
+            break;
+        case DnsLookupResult::Timeout:
+            arch::SerialWrite("[net-smoke] step 2: SKIP — DNS query sent, no reply in 3s "
+                              "(typical under SLIRP without host DNS forwarding)\n");
+            break;
+        }
     }
 
     // Step 3: ping a public host (8.8.8.8). SLIRP's user-mode
@@ -258,7 +275,7 @@ void NetSmokeEntry(void*)
     // as "skipped" rather than FAIL so a non-root QEMU run isn't
     // flagged as broken.
     arch::SerialWrite("[net-smoke] step 3: ping 8.8.8.8 (public)\n");
-    if (DoIcmpEcho({{8, 8, 8, 8}}, /*id=*/0xBEEF, /*timeout_ticks=*/200))
+    if (DoIcmpEcho(iface_index, {{8, 8, 8, 8}}, /*id=*/0xBEEF, /*timeout_ticks=*/200))
         arch::SerialWrite("[net-smoke] step 3: PASS — 8.8.8.8 replied (real ICMP path)\n");
     else
         arch::SerialWrite("[net-smoke] step 3: skipped — no reply (SLIRP without raw-ICMP, or no public route)\n");
@@ -342,18 +359,17 @@ void NetSmokeTestStart(bool force_on_emulator)
     if (g_started)
         return;
     g_started = true;
-    // Under a hypervisor the QEMU user-net stack rarely speaks
-    // DHCP back to the kernel (it offers a SLIRP lease only when
-    // explicitly enabled via -netdev user,dhcpstart=...) and even
-    // when it does, the smoke task burns up to 15 s of kernel time
-    // on its sequence of timeouts: 5 s DHCP wait, 2 s ICMP echo,
+    // Under a hypervisor the network path may have neither DHCP nor an
+    // explicit static route, and even when configured the smoke task burns up
+    // to 15 s of kernel time on its sequence of timeouts: 5 s route wait,
+    // 2 s ICMP echo,
     // 3 s DNS lookup, 5 s HTTP GET. None of that output is on the
     // boot-smoke critical path, so skip the spawn entirely under
     // emulation. Bare metal boots get the full coverage as before.
     // The `netsmoke=force` cmdline flag opts in deliberately.
     if (arch::IsEmulator() && !force_on_emulator)
     {
-        arch::SerialWrite("[net-smoke] emulator detected — skipping (would burn ~15s on DHCP/DNS/TCP timeouts; pass "
+        arch::SerialWrite("[net-smoke] emulator detected — skipping (would burn ~15s on route/DNS/TCP timeouts; pass "
                           "netsmoke=force to override)\n");
         return;
     }

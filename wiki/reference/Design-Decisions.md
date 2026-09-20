@@ -14736,3 +14736,31 @@ _2026-08-13_
     `fs/exfat.h`) — re-walks the registry slot's root directory
     directly — and call it once, right before the VFS phase, so the
     registry observes what the CRUD phases actually wrote to disk.
+
+## 067 — Static IPv4 is stack-owned boot policy, not NIC-driver configuration
+
+- **Date:** 2026-09-20
+- **Decision:** `NetStackInit` parses one strict `net.static=<address>/<prefix>`
+  configuration before NIC activation, with optional `net.static-iface`,
+  `net.gateway`, and `net.dns` tokens. The stack substitutes that state only
+  when the selected interface binds with `0.0.0.0`; driver-provided nonzero
+  addresses remain authoritative. Static state has its own
+  `Ipv4ConfigSource::Static` identity, suppresses DHCP without fabricating a
+  lease, and supplies the prefix/gateway used for L2 next-hop selection.
+  Shared selectors choose an interface by required capability (address,
+  gateway, DNS, or route-to-target); TCP/UDP sockets retain that exact
+  interface instead of defaulting to slot 0. The fixed network-info ABI uses
+  byte 31 for the source and returns a zero netmask when a DHCP/driver prefix
+  is genuinely unavailable.
+- **Why:** Bare-metal control links commonly have no DHCP server, while putting
+  a machine-specific address in RTL8125 or another driver would couple network
+  policy to hardware and make interface ordering implicit. A stack-owned,
+  source-labelled configuration also lets status surfaces tell static and DHCP
+  state apart.
+- **Rules out:** Hard-coded Node addresses in a NIC driver, passwords or PSKs
+  on the kernel command line, treating static state as a fake DHCP ACK, and
+  nondeterministically assigning policy to whichever driver binds first.
+- **Revisit when:** The route table supports multiple prefixes and policy
+  routes; at that point replace the single boot-configured interface policy
+  with a bounded per-interface configuration list while preserving the source
+  and validation contract.

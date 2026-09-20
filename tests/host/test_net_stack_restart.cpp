@@ -1,5 +1,6 @@
 #include "net/stack.h"
 #include "net/socket.h"
+#include "net/static_ipv4_config.h"
 #include "net/tcp.h"
 #include "net/tcp_internal.h"
 
@@ -37,6 +38,8 @@ u64 PackBytes(const u8* bytes, u32 count)
         value = (value << 8) | bytes[i];
     return value;
 }
+
+void StaticDhcpProbe(u32, Ipv4Address, u16, u16, const void*, u64) {}
 
 bool Tx(void* raw, u32, const void* frame, u64 frame_len)
 {
@@ -263,8 +266,47 @@ int main()
     using namespace duetos;
     using namespace duetos::net;
 
-    NetStackInit();
+    {
+        const auto absent = ParseStaticIpv4Config(nullptr);
+        assert(absent.status == StaticIpv4ParseStatus::Absent);
+
+        const auto valid = ParseStaticIpv4Config(
+            "quiet net.static=10.77.0.2/30 net.static-iface=1 net.gateway=10.77.0.1 net.dns=1.1.1.1");
+        assert(valid.status == StaticIpv4ParseStatus::Valid);
+        assert(valid.config.iface_index == 1);
+        assert(PackBytes(valid.config.address.octets, 4) == PackBytes(Ipv4Address{{10, 77, 0, 2}}.octets, 4));
+        assert(valid.config.prefix_length == 30);
+        assert(valid.config.gateway_set);
+        assert(PackBytes(valid.config.gateway.octets, 4) == PackBytes(Ipv4Address{{10, 77, 0, 1}}.octets, 4));
+        assert(valid.config.dns_set);
+        assert(PackBytes(valid.config.dns.octets, 4) == PackBytes(Ipv4Address{{1, 1, 1, 1}}.octets, 4));
+
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/30 net.static=10.77.0.1/30").status ==
+               StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/33").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.999/30").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=0.0.0.0/30").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=255.255.255.255/30").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.0/30").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.3/30").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/31").status == StaticIpv4ParseStatus::Valid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/30 net.gateway=10.77.1.1").status ==
+               StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/30 net.gateway=10.77.0.1 net.gateway=10.77.0.1").status ==
+               StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/30 net.dns=1.1.1.1.").status ==
+               StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.gateway=10.77.0.1").status == StaticIpv4ParseStatus::Invalid);
+        assert(ParseStaticIpv4Config("net.static-extra=10.77.0.2/30").status == StaticIpv4ParseStatus::Absent);
+        assert(ParseStaticIpv4Config("net.static=10.77.0.2/30 net.static-iface=4").status ==
+               StaticIpv4ParseStatus::Invalid);
+    }
+
+    NetStackInit("quiet net.static=10.77.0.2/30 net.static-iface=1 net.gateway=10.77.0.1 net.dns=1.1.1.1");
     assert(InterfaceCount() == 0);
+    u32 active_iface = kInvalidNetInterfaceIndex;
+    Ipv4InterfaceConfig active_config{};
+    assert(!ActiveIpv4ConfigRead(&active_iface, &active_config));
 
     const MacAddress mac_a{{0x02, 0, 0, 0, 0, 1}};
     const Ipv4Address ip_a{{10, 0, 0, 1}};
@@ -272,6 +314,9 @@ int main()
     NetInterfaceBinding binding_a = kInvalidNetInterfaceBinding;
     assert(NetStackBindInterfaceOwned(0, mac_a, ip_a, &Tx, &context_a, &binding_a));
     assert(NetInterfaceBindingIsValid(binding_a));
+    const Ipv4InterfaceConfig explicit_config = InterfaceIpv4ConfigRead(0);
+    assert(explicit_config.source == Ipv4ConfigSource::Driver);
+    assert(PackBytes(explicit_config.address.octets, 4) == PackBytes(ip_a.octets, 4));
 
     const MacAddress peer_mac{{0x52, 0x54, 0, 0x12, 0x34, 0x56}};
     const Ipv4Address peer_ip{{10, 0, 0, 2}};
@@ -468,6 +513,7 @@ int main()
                                  std::memory_order_release);
         });
     assert(WaitForTxEntered(context_c, tcp_entered_before));
+    assert(context_c.last_dst_mac.load(std::memory_order_relaxed) == PackBytes(peer_mac.octets, 6));
     const u16 tcp_local_port = static_cast<u16>(context_c.last_tcp_src_port.load(std::memory_order_relaxed));
     const u32 tcp_local_seq = context_c.last_tcp_seq.load(std::memory_order_relaxed);
     assert(tcp_local_port != 0);
@@ -491,5 +537,109 @@ int main()
     assert(SocketRecvStream(static_cast<u32>(connected_socket), &stream_byte, 1) == 0);
     SocketRelease(static_cast<u32>(connected_socket));
     assert(InterfaceCount() == 0);
+
+    const MacAddress static_mac{{0x02, 0, 0, 0, 0, 4}};
+    TxContext static_context{};
+    NetInterfaceBinding static_binding = kInvalidNetInterfaceBinding;
+    assert(NetStackBindInterfaceOwned(1, static_mac, Ipv4Address{}, &Tx, &static_context, &static_binding));
+    const Ipv4InterfaceConfig static_config = InterfaceIpv4ConfigRead(1);
+    assert(static_config.source == Ipv4ConfigSource::Static);
+    assert(PackBytes(static_config.address.octets, 4) == PackBytes(Ipv4Address{{10, 77, 0, 2}}.octets, 4));
+    assert(static_config.prefix_length == 30);
+    assert(PackBytes(static_config.gateway.octets, 4) == PackBytes(Ipv4Address{{10, 77, 0, 1}}.octets, 4));
+    assert(PackBytes(static_config.dns.octets, 4) == PackBytes(Ipv4Address{{1, 1, 1, 1}}.octets, 4));
+    assert(ActiveIpv4ConfigRead(&active_iface, &active_config));
+    assert(active_iface == 1);
+    assert(active_config.source == Ipv4ConfigSource::Static);
+
+    TxContext address_only_context{};
+    NetInterfaceBinding address_only_binding = kInvalidNetInterfaceBinding;
+    assert(NetStackBindInterfaceOwned(0, static_mac, Ipv4Address{{10, 0, 0, 9}}, &Tx, &address_only_context,
+                                      &address_only_binding));
+    assert(ActiveIpv4ConfigRead(&active_iface, &active_config));
+    assert(active_iface == 0);
+    assert(ActiveIpv4ConfigRead(&active_iface, &active_config, Ipv4ConfigRequirement::Dns));
+    assert(active_iface == 1);
+    assert(PackBytes(active_config.dns.octets, 4) == PackBytes(Ipv4Address{{1, 1, 1, 1}}.octets, 4));
+
+    const Ipv4Address static_peer_ip{{10, 77, 0, 1}};
+    ArpInsert(1, static_peer_ip, peer_mac);
+    const i32 routed_socket = SocketAlloc(kSocketDomainInet, kSocketTypeDgram);
+    assert(routed_socket >= 0);
+    assert(SocketBind(static_cast<u32>(routed_socket), Ipv4Address{}, 0));
+    const u32 static_calls_before_route = static_context.calls.load(std::memory_order_relaxed);
+    const u32 address_only_calls_before_route = address_only_context.calls.load(std::memory_order_relaxed);
+    assert(SocketSendDgram(static_cast<u32>(routed_socket), static_peer_ip, 7001, outbound_payload,
+                           static_cast<u32>(sizeof(outbound_payload))) == static_cast<i64>(sizeof(outbound_payload)));
+    assert(static_context.calls.load(std::memory_order_relaxed) == static_calls_before_route + 1);
+    assert(address_only_context.calls.load(std::memory_order_relaxed) == address_only_calls_before_route);
+    const Ipv4Address off_subnet_ip{{1, 1, 1, 1}};
+    assert(SocketSendDgram(static_cast<u32>(routed_socket), off_subnet_ip, 7001, outbound_payload,
+                           static_cast<u32>(sizeof(outbound_payload))) == static_cast<i64>(sizeof(outbound_payload)));
+    assert(static_context.last_dst_mac.load(std::memory_order_relaxed) == PackBytes(peer_mac.octets, 6));
+    assert(static_context.last_dst_ip.load(std::memory_order_relaxed) == PackBytes(off_subnet_ip.octets, 4));
+    SocketRelease(static_cast<u32>(routed_socket));
+
+    const u32 calls_before_icmp = static_context.calls.load(std::memory_order_relaxed);
+    assert(NetIcmpSendEcho(1, off_subnet_ip, 0xCAFE, 1));
+    assert(static_context.calls.load(std::memory_order_relaxed) == calls_before_icmp + 1);
+    assert(static_context.last_dst_mac.load(std::memory_order_relaxed) == PackBytes(peer_mac.octets, 6));
+    assert(static_context.last_dst_ip.load(std::memory_order_relaxed) == PackBytes(off_subnet_ip.octets, 4));
+
+    const i32 routed_stream = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
+    assert(routed_stream >= 0);
+    const u32 static_tcp_entered_before = static_context.entered.load(std::memory_order_acquire);
+    std::atomic<bool> static_connect_result{false};
+    std::thread static_connector(
+        [&]
+        {
+            static_connect_result.store(SocketConnect(static_cast<u32>(routed_stream), off_subnet_ip, 8080),
+                                        std::memory_order_release);
+        });
+    assert(WaitForTxEntered(static_context, static_tcp_entered_before));
+    assert(static_context.last_dst_mac.load(std::memory_order_relaxed) == PackBytes(peer_mac.octets, 6));
+    assert(static_context.last_dst_ip.load(std::memory_order_relaxed) == PackBytes(off_subnet_ip.octets, 4));
+    const u16 static_tcp_local_port =
+        static_cast<u16>(static_context.last_tcp_src_port.load(std::memory_order_relaxed));
+    const u32 static_tcp_local_seq = static_context.last_tcp_seq.load(std::memory_order_relaxed);
+    assert(static_tcp_local_port != 0);
+    u8 static_syn_ack_frame[64] = {};
+    const u64 static_syn_ack_len =
+        BuildTcpSynAck(static_syn_ack_frame, sizeof(static_syn_ack_frame), static_mac, peer_mac, off_subnet_ip,
+                       static_config.address, 8080, static_tcp_local_port, static_tcp_local_seq + 1);
+    NetStackInjectRx(static_binding, static_syn_ack_frame, static_syn_ack_len);
+    static_connector.join();
+    assert(static_connect_result.load(std::memory_order_acquire));
+    assert(SocketIsConnected(static_cast<u32>(routed_stream)));
+    SocketRelease(static_cast<u32>(routed_stream));
+
+    u32 service_iface = kInvalidNetInterfaceIndex;
+    Ipv4InterfaceConfig service_config{};
+    assert(ActiveIpv4ConfigRead(&service_iface, &service_config, Ipv4ConfigRequirement::Dns));
+    assert(service_iface == 1);
+    const u32 calls_before_dns = static_context.calls.load(std::memory_order_relaxed);
+    assert(NetDnsQueryA(service_iface, service_config.dns, "static.example"));
+    assert(static_context.calls.load(std::memory_order_relaxed) == calls_before_dns + 1);
+    assert(ActiveIpv4ConfigRead(&service_iface, &service_config, Ipv4ConfigRequirement::Gateway));
+    assert(service_iface == 1);
+    const u32 calls_before_ntp = static_context.calls.load(std::memory_order_relaxed);
+    assert(NetNtpQuery(service_iface, off_subnet_ip));
+    assert(static_context.calls.load(std::memory_order_relaxed) == calls_before_ntp + 1);
+    const u32 tx_before_static_dhcp = static_context.calls.load(std::memory_order_relaxed);
+    assert(DhcpStart(1));
+    assert(static_context.calls.load(std::memory_order_relaxed) == tx_before_static_dhcp);
+    assert(!DhcpLeaseRead(1).valid);
+    assert(NetUdpBindRx(68, StaticDhcpProbe));
+    assert(NetUdpBindRx(68, nullptr));
+    assert(NetStackUnbindInterface(address_only_binding, 0) == NetInterfaceUnbindResult::Unbound);
+    assert(NetStackUnbindInterface(static_binding, 0) == NetInterfaceUnbindResult::Unbound);
+
+    TxContext dynamic_context{};
+    NetInterfaceBinding dynamic_binding = kInvalidNetInterfaceBinding;
+    assert(NetStackBindInterfaceOwned(0, static_mac, Ipv4Address{}, &Tx, &dynamic_context, &dynamic_binding));
+    const Ipv4InterfaceConfig dynamic_config = InterfaceIpv4ConfigRead(0);
+    assert(dynamic_config.source == Ipv4ConfigSource::None);
+    assert(PackBytes(dynamic_config.address.octets, 4) == 0);
+    assert(NetStackUnbindInterface(dynamic_binding, 0) == NetInterfaceUnbindResult::Unbound);
     return 0;
 }

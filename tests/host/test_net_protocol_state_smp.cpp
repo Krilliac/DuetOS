@@ -257,6 +257,8 @@ void DispatchDhcpResponse(const OutboundDatagram& request, DhcpReplyFault fault 
     PutDhcpOption(response, offset, 53, &reply_type, 1);
     if (fault != DhcpReplyFault::MissingServerIdentifier)
         PutDhcpOption(response, offset, 54, server_id.octets, 4);
+    const u8 subnet_mask[4] = {255, 255, 255, 252};
+    PutDhcpOption(response, offset, 1, subnet_mask, 4);
     PutDhcpOption(response, offset, 3, server_ip.octets, 4);
     PutDhcpOption(response, offset, 6, dns_ip.octets, 4);
     const u8 lease_seconds[4] = {0, 0, 0x0E, 0x10};
@@ -452,7 +454,12 @@ int main()
     DispatchDhcpResponse(dhcp_request, DhcpReplyFault::WrongClientMac);
     assert(!DhcpLeaseRead(0).valid);
     DispatchDhcpResponse(dhcp_request);
-    assert(DhcpLeaseRead(0).valid);
+    const DhcpLease committed_lease = DhcpLeaseRead(0);
+    assert(committed_lease.valid);
+    assert(committed_lease.prefix_length == 30);
+    const Ipv4InterfaceConfig committed_config = InterfaceIpv4ConfigRead(0);
+    assert(committed_config.source == Ipv4ConfigSource::Dhcp);
+    assert(committed_config.prefix_length == 30);
 
     // Keep one immutable deny rule producing log traffic while another is
     // toggled concurrently with packet evaluation and UI-style snapshots.

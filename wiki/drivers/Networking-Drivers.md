@@ -49,6 +49,11 @@ means no DHCP claim. RTL8125A firmware/link-management behavior
 and live Node1 traffic remain silicon-only gates; the host contract test does
 not claim those gates.
 
+Address policy remains outside the driver. RTL8125 publishes `0.0.0.0` like
+the other DHCP-capable adapters; `NetStackBindInterfaceOwned` may substitute a
+validated `net.static` configuration for the selected interface before the
+binding opens. This keeps the Node direct-link address out of hardware code.
+
 ## PCI-ID classification (`nic_ids.h`)
 
 All device-ID → family classification lives in
