@@ -786,3 +786,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Preserve the last good session config when staging or replacement fails
 - **Claimed**: 2026-09-20T17:12:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] codex-duetos-fat32-safe-replace
+- **Session**: `DESKTOP-950K3EI-180`
+- **Branch**: `codex/campaign-integration-20260920`
+- **Files**: `kernel/fs/fat32_create.cpp,kernel/fs/fat32.h,kernel/fs/fat32_selftest.cpp`
+- **Description**: Add verified stage-first FAT32 replacement with recovery-file semantics
+- **Claimed**: 2026-09-20T17:13:03Z
+- **Status**: IN PROGRESS
