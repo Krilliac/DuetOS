@@ -90,6 +90,7 @@ forbidden=(
     "UNRESOLVED kernel-provider ordinal import"
     "FAIL retired kernel32 export unavailable"
     "CurrentCpu LAPIC-resolved a non-kernel GSBASE"
+    "[klog-persist] pending queue full"
     # Any kernel selftest failure, from any subsystem. See the same
     # entry in ctest-boot-smoke.sh: ~370 "[<tag>] FAIL" sites across
     # 105 selftests, none of which could fail a boot before this.

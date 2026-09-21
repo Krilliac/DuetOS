@@ -120,62 +120,69 @@ constinit LogTee g_tee = nullptr;
 // Line-oriented sink (set via SetLogLineSink). Receives one
 // fully-assembled log line per call, tagged with level + area so
 // the receiver can route each line to a per-subsystem file rather
-// than flooding one aggregate log. The chunk Tee path accumulates
-// bytes into `g_line_accum` and fires the sink on '\n' or when the
-// buffer fills.
+// than flooding one aggregate log.
 constinit LogLineSink g_line_sink = nullptr;
-constinit LogLevel g_line_sink_min_level = LogLevel::Info;
-// Per-line current level / area: set at the top of each Log/LogA*
-// function and read by the Tee accumulator when emitting a complete
-// line through the line sink. Racy under SMP; accept that for v0 —
-// the pattern is single-CPU and the existing g_current_log_level
-// state already runs the same risk.
-constinit LogLevel g_current_log_level = LogLevel::Debug;
-constinit LogArea g_current_log_area = LogArea::General;
+constinit u8 g_line_sink_min_level = static_cast<u8>(LogLevel::Info);
 
-// Per-line accumulator for the line sink. Each chunk fed to Tee()
-// is appended here until '\n' arrives (or the buffer is full),
-// then handed to the line sink as one record. 384 bytes covers a
-// long subsystem path + message + two value fields; longer lines
-// truncate at the buffer boundary (the serial sink still receives
-// the full unbuffered version, so nothing is lost from the
-// authoritative log).
-constinit char g_line_accum[384] = {};
-constinit u32 g_line_accum_used = 0;
-
-inline void Tee(const char* s)
+// Build every secondary-sink record in caller-owned stack storage. The old
+// chunk-at-a-time path used global current-level/current-area fields and one
+// global accumulator; concurrent CPUs could splice two records and route the
+// result to the wrong persistence file. Explicit metadata plus a local buffer
+// makes publication independent per call. The 384-byte ceiling preserves the
+// existing line-sink contract; serial remains the untruncated authority.
+void EmitTeeLine(LogLevel level, LogArea area, const char* const* parts, u32 part_count)
 {
-    if (s == nullptr)
+    const LogTee tee = __atomic_load_n(&g_tee, __ATOMIC_ACQUIRE);
+    const LogLineSink line_sink = __atomic_load_n(&g_line_sink, __ATOMIC_ACQUIRE);
+    const u8 line_sink_min_level = __atomic_load_n(&g_line_sink_min_level, __ATOMIC_ACQUIRE);
+    const bool line_sink_enabled = line_sink != nullptr && static_cast<u8>(level) >= line_sink_min_level;
+    if (tee == nullptr && !line_sink_enabled)
     {
         return;
     }
-    if (g_tee != nullptr)
+
+    char line[384];
+    u32 used = 0;
+    for (u32 part_index = 0; part_index < part_count && used + 1 < sizeof(line); ++part_index)
     {
-        g_tee(s);
-    }
-    // Line sink: buffer chunks until a newline arrives (or the
-    // accumulator is one byte from full), then emit the whole line
-    // with the current level + area so per-area file routing can
-    // pick the right output. Respects its own minimum level so
-    // low-noise captures aren't overwhelmed by Debug ticks.
-    if (g_line_sink != nullptr && static_cast<u8>(g_current_log_level) >= static_cast<u8>(g_line_sink_min_level))
-    {
-        for (const char* p = s; *p != 0; ++p)
+        const char* part = parts[part_index];
+        if (part == nullptr)
         {
-            const char c = *p;
-            if (g_line_accum_used + 1 < sizeof(g_line_accum))
-            {
-                g_line_accum[g_line_accum_used++] = c;
-            }
-            const bool flush_now = (c == '\n') || (g_line_accum_used + 1 >= sizeof(g_line_accum));
-            if (flush_now)
-            {
-                g_line_accum[g_line_accum_used] = '\0';
-                g_line_sink(g_current_log_level, g_current_log_area, g_line_accum, g_line_accum_used);
-                g_line_accum_used = 0;
-            }
+            continue;
+        }
+        while (*part != '\0' && used + 1 < sizeof(line))
+        {
+            line[used++] = *part++;
         }
     }
+    // Every caller supplies a newline. If truncation consumed the buffer before
+    // reaching it, replace the last payload byte so this record cannot merge
+    // visually with the next one.
+    if (used != 0 && line[used - 1] != '\n')
+    {
+        if (used + 1 < sizeof(line))
+        {
+            line[used++] = '\n';
+        }
+        else
+        {
+            line[used - 1] = '\n';
+        }
+    }
+    line[used] = '\0';
+    if (tee != nullptr)
+    {
+        tee(line);
+    }
+    if (line_sink_enabled && used != 0)
+    {
+        line_sink(level, area, line, used);
+    }
+}
+
+template <u64 N> void EmitTeeLine(LogLevel level, LogArea area, const char* const (&parts)[N])
+{
+    EmitTeeLine(level, area, parts, static_cast<u32>(N));
 }
 
 // Forward decl — defined below; PushEntry captures timestamp.
@@ -718,16 +725,12 @@ void SetLogThreshold(LogLevel level)
 
 void SetLogTee(LogTee writer)
 {
-    g_tee = writer;
+    __atomic_store_n(&g_tee, writer, __ATOMIC_RELEASE);
 }
 
 void SetLogLineSink(LogLineSink sink)
 {
-    g_line_sink = sink;
-    // Reset the per-line accumulator so a partial line carried over
-    // from the prior sink doesn't bleed into the first record this
-    // sink sees.
-    g_line_accum_used = 0;
+    __atomic_store_n(&g_line_sink, sink, __ATOMIC_RELEASE);
     if (sink == nullptr)
     {
         return;
@@ -740,6 +743,7 @@ void SetLogLineSink(LogLineSink sink)
     // into one contiguous record and shipped with its area derived
     // from the subsystem prefix (the ring entry doesn't store the
     // area separately — keeping the entry narrow on purpose).
+    const u8 replay_min_level = __atomic_load_n(&g_line_sink_min_level, __ATOMIC_ACQUIRE);
     const u64 start = g_log_ring_next - g_log_ring_count;
     for (u64 i = 0; i < g_log_ring_count; ++i)
     {
@@ -749,7 +753,7 @@ void SetLogLineSink(LogLineSink sink)
         {
             continue;
         }
-        if (static_cast<u8>(e.level) < static_cast<u8>(g_line_sink_min_level))
+        if (static_cast<u8>(e.level) < replay_min_level)
         {
             continue;
         }
@@ -808,7 +812,7 @@ void SetLogLineSink(LogLineSink sink)
 
 void SetLogLineSinkMinLevel(LogLevel min_level)
 {
-    g_line_sink_min_level = min_level;
+    __atomic_store_n(&g_line_sink_min_level, static_cast<u8>(min_level), __ATOMIC_RELEASE);
 }
 
 LogLevel GetLogThreshold()
@@ -861,8 +865,6 @@ void Log(LogLevel level, const char* subsystem, const char* message, const char*
     {
         message = "<null-msg>";
     }
-    g_current_log_level = level;
-    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     // One SerialLineGuard for the whole record so the multi-call
     // sequence below cannot be spliced by another CPU's / IRQ's
@@ -889,11 +891,8 @@ void Log(LogLevel level, const char* subsystem, const char* message, const char*
     // Tee to the secondary sink (framebuffer console etc.). No
     // timestamp or ANSI codes on this path — on-screen renderers
     // want clean text and drive their own colour from LogLevel.
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, inferred_area, tee_parts);
 
     PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
@@ -914,8 +913,6 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         message = "<null-msg>";
     }
-    g_current_log_level = level;
-    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -933,11 +930,8 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
         arch::SerialWrite("\n");
     }
 
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, inferred_area, tee_parts);
 
     PushEntry(level, subsystem, message, value, true, file, line);
     PostEmit();
@@ -967,8 +961,6 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     {
         value_str = "<null-value>";
     }
-    g_current_log_level = level;
-    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -988,15 +980,8 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
         arch::SerialWrite("\n");
     }
 
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee(" ");
-    Tee(label ? label : "str");
-    Tee("=");
-    Tee(value_str ? value_str : "(null)");
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, " ", label, "=", value_str, "\n"};
+    EmitTeeLine(level, inferred_area, tee_parts);
 
     // Ring-buffer entry records the message only; the string pointer
     // would need per-entry deep-copy storage we don't have yet.
@@ -1028,8 +1013,6 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     {
         b_label = "b";
     }
-    g_current_log_level = level;
-    g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1054,11 +1037,8 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
         arch::SerialWrite("\n");
     }
 
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, inferred_area, tee_parts);
 
     // Record only the first value — a second u64 would bloat every
     // entry just to service the rarer 2-value path.
@@ -1337,8 +1317,7 @@ TraceScope::~TraceScope()
     // Hand-rolled line: we want "< exit   fn=\"name\"   elapsed_us=N"
     // which no existing helper produces (LogWithString lacks a second
     // labelled value; LogWith2Values can't carry a string).
-    g_current_log_level = LogLevel::Trace;
-    g_current_log_area = AreaFromSubsystemImpl(m_subsystem);
+    const LogArea area = AreaFromSubsystemImpl(m_subsystem);
     const char* tag = LevelTag(LogLevel::Trace);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1354,11 +1333,8 @@ TraceScope::~TraceScope()
         arch::SerialWrite("\n");
     }
 
-    Tee(tag);
-    Tee(m_subsystem);
-    Tee(" : < exit ");
-    Tee(m_name);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, m_subsystem, " : < exit ", m_name, "\n"};
+    EmitTeeLine(LogLevel::Trace, area, tee_parts);
 
     PushEntry(LogLevel::Trace, m_subsystem, m_name, elapsed, true, nullptr, 0);
     PostEmit();
@@ -1415,8 +1391,7 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
     const u64 free_frames = mm::FreeFramesCount();
     const auto sched_stats = sched::SchedStatsRead();
 
-    g_current_log_level = level;
-    g_current_log_area = AreaFromSubsystemImpl(subsystem);
+    const LogArea area = AreaFromSubsystemImpl(subsystem);
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1447,11 +1422,8 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
         arch::SerialWrite("\n");
     }
 
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : metrics ");
-    Tee(label ? label : "");
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : metrics ", label ? label : "", "\n"};
+    EmitTeeLine(level, area, tee_parts);
 
     // Ring entry: record heap used as the one preserved value so
     // post-mortem shows "at metrics checkpoint X, heap was at Y".
@@ -1503,8 +1475,6 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
         subsystem = "<null-subsys>";
     if (message == nullptr)
         message = "<null-msg>";
-    g_current_log_level = level;
-    g_current_log_area = area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1518,11 +1488,8 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
         WriteAtLocation(file, line);
         arch::SerialWrite("\n");
     }
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, area, tee_parts);
     PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
@@ -1536,8 +1503,6 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
         subsystem = "<null-subsys>";
     if (message == nullptr)
         message = "<null-msg>";
-    g_current_log_level = level;
-    g_current_log_area = area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1554,11 +1519,8 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
         WriteAtLocation(file, line);
         arch::SerialWrite("\n");
     }
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, area, tee_parts);
     PushEntry(level, subsystem, message, value, true, file, line);
     PostEmit();
 }
@@ -1576,8 +1538,6 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
         label = "<null-label>";
     if (value_str == nullptr)
         value_str = "<null>";
-    g_current_log_level = level;
-    g_current_log_area = area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1596,11 +1556,8 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
         WriteAtLocation(file, line);
         arch::SerialWrite("\n");
     }
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, area, tee_parts);
     PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
@@ -1618,8 +1575,6 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
         a_label = "a";
     if (b_label == nullptr)
         b_label = "b";
-    g_current_log_level = level;
-    g_current_log_area = area;
     const char* tag = LevelTag(level);
     {
         arch::SerialLineGuard _slg; // whole-record atomic — see Log()
@@ -1643,11 +1598,8 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
         WriteAtLocation(file, line);
         arch::SerialWrite("\n");
     }
-    Tee(tag);
-    Tee(subsystem);
-    Tee(" : ");
-    Tee(message);
-    Tee("\n");
+    const char* const tee_parts[] = {tag, subsystem, " : ", message, "\n"};
+    EmitTeeLine(level, area, tee_parts);
     PushEntry(level, subsystem, message, a_value, true, file, line);
     PostEmit();
 }

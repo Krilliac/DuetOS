@@ -1129,3 +1129,8 @@ target_sources(test_font_registry PRIVATE
     "${CMAKE_SOURCE_DIR}/../../kernel/subsystems/graphics/font.cpp"
     "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/font8x8.cpp"
 )
+
+# Lock-free, allocation-free handoff from arbitrary klog producers to the
+# single process-context FAT32 persistence consumer. The TSan lane is the
+# authoritative publication/reuse race gate.
+add_host_test(klog_pending_ring)

@@ -5,11 +5,11 @@
 /*
  * klog persistence — FAT32-backed file sink.
  *
- * Replaces the early-boot tmpfs file sink with a writer that
- * appends every Info+ log line to `KERNEL.LOG` on the FAT32 root
- * volume. Run once after the FAT32 probe, then flushed on the
- * 1 Hz UI tick (compositor scheduler) so a long-uptime log
- * always reflects the current ring within roughly a second.
+ * Replaces the early-boot tmpfs file sink with a bounded atomic
+ * producer queue and a process-context writer that routes Info+
+ * lines to per-area FAT32 logs. Run once after the FAT32 probe,
+ * then flush on the 1 Hz UI tick so a long-uptime log reflects
+ * the current queue within roughly a second.
  *
  * Cross-boot retention: on install, KERNEL.LOG ages to KERNEL.0,
  * the existing KERNEL.<i> archive chain shifts down one slot, and
@@ -27,23 +27,27 @@ namespace duetos::core
 /// Truncate `KERNEL.LOG` on the FAT32 root, install the FAT32
 /// file sink (replaying the current log ring through it so the
 /// file captures pre-install Info+ history), and emit one
-/// "online" line. Returns true if the sink installed; false if
-/// no FAT32 volume is mounted or the create failed. Idempotent
-/// — a second call truncates and re-installs.
+/// "online" line. Returns true if the sink installed (or was
+/// already installed); false if no FAT32 volume is mounted or
+/// another installer/consumer currently owns initialization.
 bool KlogPersistInstall();
 
-/// Flush buffered chunks to disk. Call on a low-frequency
-/// timer (1 Hz UI tick is plenty) so log lines don't sit in
-/// the 4 KiB scratch waiting for it to fill. Safe to call when
-/// the sink isn't installed (no-op).
-void KlogPersistFlush();
+/// Try to drain queued records and flush per-area buffers to disk. Call on a
+/// low-frequency timer (1 Hz UI tick is plenty). Returns false only when
+/// another process-context caller already owns the single-consumer gate; the
+/// queued records remain intact for a later retry. Safe before installation.
+bool KlogPersistFlush();
 
 /// True iff the sink is currently installed and pointing at a
 /// live FAT32 volume.
 bool KlogPersistInstalled();
 
+/// Number of persistence records dropped because the bounded producer queue
+/// was full. The serial and in-memory klog copies remain authoritative.
+u64 KlogPersistDroppedLines();
+
 /// Boot self-test: emits a known marker, flushes, reads back
-/// the tail of `KERNEL.LOG`, asserts the marker is present.
+/// the tail of `DIAG.LOG`, asserts the marker is present.
 /// Skipped if FAT32 isn't mounted or the sink isn't installed.
 /// Prints PASS / FAIL / SKIP to COM1.
 void KlogPersistSelfTest();

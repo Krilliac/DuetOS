@@ -197,6 +197,7 @@ jobs:
           python3 tools/test/test-ap-bootstrap-stack-contract.py
           python3 tools/test/test-ap-gsbase-window-contract.py
           python3 tools/test/test-critical-gsbase-fallback-contract.py
+          python3 tools/test/test-klog-persist-smp-contract.py
           python3 tools/test/test-win32-heap-vm-safety-contract.py
           python3 tools/test/test-win32-thread-tls-vm-safety-contract.py
           python3 tools/test/test-loader-image-patch-vm-receipt-contract.py
