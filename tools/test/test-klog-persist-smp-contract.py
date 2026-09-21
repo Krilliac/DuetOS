@@ -61,7 +61,7 @@ class ConsumerContract(unittest.TestCase):
     def test_fixed_ring_uses_sequence_publication(self) -> None:
         self.assertTrue(RING_PATH.is_file())
         ring = RING_PATH.read_text(encoding="utf-8")
-        self.assertIn("kCapacity = 128", ring)
+        self.assertIn("kCapacity = 256", ring)
         self.assertIn("kClaimAttempts = 8", ring)
         self.assertIn("__ATOMIC_RELEASE", ring)
         self.assertIn("__ATOMIC_ACQUIRE", ring)

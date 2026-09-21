@@ -22,7 +22,10 @@
 namespace duetos::core::klog_pending
 {
 
-inline constexpr u32 kCapacity = 128;
+// Hosted KVM profiles can emit bursts just under 190 records before the 1 Hz
+// consumer gets its first turn. 256 keeps that measured peak below 75% while
+// retaining a small, fixed (~100 KiB) BSS footprint.
+inline constexpr u32 kCapacity = 256;
 inline constexpr u32 kLineBytes = 384;
 inline constexpr u32 kClaimAttempts = 8;
 static_assert((kCapacity & (kCapacity - 1U)) == 0U, "klog pending capacity must be a power of two");
