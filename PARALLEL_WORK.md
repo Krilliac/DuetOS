@@ -899,10 +899,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-09-20T23:29:34Z
 - **Status**: COMPLETED @ 2026-09-20T23:58:56Z
 
-### [ACTIVE] codex-duetos-klog-smp
+### [DONE] codex-duetos-klog-smp
 - **Session**: `DESKTOP-950K3EI-38931`
 - **Branch**: `codex/campaign-integration-20260920`
 - **Files**: `kernel/log/klog.cpp,kernel/log/klog_persist.cpp,kernel/log/klog_persist.h,kernel/log/klog_pending_ring.h`
 - **Description**: Make line delivery and FAT32 persistence SMP-safe with a bounded MPMC handoff
 - **Claimed**: 2026-09-21T00:02:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-09-22T02:28:06Z
