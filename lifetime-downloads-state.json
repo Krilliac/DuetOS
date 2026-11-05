@@ -62,7 +62,7 @@
       "release_tag": "latest-debug"
     },
     "580379323": {
-      "count": 7,
+      "count": 8,
       "name": "duetos-release.iso",
       "release_tag": "latest-release"
     },
@@ -78,8 +78,8 @@
     }
   },
   "delta_this_run": 1,
-  "lifetime_total": 51,
-  "live_assets_total": 24,
+  "lifetime_total": 52,
+  "live_assets_total": 25,
   "repo": "Krilliac/DuetOS",
-  "snapshot_at": "2026-11-05T15:38:43+00:00"
+  "snapshot_at": "2026-11-05T21:37:21+00:00"
 }
